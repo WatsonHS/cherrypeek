@@ -1,0 +1,20 @@
+[package]
+name = "commitscope-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "commitscope-daemon"
+path = "src/main.rs"
+
+[dependencies]
+commitscope-core = { path = "../core" }
+serde_json.workspace = true
+
+[dev-dependencies]
+gix = { version = "=0.90.0", default-features = false, features = ["sha1", "sha256", "max-performance"] }
+libc = "=0.2.191"
+serde.workspace = true
+sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }

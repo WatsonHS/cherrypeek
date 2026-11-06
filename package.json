@@ -1,0 +1,39 @@
+{
+  "name": "commitscope",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.28.1",
+  "engines": { "node": "26.0.0" },
+  "scripts": {
+    "protocol:generate": "node scripts/protocol-generate.mjs",
+    "protocol:check": "node scripts/protocol-check.mjs",
+    "typecheck": "tsc -b apps/desktop/tsconfig.json packages/protocol/tsconfig.json",
+    "build": "node scripts/build.mjs",
+    "build:release": "node scripts/build.mjs --release",
+    "dev": "node scripts/launch.mjs --build",
+    "start": "node scripts/launch.mjs",
+    "test:smoke": "node tests/smoke/electron-smoke.mjs",
+    "test:protocol": "node scripts/test-protocol.mjs",
+    "fixtures:generate": "node scripts/generate-fixtures.mjs",
+    "test:repository": "node scripts/test-repository.mjs --ui-smoke",
+    "benchmark:first-screen": "node scripts/benchmark-first-screen.mjs",
+    "build:reader-bench": "cargo build --release --locked -p commitscope-daemon --example reader_bench",
+    "benchmark:readers": "node scripts/benchmark-readers.mjs",
+    "test:readers": "node scripts/test-readers.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "ajv": "8.20.0",
+    "electron": "45.2.3",
+    "esbuild": "0.28.2",
+    "json-schema-to-typescript": "16.0.0",
+    "playwright": "1.65.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["electron", "esbuild"]
+  }
+}

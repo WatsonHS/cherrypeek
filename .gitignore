@@ -1,0 +1,20 @@
+.DS_Store
+node_modules/
+target/
+dist/
+out/
+release/
+coverage/
+.vite/
+*.log
+.env
+.env.*
+!.env.example
+work/
+benchmarks/local-results/
+tests/fixtures/generated/
+# JavaScript workspace and local runtime evidence
+output/playwright/
+output/fixtures/
+output/benchmarks/
+*.tsbuildinfo

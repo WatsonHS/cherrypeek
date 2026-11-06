@@ -1,0 +1,474 @@
+import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
+import type { Readable, Writable } from "node:stream";
+import { Ajv } from "ajv";
+import coreReadySchema from "../../../../packages/protocol/schema/core-ready.schema.json" with { type: "json" };
+import clientMessageSchema from "../../../../packages/protocol/schema/client-message.schema.json" with { type: "json" };
+import serverMessageSchema from "../../../../packages/protocol/schema/server-message.schema.json" with { type: "json" };
+import type { CoreReady } from "../../../../packages/protocol/src/core-ready.js";
+import type {
+  ClientMessage,
+} from "../../../../packages/protocol/src/generated/client-message.js";
+import type { ServerMessage } from "../../../../packages/protocol/src/generated/server-message.js";
+import type {
+  ClientRequestMessage,
+  ProtocolErrorCode,
+  RequestContext,
+  ServerErrorMessage,
+  ServerResponseMessage,
+} from "../../../../packages/protocol/src/messages.js";
+import { JsonLineFramer } from "./json-line-framer.js";
+import { ViewContextGate } from "./view-context-gate.js";
+
+const PROTOCOL_VERSION = 1;
+const DEFAULT_FRAME_BYTES = 1024 * 1024;
+const DEFAULT_QUEUE_FRAMES = 16;
+const DEFAULT_QUEUE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_PENDING = 2;
+const DEFAULT_TIMEOUT_MS = 5000;
+
+const ajv = new Ajv({ allErrors: true, strict: false, logger: false });
+const validateClient = ajv.compile<ClientMessage>(clientMessageSchema);
+const validateServer = ajv.compile<ServerMessage>(serverMessageSchema);
+const validateCoreReady = ajv.compile<CoreReady>(coreReadySchema);
+
+export class ProtocolClientError extends Error {
+  constructor(
+    readonly code: ProtocolErrorCode,
+    message: string,
+    readonly retryable = false,
+  ) {
+    super(message);
+    this.name = "ProtocolClientError";
+  }
+}
+
+export interface ProtocolTransportOptions {
+  maxFrameBytes?: number;
+  maxQueuedFrames?: number;
+  maxQueuedBytes?: number;
+  maxPendingRequests?: number;
+  contextGate?: ViewContextGate;
+  onFatal?: (error: ProtocolClientError) => void;
+}
+
+export interface RequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  onChunk?: (chunk: ServerResponseMessage) => void;
+}
+
+export type RequestCompletion = Pick<ServerResponseMessage, "coverage" | "nextCursor">;
+
+interface PendingRequest {
+  context: RequestContext;
+  nextSequence: number;
+  resolve: (completion: RequestCompletion) => void;
+  reject: (error: ProtocolClientError) => void;
+  onChunk?: (chunk: ServerResponseMessage) => void;
+  timer: NodeJS.Timeout;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+  unregisterContext?: () => void;
+}
+
+interface WriteItem {
+  frame: Buffer;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+export class ProtocolTransport {
+  private readonly framer: JsonLineFramer;
+  private readonly pending = new Map<string, PendingRequest>();
+  private readonly writeQueue: WriteItem[] = [];
+  private readonly maxFrameBytes: number;
+  private readonly maxQueuedFrames: number;
+  private readonly maxQueuedBytes: number;
+  private readonly maxPendingRequests: number;
+  private readonly contextGate: ViewContextGate;
+  private readonly onFatal?: (error: ProtocolClientError) => void;
+  private queuedBytes = 0;
+  private pumpingWrites = false;
+  private activeWrite?: WriteItem;
+  private requestCounter = 0;
+  private handshakeResolve?: (ready: CoreReady) => void;
+  private handshakeReject?: (error: ProtocolClientError) => void;
+  private handshakeSeen = false;
+  private handshakeComplete = false;
+  private closed = false;
+  private terminalError?: ProtocolClientError;
+  private cancelDrainWait?: (error: ProtocolClientError) => void;
+
+  constructor(
+    private readonly stdout: Readable,
+    private readonly stdin: Writable,
+    options: ProtocolTransportOptions = {},
+  ) {
+    this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_FRAME_BYTES;
+    this.maxQueuedFrames = options.maxQueuedFrames ?? DEFAULT_QUEUE_FRAMES;
+    this.maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_QUEUE_BYTES;
+    this.maxPendingRequests = options.maxPendingRequests ?? DEFAULT_PENDING;
+    this.contextGate = options.contextGate ?? new ViewContextGate();
+    this.onFatal = options.onFatal;
+    this.framer = new JsonLineFramer(
+      stdout,
+      line => this.receiveLine(line),
+      error => this.fail(new ProtocolClientError("PROTOCOL_ERROR", error.message)),
+      this.maxFrameBytes,
+      () => this.fail(new ProtocolClientError("CORE_EXITED", "核心 stdout 提前关闭", true)),
+    );
+    stdin.on("error", error => this.fail(new ProtocolClientError("CORE_EXITED", `核心 stdin 写入失败：${error.message}`, true)));
+    stdin.on("close", () => this.fail(new ProtocolClientError("CORE_EXITED", "核心 stdin 已关闭", true)));
+  }
+
+  async handshake(expectedPid: number, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CoreReady> {
+    if (this.closed) throw new ProtocolClientError("CORE_EXITED", "核心连接已关闭");
+    if (this.handshakeResolve || this.handshakeComplete) throw new ProtocolClientError("PROTOCOL_ERROR", "握手只能执行一次");
+    let timer: NodeJS.Timeout | undefined;
+    const response = new Promise<CoreReady>((resolve, reject) => {
+      this.handshakeResolve = resolve;
+      this.handshakeReject = reject;
+      timer = setTimeout(() => this.fail(new ProtocolClientError("TIMEOUT", `核心握手超时（${timeoutMs} ms）`, true)), timeoutMs);
+    });
+    const responseHandled = response.then(
+      ready => ({ ready }),
+      error => ({ error: asProtocolError(error, "PROTOCOL_ERROR") }),
+    );
+    const hello = { type: "hello", protocolVersion: PROTOCOL_VERSION } as const;
+    try {
+      const [writeResult, responseResult] = await Promise.all([this.enqueue(hello), responseHandled]);
+      void writeResult;
+      if ("error" in responseResult) throw responseResult.error;
+      if (this.closed) throw this.terminalError ?? new ProtocolClientError("CORE_EXITED", "核心连接已关闭");
+      const ready = responseResult.ready;
+      if (ready.pid !== expectedPid) {
+        const error = new ProtocolClientError("PROTOCOL_ERROR", `核心 PID 不匹配：声明 ${ready.pid}，实际 ${expectedPid}`);
+        this.fail(error);
+        throw error;
+      }
+      this.handshakeComplete = true;
+      return ready;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.handshakeResolve = undefined;
+      this.handshakeReject = undefined;
+    }
+  }
+
+  request(
+    method: ClientRequestMessage["method"],
+    params: ClientRequestMessage["params"],
+    context: RequestContext,
+    options: RequestOptions = {},
+  ): Promise<RequestCompletion> {
+    if (!this.handshakeComplete || this.closed) {
+      return Promise.reject(new ProtocolClientError("CORE_EXITED", "核心尚未就绪"));
+    }
+    if (!validRequestParams(method, params)) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "请求方法或参数无效"));
+    }
+    if (context.repoId !== null || context.generation !== null) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "getRuntimeInfo 不接受仓库上下文"));
+    }
+    if (this.pending.size >= this.maxPendingRequests) {
+      return Promise.reject(new ProtocolClientError("BUSY", "交互请求已满", true));
+    }
+    if (options.signal?.aborted) {
+      return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
+    }
+
+    const requestId = this.nextRequestId();
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "请求超时必须为正数"));
+    }
+
+    return new Promise<RequestCompletion>((resolve, reject) => {
+      const pending: PendingRequest = {
+        context: { ...context },
+        nextSequence: 0,
+        resolve,
+        reject,
+        onChunk: options.onChunk,
+        timer: setTimeout(() => this.cancel(requestId, "TIMEOUT", `请求超时（${timeoutMs} ms）`), timeoutMs),
+        signal: options.signal,
+      };
+      this.pending.set(requestId, pending);
+      if (options.signal) {
+        pending.abortHandler = () => this.cancel(requestId, "CANCELLED", abortMessage(options.signal!));
+        options.signal.addEventListener("abort", pending.abortHandler, { once: true });
+      }
+      pending.unregisterContext = this.contextGate.register(requestId, context, id => {
+        this.cancel(id, "STALE_CONTEXT", "请求所属的浏览上下文已切换");
+      });
+      if (!this.pending.has(requestId)) return;
+
+      const message: ClientRequestMessage = {
+        type: "request",
+        requestId,
+        method,
+        repoId: context.repoId,
+        generation: context.generation,
+        params,
+      };
+      void this.enqueue(message).catch(error => {
+        this.finishReject(requestId, asProtocolError(error, "BUSY"));
+      });
+    });
+  }
+
+  close(error = new ProtocolClientError("CORE_EXITED", "核心已退出", true)): void {
+    if (this.closed) return;
+    this.fail(error);
+  }
+
+  private receiveLine(line: string): void {
+    let value: unknown;
+    try { value = JSON.parse(line); }
+    catch (error) {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `JSON 解析失败：${errorMessage(error)}`));
+      return;
+    }
+
+    if (isRecord(value) && value.type === "hello" && isRecord(value.core) &&
+      Number.isInteger(value.core.protocolVersion) && value.core.protocolVersion !== PROTOCOL_VERSION) {
+      this.fail(new ProtocolClientError("PROTOCOL_MISMATCH", `协议版本不兼容：核心 ${value.core.protocolVersion}，客户端 ${PROTOCOL_VERSION}`));
+      return;
+    }
+    if (!validateServer(value)) {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `服务端消息结构无效：${ajv.errorsText(validateServer.errors)}`));
+      return;
+    }
+    const message = value;
+    if (!this.handshakeComplete) {
+      if (message.type === "error" && message.requestId === null) {
+        this.fail(fromServerError(message));
+        return;
+      }
+      if (message.type !== "hello" || !this.handshakeResolve) {
+        this.fail(new ProtocolClientError("PROTOCOL_ERROR", "握手期间收到意外消息"));
+        return;
+      }
+      if (this.handshakeSeen) {
+        this.fail(new ProtocolClientError("PROTOCOL_ERROR", "核心重复发送 hello"));
+        return;
+      }
+      if (!validateCoreReady(message.core)) {
+        this.fail(new ProtocolClientError("PROTOCOL_ERROR", `CoreReady 结构无效：${ajv.errorsText(validateCoreReady.errors)}`));
+        return;
+      }
+      if (message.core.protocolVersion !== PROTOCOL_VERSION) {
+        this.fail(new ProtocolClientError("PROTOCOL_MISMATCH", `协议版本不兼容：核心 ${message.core.protocolVersion}，客户端 ${PROTOCOL_VERSION}`));
+        return;
+      }
+      this.handshakeSeen = true;
+      this.handshakeResolve(message.core);
+      return;
+    }
+
+    if (message.type === "hello") {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", "核心重复发送 hello"));
+      return;
+    }
+    if (message.type === "error") {
+      this.receiveError(message);
+      return;
+    }
+    this.receiveResponse(message);
+  }
+
+  private receiveResponse(message: ServerResponseMessage): void {
+    const pending = this.pending.get(message.requestId);
+    if (!pending) return;
+    if (!sameContext(pending.context, normalizeContext(message))) {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `响应上下文与请求 ${message.requestId} 不匹配`));
+      return;
+    }
+    if (message.sequence !== pending.nextSequence) {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `请求 ${message.requestId} 分块序号错误：预期 ${pending.nextSequence}，收到 ${message.sequence}`));
+      return;
+    }
+    if (!this.contextGate.accepts(message.requestId, pending.context)) {
+      this.cancel(message.requestId, "STALE_CONTEXT", "请求所属的浏览上下文已切换");
+      return;
+    }
+    pending.nextSequence += 1;
+    try { pending.onChunk?.(message); }
+    catch (error) {
+      this.cancel(message.requestId, "PROTOCOL_ERROR", `分块回调失败：${errorMessage(error)}`);
+      return;
+    }
+    if (message.done) {
+      this.finishResolve(message.requestId, { coverage: message.coverage, nextCursor: message.nextCursor ?? null });
+    }
+  }
+
+  private receiveError(message: ServerErrorMessage): void {
+    if (message.requestId === null) {
+      this.fail(fromServerError(message));
+      return;
+    }
+    const pending = this.pending.get(message.requestId);
+    if (!pending) return;
+    if (!sameContext(pending.context, normalizeContext(message))) {
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `错误上下文与请求 ${message.requestId} 不匹配`));
+      return;
+    }
+    this.finishReject(message.requestId, fromServerError(message));
+  }
+
+  private cancel(requestId: string, code: ProtocolErrorCode, message: string): void {
+    if (!this.pending.has(requestId)) return;
+    this.finishReject(requestId, new ProtocolClientError(code, message, code === "TIMEOUT" || code === "CANCELLED"));
+    const cancelMessage = { type: "cancel", requestId } as const;
+    void this.enqueue(cancelMessage).catch(error => this.fail(asProtocolError(error, "CORE_EXITED")));
+  }
+
+  private finishResolve(requestId: string, completion: RequestCompletion): void {
+    const pending = this.takePending(requestId);
+    pending?.resolve(completion);
+  }
+
+  private finishReject(requestId: string, error: ProtocolClientError): void {
+    const pending = this.takePending(requestId);
+    pending?.reject(error);
+  }
+
+  private takePending(requestId: string): PendingRequest | undefined {
+    const pending = this.pending.get(requestId);
+    if (!pending) return undefined;
+    this.pending.delete(requestId);
+    clearTimeout(pending.timer);
+    if (pending.abortHandler && pending.signal) pending.signal.removeEventListener("abort", pending.abortHandler);
+    pending.unregisterContext?.();
+    return pending;
+  }
+
+  private enqueue(message: ClientMessage): Promise<void> {
+    if (this.closed) return Promise.reject(new ProtocolClientError("CORE_EXITED", "核心连接已关闭", true));
+    if (!validateClient(message)) {
+      return Promise.reject(new ProtocolClientError("PROTOCOL_ERROR", `客户端消息结构无效：${ajv.errorsText(validateClient.errors)}`));
+    }
+    const frame = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
+    if (frame.length - 1 > this.maxFrameBytes) {
+      return Promise.reject(new ProtocolClientError("PROTOCOL_ERROR", "客户端消息超过 1 MiB 帧限制"));
+    }
+    if (this.writeQueue.length + (this.pumpingWrites ? 1 : 0) >= this.maxQueuedFrames || this.queuedBytes + frame.length > this.maxQueuedBytes) {
+      return Promise.reject(new ProtocolClientError("BUSY", "核心写入队列已满", true));
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.writeQueue.push({ frame, resolve, reject });
+      this.queuedBytes += frame.length;
+      void this.pumpWrites();
+    });
+  }
+
+  private async pumpWrites(): Promise<void> {
+    if (this.pumpingWrites || this.closed) return;
+    this.pumpingWrites = true;
+    try {
+      while (!this.closed && this.writeQueue.length > 0) {
+        const item = this.writeQueue.shift()!;
+        this.activeWrite = item;
+        try {
+          let canContinue = true;
+          const writeCallback = new Promise<void>((resolve, reject) => {
+            canContinue = this.stdin.write(item.frame, error => error ? reject(error) : resolve());
+          });
+          const drain = canContinue ? Promise.resolve() : this.waitForDrain();
+          await Promise.all([writeCallback, drain]);
+          item.resolve();
+        } catch (error) {
+          item.reject(error instanceof Error ? error : new Error(String(error)));
+          this.fail(new ProtocolClientError("CORE_EXITED", `核心 stdin 写入失败：${errorMessage(error)}`, true));
+        } finally {
+          this.queuedBytes -= item.frame.length;
+          this.activeWrite = undefined;
+        }
+      }
+    } finally {
+      this.pumpingWrites = false;
+      if (!this.closed && this.writeQueue.length > 0) void this.pumpWrites();
+    }
+  }
+
+  private nextRequestId(): string {
+    this.requestCounter += 1;
+    return `cs-${process.pid}-${this.requestCounter}-${randomUUID()}`;
+  }
+
+  private waitForDrain(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const fail = (error: Error) => { cleanup(); reject(error); };
+      const cleanup = () => {
+        this.stdin.off("drain", onDrain);
+        this.stdin.off("error", onError);
+        this.stdin.off("close", onClose);
+        if (this.cancelDrainWait === onFatal) this.cancelDrainWait = undefined;
+      };
+      const onDrain = () => { cleanup(); resolve(); };
+      const onError = (error: Error) => { cleanup(); reject(error); };
+      const onClose = () => { cleanup(); reject(new Error("Core stdin closed before drain")); };
+      const onFatal = (error: ProtocolClientError) => fail(error);
+      this.stdin.once("drain", onDrain);
+      this.stdin.once("error", onError);
+      this.stdin.once("close", onClose);
+      this.cancelDrainWait = onFatal;
+      if (this.closed) onFatal(this.terminalError ?? new ProtocolClientError("CORE_EXITED", "核心连接已关闭"));
+    });
+  }
+
+  private fail(error: ProtocolClientError): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.terminalError = error;
+    this.framer.close();
+    this.cancelDrainWait?.(error);
+    this.handshakeReject?.(error);
+    for (const requestId of this.pending.keys()) this.finishReject(requestId, error);
+    this.activeWrite?.reject(error);
+    for (const item of this.writeQueue.splice(0)) {
+      this.queuedBytes -= item.frame.length;
+      item.reject(error);
+    }
+    this.onFatal?.(error);
+  }
+}
+
+function fromServerError(message: ServerErrorMessage): ProtocolClientError {
+  return new ProtocolClientError(message.code, message.message, message.retryable);
+}
+
+function normalizeContext(message: Pick<ServerResponseMessage, "repoId" | "generation"> | ServerErrorMessage): RequestContext {
+  return { repoId: message.repoId ?? null, generation: message.generation ?? null };
+}
+
+function sameContext(left: RequestContext, right: RequestContext): boolean {
+  return left.repoId === right.repoId && left.generation === right.generation;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function abortMessage(signal: AbortSignal): string {
+  return signal.reason instanceof Error ? signal.reason.message : "请求已取消";
+}
+
+function validRequestParams(method: string, params: unknown): boolean {
+  if (method === "getRuntimeInfo") {
+    return isRecord(params) && Object.keys(params).length === 0;
+  }
+  if (method === "readRepositoryPreview" && isRecord(params) && typeof params.path === "string") {
+    return params.path.length > 0 && Buffer.byteLength(params.path, "utf8") <= 16 * 1024 &&
+      !params.path.includes("\0") && isAbsolute(params.path);
+  }
+  return false;
+}
+
+function asProtocolError(error: unknown, fallback: ProtocolErrorCode): ProtocolClientError {
+  return error instanceof ProtocolClientError ? error : new ProtocolClientError(fallback, errorMessage(error), true);
+}
+
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

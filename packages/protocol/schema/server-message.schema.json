@@ -1,0 +1,503 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Capability": {
+      "enum": [
+        "getRuntimeInfo",
+        "readRepositoryPreview"
+      ],
+      "type": "string"
+    },
+    "CommitIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email",
+        "timestamp",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "CommitSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/CommitIdentity"
+        },
+        "committer": {
+          "$ref": "#/definitions/CommitIdentity"
+        },
+        "oid": {
+          "type": "string"
+        },
+        "parents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "summaryTruncated": {
+          "type": "boolean"
+        },
+        "textLossy": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oid",
+        "parents",
+        "summary",
+        "summaryTruncated",
+        "author",
+        "committer",
+        "textLossy"
+      ],
+      "type": "object"
+    },
+    "CoreReady": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/definitions/Capability"
+          },
+          "type": "array"
+        },
+        "coreVersion": {
+          "type": "string"
+        },
+        "git": {
+          "$ref": "#/definitions/GitInfo"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocolVersion": {
+          "format": "uint32",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "coreVersion",
+        "pid",
+        "git",
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "Coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "processed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "processed"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "PROTOCOL_MISMATCH",
+        "PROTOCOL_ERROR",
+        "INVALID_REQUEST",
+        "UNKNOWN_METHOD",
+        "BUSY",
+        "CANCELLED",
+        "TIMEOUT",
+        "CORE_EXITED",
+        "STALE_CONTEXT",
+        "GIT_UNAVAILABLE",
+        "NOT_A_REPOSITORY",
+        "REPOSITORY_UNAVAILABLE",
+        "MISSING_OBJECT",
+        "UNSUPPORTED_REPOSITORY",
+        "RESOURCE_LIMIT",
+        "GIT_ERROR"
+      ],
+      "type": "string"
+    },
+    "GitInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "error": {
+          "maxLength": 4096,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "maxLength": 4096,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "version",
+        "error"
+      ],
+      "type": "object"
+    },
+    "RefInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/RefKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "oid": {
+          "type": "string"
+        },
+        "peeledOid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbolicTarget": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "oid",
+        "peeledOid",
+        "symbolicTarget"
+      ],
+      "type": "object"
+    },
+    "RefKind": {
+      "enum": [
+        "localBranch",
+        "remoteBranch",
+        "tag"
+      ],
+      "type": "string"
+    },
+    "RepositoryInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "commonDir": {
+          "type": "string"
+        },
+        "gitDir": {
+          "type": "string"
+        },
+        "headOid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headReference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isBare": {
+          "type": "boolean"
+        },
+        "isShallow": {
+          "type": "boolean"
+        },
+        "objectFormat": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "worktreePath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "gitDir",
+        "commonDir",
+        "worktreePath",
+        "isBare",
+        "isShallow",
+        "objectFormat",
+        "headOid",
+        "headReference"
+      ],
+      "type": "object"
+    },
+    "ResponseData": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coreVersion": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "section": {
+              "const": "core",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "coreVersion",
+            "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "git": {
+              "$ref": "#/definitions/GitInfo"
+            },
+            "section": {
+              "const": "git",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "git"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "refs": {
+              "items": {
+                "$ref": "#/definitions/RefInfo"
+              },
+              "type": "array"
+            },
+            "refsTruncated": {
+              "type": "boolean"
+            },
+            "repository": {
+              "$ref": "#/definitions/RepositoryInfo"
+            },
+            "section": {
+              "const": "repository",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "repository",
+            "refs",
+            "refsTruncated"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commits": {
+              "items": {
+                "$ref": "#/definitions/CommitSummary"
+              },
+              "type": "array"
+            },
+            "hasMore": {
+              "type": "boolean"
+            },
+            "section": {
+              "const": "commits",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "commits",
+            "hasMore"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "core": {
+          "$ref": "#/definitions/CoreReady"
+        },
+        "type": {
+          "const": "hello",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "core"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/definitions/Coverage"
+        },
+        "data": {
+          "$ref": "#/definitions/ResponseData"
+        },
+        "done": {
+          "type": "boolean"
+        },
+        "generation": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repoId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sequence": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "response",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "repoId",
+        "generation",
+        "sequence",
+        "done",
+        "coverage",
+        "nextCursor",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "generation": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "repoId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "type": {
+          "const": "error",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "repoId",
+        "generation",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ServerMessage"
+}

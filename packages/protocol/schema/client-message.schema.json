@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EmptyParams": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ReadRepositoryPreviewParams": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "RequestParams": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/ReadRepositoryPreviewParams"
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "protocolVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "hello",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "protocolVersion"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/RequestParams"
+        },
+        "repoId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "request",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId",
+        "method",
+        "repoId",
+        "generation",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "cancel",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "requestId"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ClientMessage"
+}

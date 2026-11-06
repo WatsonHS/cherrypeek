@@ -1,0 +1,70 @@
+:root {
+  color: #202124;
+  background: #f6f7f8;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: light dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1440px; margin: 0 auto; padding: 22px 28px 30px; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 2px; font-size: 21px; font-weight: 650; }
+header p, .muted, .preview-heading p { margin-bottom: 0; color: #6a7078; }
+.core-status { display: flex; align-items: center; gap: 8px; color: #555c64; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #92979d; }
+.core-status[data-state="ready"] .status-dot { background: #31855c; }
+.core-status[data-state="error"] .status-dot { background: #ba3939; }
+.repository-open { display: flex; align-items: center; gap: 8px; padding: 12px; border: 1px solid #d9dde2; background: #fff; }
+.repository-open label { white-space: nowrap; font-weight: 600; }
+input { flex: 1; min-width: 0; height: 34px; padding: 6px 9px; border: 1px solid #c9cdd2; border-radius: 4px; font: inherit; }
+button { height: 34px; padding: 0 12px; border: 1px solid #bfc4ca; border-radius: 4px; background: #f8f9fa; color: inherit; font: inherit; cursor: pointer; }
+button:hover:not(:disabled) { background: #eceff1; }
+button:disabled { opacity: .55; cursor: default; }
+button.quiet { background: transparent; }
+.preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 1px 12px; }
+.preview-heading h2 { overflow: hidden; margin: 0 0 3px; font-size: 16px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.preview-heading > div:first-child { min-width: 0; }
+.preview-state { flex: none; color: #555c64; }
+.preview-state[data-state="error"] { color: #a52828; }
+.error-message { padding: 9px 11px; border-left: 3px solid #b53a3a; background: #fff2f1; color: #8c2020; }
+.refs, .commit-list, .commit-detail { min-width: 0; border: 1px solid #d9dde2; background: #fff; }
+.refs { margin-bottom: 12px; padding: 12px; }
+h3 { margin-bottom: 10px; font-size: 13px; font-weight: 650; }
+.refs ul { display: flex; flex-wrap: wrap; gap: 6px 16px; max-height: 86px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.refs li { display: flex; gap: 6px; min-width: 0; align-items: center; }
+.refs li span { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.refs code { color: #6b7077; }
+.content-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(310px, .9fr); gap: 12px; min-height: 330px; }
+.commit-list, .commit-detail { padding: 12px; }
+.table-scroll { max-height: 440px; overflow: auto; }
+table { width: 100%; border-collapse: collapse; text-align: left; }
+thead { position: sticky; top: 0; z-index: 1; background: #f4f5f6; color: #60666e; }
+th { font-weight: 550; }
+th, td { padding: 8px 7px; border-bottom: 1px solid #e6e8eb; vertical-align: top; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #f6f8fa; }
+tbody tr[aria-selected="true"] { background: #eaf1f8; }
+td:first-child { min-width: 180px; }
+th:nth-child(2), td:nth-child(2) { min-width: 112px; white-space: nowrap; }
+th:nth-child(3), td:nth-child(3) { min-width: 145px; white-space: nowrap; }
+.summary { display: block; overflow-wrap: anywhere; }
+td code { display: block; margin-top: 3px; color: #737981; font-size: 11px; }
+.empty { color: #6a7078; }
+.details { overflow-wrap: anywhere; }
+.detail-summary { margin-bottom: 14px; font-size: 15px; font-weight: 600; }
+.detail-row { padding: 8px 0; border-top: 1px solid #e6e8eb; }
+.detail-row dt { margin-bottom: 3px; color: #686e76; font-size: 12px; }
+.detail-row dd { margin: 0; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #eceef0; background: #181a1d; }
+  header p, .muted, .preview-heading p, .core-status, .preview-state { color: #aaafb5; }
+  .repository-open, .refs, .commit-list, .commit-detail { background: #222529; border-color: #3c4147; }
+  input, button { background: #1c1f22; border-color: #4c5158; color: inherit; }
+  button:hover:not(:disabled), tbody tr:hover { background: #2c3035; }
+  thead { background: #2a2e33; color: #b5bbc2; }
+  th, td, .detail-row { border-color: #393e44; }
+  tbody tr[aria-selected="true"] { background: #293847; }
+  .error-message { color: #ffb9b4; background: #3a2423; }
+}

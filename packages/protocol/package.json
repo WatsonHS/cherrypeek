@@ -1,0 +1,7 @@
+{
+  "name": "@commitscope/protocol",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { "./core-ready": "./src/core-ready.ts", "./core-status": "./src/core-status.ts" }
+}
