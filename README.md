@@ -21,6 +21,7 @@
 | [产品范围](docs/PRODUCT.md) | 用户需求、主界面、搜索与统计口径、第一版边界 |
 | [界面设计稿](https://claude.ai/artifact/LssQVaEeGiqB1WdCRn2jDa) | 已确认的「v3 · B 细化」画板（示例数据；默认仅所有者可见；以产品范围的文字为准） |
 | [界面规范](docs/DESIGN.md) | 颜色、字体、间距、组件与状态的实现规范（以此为准） |
+| [交给 Agent 模板](docs/HANDOFF.md) | 各场景 prompt 的文案、变量与防注入规则 |
 | [技术架构](docs/ARCHITECTURE.md) | Electron / Rust 分工、通信、Git 读取、分页、索引与刷新 |
 | [路线图](docs/ROADMAP.md) | 从技术验证到可日用版本的阶段和验收关卡 |
 | [实施计划](docs/PLAN.md) | 可直接开始执行的任务、依赖、交付物和完成条件 |
