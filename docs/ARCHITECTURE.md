@@ -1,6 +1,6 @@
 # 技术架构
 
-日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)；下述完整仓库会话、分页、事件、索引与缓存仍属设计，不代表发布性能已验收。
+日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1；下述完整仓库会话、分页、事件、索引与缓存仍属设计，不代表发布性能已验收。
 
 ## 技术路线
 
@@ -9,14 +9,14 @@
 | 桌面外壳 | Electron | 窗口、菜单、目录选择、进程生命周期、系统集成 |
 | 界面 | React + TypeScript；Vite 构建 | 视图、筛选、选中状态、快捷键、虚拟列表与可见分支线绘制 |
 | 核心 | Rust 常驻子进程 | 仓库发现、查询调度、Git 读取、图布局、缓存、索引、活动统计 |
-| 初始 Git 适配器 | 系统 Git CLI，由 Rust 管理 | 批量和流式读取；不为每行提交启动一次进程 |
-| 读取优化候选 | gix | M0 验证对象读取 / 历史遍历收益；不将其作为启动产品的前置条件 |
+| Git 主读取路线 | 系统 Git CLI，由 Rust 管理 | M0 实测后确认；批量和流式读取，不为每行提交启动一次进程 |
+| 局部读取实验 | gix 0.90.0，仅 dev-dependency | 已比较对象读取 / 历史遍历；本次不进入生产路径，后续按瓶颈证据再评估 |
 | 存储 | SQLite，按需增加 FTS5 | 提交元数据、查询缓存、索引覆盖状态；不保存全库 patch |
 | Diff | 按需加载的只读文本视图 | 先统一 diff；需要双栏时再验证 Monaco 的增量成本 |
 
 Electron 已确定。Rust 保留为独立进程，便于调试、取消任务和分别测量资源；原生 Node 模块只在 IPC 成为实测瓶颈时评估。GitComet 不作为依赖、代码来源或 fork 上游。
 
-Git CLI 提供批量对象读取，gix 提供 Rust Git 能力；具体采用哪条读取路径由同一 fixture 的正确性与性能比较决定。[Git cat-file 文档](https://git-scm.com/docs/git-cat-file)、[gitoxide 项目](https://github.com/GitoxideLabs/gitoxide)。依赖版本和工具链在 M0 固定，不在规划阶段臆定“最新版本”。
+Git CLI 提供批量对象读取；M0 的同 fixture 比较支持继续使用 CLI，gix 在已知 OID 的对象读取上有局部收益，但完整历史页更慢，实验 topo 路径还有浅克隆缺口，详见 ADR 0001。[Git cat-file 文档](https://git-scm.com/docs/git-cat-file)、[gitoxide 项目](https://github.com/GitoxideLabs/gitoxide)。依赖版本和工具链在 M0 固定，不在规划阶段臆定“最新版本”。
 
 ## 数据流
 
@@ -25,7 +25,7 @@ flowchart LR
     UI[React renderer<br/>可见页面与视图状态] <--> Bridge[Preload<br/>类型化业务 API]
     Bridge <--> Main[Electron main<br/>校验与进程管理]
     Main <-->|stdio 消息| Daemon[Rust daemon<br/>任务调度与查询服务]
-    Daemon --> Git[Git CLI / 经验证的 gix]
+    Daemon --> Git[系统 Git CLI]
     Git --> Repo[(本地 Git 仓库)]
     Daemon <--> DB[(应用目录 SQLite)]
     Watch[文件事件与引用复核] --> Daemon
@@ -76,7 +76,7 @@ P0-03 的仓库预览契约见[代码级计划](implementation/p0-03-repository-
 
 首屏只取 OID、父提交、标题、作者、时间及引用标签；完整消息、文件列表、patch、改动行数和签名信息按需读取。普通历史不等待总条数，也不等待完整索引。
 
-分页游标绑定查询、引用快照、遍历位置和图布局状态。Rust 保持有界的遍历 session，按需继续读取；不把 `--skip=N` 的反复全量遍历当最终分页方案。回滚到被淘汰的页时，可用检查点恢复或重算，并记录延迟；session 过期返回明确错误。M0 用深页测量决定检查点落盘方式，避免提前存储完整可达矩阵。
+分页游标绑定查询、引用快照、遍历位置和图布局状态。Rust 保持有界的遍历 session，按需继续读取；不把 `--skip=N` 的反复全量遍历当最终分页方案。回滚到被淘汰的页时，可用检查点恢复或重算，并记录延迟；session 过期返回明确错误。M0 已确认每页从 HEAD 重算约 0.44 秒，需优先续读已有遍历；现有数据不足以决定检查点落盘格式，待 M1 测量随机回读与淘汰成本再选择，避免提前存储完整可达矩阵。
 
 Rust 生成每行的 lane、父边与跨页连接信息；React 仅渲染可见行和少量缓冲。布局检查点记录边界上的活跃 lane；同一快照内向前 / 向后翻页不让颜色和连线无故跳动。octopus merge、长边、detached HEAD 和浅克隆边界都有 fixture。
 

@@ -1,6 +1,6 @@
 # 实施计划
 
-日期：2026-11-07。P0-01 至 P0-03 已通过本机验收；P0-03 的[代码级计划](implementation/p0-03-repository-preview.md)、[验收记录](validation/p0-03-repository-preview.md)及[首屏基线](benchmarks/p0-03-first-screen.md)已落盘。P0-04 正按[代码级计划](implementation/p0-04-reader-comparison.md)比较读取路线，M0 未完成。下面的目录和命令按各任务完成证据区分已实现与待交付，不据此提前声明后续能力。
+日期：2026-11-07。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；下一项为 P1-01 仓库会话。下面的目录和命令按各任务完成证据区分已实现与待交付，不据此提前声明后续能力。
 
 执行顺序：P0-01 → P0-02 → P0-03 → P0-04 → M1 → M2 → M3 → M4。每项交付应能独立检查；任务记录包含完成条件的证据后再勾选。
 
@@ -13,7 +13,7 @@
 - [x] **P0-01 建立最小工程。** 创建 pnpm workspace 与 Cargo workspace；准备 `apps/desktop`、`crates/core`、`crates/daemon`、`packages/protocol`，锁定 Electron / React / TypeScript / Rust 版本和依赖。完成条件：开发命令能打开 Electron 窗口并启动真实 Rust 程序；渲染层隔离、沙箱和基础 CSP 已启用。暂不做产品视觉装修。2026-11-07 本机 macOS / arm64 验收通过，见 [实现与验证证据](validation/p0-01-bootstrap.md)。
 - [x] **P0-02 打通协议和生命周期。** 实现版本握手、请求 / 响应、分块、取消、超时、stderr 日志与退出回收，区分当前浏览快照与最新已观察快照。依赖 P0-01。完成条件：测试覆盖不兼容版本、畸形 / 超长帧、取消后迟到响应、daemon 异常退出；收到新快照通知不会拒绝仍属当前浏览请求的响应，主动刷新后的旧响应则不能覆盖新视图；关闭窗口后没有残留子进程。schema 是单一类型来源。2026-11-07 本机 macOS / arm64 验收通过，见 [代码级计划](implementation/p0-02-protocol.md) 与 [验证证据](validation/p0-02-protocol.md)；快照规则当前验证门控与请求生命周期，真实仓库刷新仍在后续任务实现。
 - [x] **P0-03 建立 Git fixture 与首屏读取。** 用生成器构建小型边界仓库和 10 万提交仓库，提供固定随机种子 / 数据清单；Rust 通过系统 Git 批量读取引用与首批 200 条提交。依赖 P0-02。完成条件：字段与独立 Git 校验结果一致，先显示历史后做额外工作，记录完整进程树的启动 / 内存基线；bare、linked worktree、缺失 Git 分别有行为结论。2026-11-07 本机 macOS 验收通过；Rust 22 项、桌面协议 / 状态 18 项、仓库 7 组及 Electron smoke 通过。10 万提交首屏 10 次实测中位数 1.47 秒、p95 1.96 秒，非发布验收；见[验收记录](validation/p0-03-repository-preview.md)与[基线](benchmarks/p0-03-first-screen.md)。后续 UI 设计由 Claude 负责，本项不评价其新设计。
-- [ ] **P0-04 验证读取路线与深页成本。** 对同一数据比较 Git CLI 与 gix 的对象读取 / 历史遍历，不实现第二套完整后端。依赖 P0-03。完成条件：记录首屏、深页、取消延迟、CPU / 内存及差异；给出选用 CLI 或局部 gix 的结论，写入 `docs/decisions/0001-git-reader.md`；形成 `docs/benchmarks/m0-baseline.md`，确认 VALIDATION 的预算与参考硬件。
+- [x] **P0-04 验证读取路线与深页成本。** 对同一数据比较 Git CLI 与 gix 的对象读取 / 历史遍历，不实现第二套完整后端。依赖 P0-03。完成条件：记录首屏、深页、取消延迟、CPU / 内存及差异；给出选用 CLI 或局部 gix 的结论，写入 `docs/decisions/0001-git-reader.md`；形成 `docs/benchmarks/m0-baseline.md`，确认 VALIDATION 的预算与参考硬件。2026-11-07 完成：4 组 headless 正确性测试与正式 180 项测量通过；CLI 历史页中位 437–449 ms，gix 为 701–1126 ms。保留 CLI 进入 M1，gix 仅为实验 dev-dependency；浅克隆限制、短任务 RSS 采样缺口与首次失败预检均有记录。见[路线决策](decisions/0001-git-reader.md)与[M0 基线](benchmarks/m0-baseline.md)，UI 未改动。
 
 **M0 交付演示：** 启动 → 选择真实仓库 → 显示 200 条真实摘要 → 取消一次读取 → 退出且无残留。此时不把薄壳称作 MVP。
 

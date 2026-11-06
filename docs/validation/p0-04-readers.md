@@ -22,7 +22,7 @@
 | `pnpm test:readers --large-repository=…` | 主代理独立复跑 4 组通过，0 跳过 |
 | `node --test tests/repository/benchmark-process-tree.test.mjs` | 2 项通过，保持 macOS 短命令名与 PID 复用回归 |
 
-主代理的 headless 日志：`output/benchmarks/p0-04-headless-20261107.log`。正式测量前的源码 / 二进制 / fixture 哈希记录于 `output/benchmarks/p0-04-artifacts-before.json`；正式矩阵与结束后的复核尚在进行。
+主代理的 headless 日志：`output/benchmarks/p0-04-headless-20261107.log`。正式测量前的源码 / 二进制 / fixture 哈希记录于 `output/benchmarks/p0-04-artifacts-before.json`；正式矩阵 180/180 通过，结束后记录于 `output/benchmarks/p0-04-artifacts-after.json`：除提交前清理 Cargo.toml 末尾空行外，其余 397 项哈希不变。
 
 ## 数据与只读验证
 
@@ -44,4 +44,4 @@
 
 没有执行桌面构建、UI 测试或设计验收。未实现仓库 session、最终分页游标、元数据索引 / 搜索、图或 diff。性能结论限于本机 macOS、固定线性 pack 数据和本次有界配置；复杂 DAG 性能、百万提交、Windows、长时间运行、空闲 CPU / RSS 与安装包验收仍待后续完成。
 
-本次先提交可复核的实验工具与测试证据。P0-04 仍在进行，正式结果和路线决策将随后写入 `docs/benchmarks/m0-baseline.md` 与 `docs/decisions/0001-git-reader.md`；当前不勾选 M0 完成。
+代码与测试已提交为 `a40828f`，随后完成正式矩阵和决策。P0-04 / M0 已完成技术验证，正式结果见 [M0 基线](../benchmarks/m0-baseline.md)，生产路径继续使用 CLI，见[读取路线决策](../decisions/0001-git-reader.md)。
