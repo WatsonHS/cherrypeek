@@ -6,6 +6,8 @@ import type {
   RepositorySessionInfo,
 } from "../../../../packages/protocol/src/generated/server-message.js";
 import type {
+  HistoryPage,
+  RefreshedRepository,
   RecentRepositoriesResult,
   RepositoryViewRecorded,
   SessionPreview,
@@ -19,6 +21,7 @@ const MAX_PATH_BYTES = 16 * 1024;
 const SESSION_TIMEOUT_MS = 20_000;
 const MAX_REFS = 2_000;
 const MAX_COMMITS = 200;
+const MAX_HISTORY_PAGE = 500;
 
 type SessionResponse = Extract<ServerResponseMessage["data"], { section: "repositorySession" }>;
 type ViewRecordedResponse = Extract<ServerResponseMessage["data"], { section: "repositoryViewRecorded" }>;
@@ -26,18 +29,32 @@ type ClosedResponse = Extract<ServerResponseMessage["data"], { section: "reposit
 type RecentResponse = Extract<ServerResponseMessage["data"], { section: "recentRepositories" }>;
 type RepositoryResponse = Extract<ServerResponseMessage["data"], { section: "repository" }>;
 type CommitsResponse = Extract<ServerResponseMessage["data"], { section: "commits" }>;
+type HistoryPageResponse = Extract<ServerResponseMessage["data"], { section: "historyPage" }>;
 
 interface ActiveOpen {
   abort: AbortController;
   done: Promise<void>;
 }
 
+interface ActiveHistoryRead {
+  abort: AbortController;
+  done: Promise<HistoryPage>;
+}
+
+interface ActiveRefresh {
+  abort: AbortController;
+  done: Promise<RefreshedRepository>;
+}
+
 export class RepositorySessionController {
   private current?: RepositorySessionInfo;
   private operation = 0;
+  private pageIntent = 0;
   private lifecycleEpoch = 0;
   private disposed = false;
   private activeOpen?: ActiveOpen;
+  private activeHistoryRead?: ActiveHistoryRead;
+  private activeRefresh?: ActiveRefresh;
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -52,6 +69,14 @@ export class RepositorySessionController {
     this.requireCapability("repositorySessions");
 
     const operation = ++this.operation;
+    ++this.pageIntent;
+    this.activeHistoryRead?.abort.abort(new Error("仓库切换已取消历史读取"));
+    const refreshing = this.activeRefresh;
+    if (refreshing) {
+      refreshing.abort.abort(new Error("仓库打开请求已取代刷新"));
+      await refreshing.done.catch(() => undefined);
+      if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
+    }
     const previous = this.activeOpen;
     if (previous) {
       previous.abort.abort(new Error("仓库打开请求已被更新请求取代"));
@@ -59,6 +84,8 @@ export class RepositorySessionController {
       if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
       this.requireCapability("repositorySessions");
     }
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "仓库切换已取消历史读取", true));
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
 
     const abort = new AbortController();
     const lifecycleEpoch = this.lifecycleEpoch;
@@ -131,22 +158,94 @@ export class RepositorySessionController {
     return { repository, refs, refsTruncated, commits, hasMore };
   }
 
-  async recordView(): Promise<RepositoryViewRecorded> {
+  async recordView(expectedGeneration: unknown): Promise<RepositoryViewRecorded> {
     const session = this.requireCurrent();
+    if (typeof expectedGeneration !== "string" || expectedGeneration !== session.generation) {
+      throw new ProtocolClientError("STALE_CONTEXT", "当前显示的仓库会话已变化", true);
+    }
     const data = await this.singleSessionRequest("recordRepositoryView", {}, session);
     if (data.section !== "repositoryViewRecorded") throw invalidSessionResponse("核心未确认查看记录");
     this.ensureCurrent(session);
     return { saved: data.saved, status: data.status };
   }
 
+  async readHistoryPage(cursor: unknown, pageSize = 200): Promise<HistoryPage> {
+    const intent = ++this.pageIntent;
+    const session = this.requireHistoryCapability();
+    if (cursor !== null && (typeof cursor !== "string" || cursor.length === 0)) {
+      throw new ProtocolClientError("INVALID_REQUEST", "历史页游标无效");
+    }
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_HISTORY_PAGE) {
+      throw new ProtocolClientError("INVALID_REQUEST", `每页数量必须为 1 至 ${MAX_HISTORY_PAGE} 的整数`);
+    }
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true));
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readHistoryPageRequest(session, cursor, pageSize, abort);
+    this.activeHistoryRead = active;
+    try {
+      return await active.done;
+    } finally {
+      if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
+    }
+  }
+
+  async cancelHistoryRead(): Promise<{ cancelled: boolean }> {
+    ++this.pageIntent;
+    const active = this.activeHistoryRead;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("历史页读取已取消"));
+    await active.done.catch(() => undefined);
+    return { cancelled: true };
+  }
+
+  async refreshRepository(pageSize = 200): Promise<RefreshedRepository> {
+    if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能刷新", true);
+    const operation = ++this.operation;
+    ++this.pageIntent;
+    this.activeHistoryRead?.abort.abort(new Error("刷新已取消历史页读取"));
+    this.requireHistoryCapability();
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_HISTORY_PAGE) {
+      throw new ProtocolClientError("INVALID_REQUEST", `每页数量必须为 1 至 ${MAX_HISTORY_PAGE} 的整数`);
+    }
+    const previousRefresh = this.activeRefresh;
+    if (previousRefresh) {
+      previousRefresh.abort.abort(new Error("刷新已被更新的刷新取代"));
+      await previousRefresh.done.catch(() => undefined);
+    }
+    const session = this.requireHistoryCapability();
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "刷新已取消历史页读取", true));
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新操作取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveRefresh = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.refreshRepositoryRequest(session, pageSize, abort);
+    this.activeRefresh = active;
+    try {
+      return await active.done;
+    } finally {
+      if (this.activeRefresh === active) this.activeRefresh = undefined;
+    }
+  }
+
   async close(): Promise<{ closed: true }> {
     const operation = ++this.operation;
+    ++this.pageIntent;
+    this.activeHistoryRead?.abort.abort(new Error("仓库关闭已取消历史读取"));
+    const refreshing = this.activeRefresh;
+    if (refreshing) {
+      refreshing.abort.abort(new Error("仓库会话正在关闭"));
+      await refreshing.done.catch(() => undefined);
+    }
     const opening = this.activeOpen;
     if (opening) {
       this.activeOpen = undefined;
       opening.abort.abort(new Error("仓库会话正在关闭"));
       await opening.done.catch(() => undefined);
     }
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "仓库关闭已取消历史读取", true));
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
 
     const session = this.current;
@@ -183,7 +282,10 @@ export class RepositorySessionController {
     this.disposed = true;
     this.lifecycleEpoch += 1;
     this.operation += 1;
+    this.pageIntent += 1;
     this.activeOpen?.abort.abort(new Error("应用正在关闭"));
+    this.activeHistoryRead?.abort.abort(new Error("应用正在关闭"));
+    this.activeRefresh?.abort.abort(new Error("应用正在关闭"));
     this.activeOpen = undefined;
     this.current = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);
@@ -213,6 +315,153 @@ export class RepositorySessionController {
     this.current = sessionData.session;
     this.core.observeLatestContext(contextOf(sessionData.session));
     this.core.switchCurrentContext(contextOf(sessionData.session));
+  }
+
+  private async readHistoryPageRequest(
+    session: RepositorySessionInfo,
+    cursor: string | null,
+    pageSize: number,
+    abort: AbortController,
+  ): Promise<HistoryPage> {
+    let repository: RepositoryInfo | undefined;
+    let refs: RefInfo[] = [];
+    let refsTruncated = false;
+    let page: Omit<HistoryPage, "repository" | "refs" | "refsTruncated" | "nextCursor"> | undefined;
+    const commits: CommitSummary[] = [];
+    let metadata = "";
+    let sawRepository = false;
+    let sawTerminalPage = false;
+    const completion = await this.core.request("readHistoryPage", { cursor, pageSize }, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      drainAfterAbort: true,
+      fatalOnTimeout: true,
+      signal: abort.signal,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (sawTerminalPage) throw invalidSessionResponse("历史页终止块之后仍收到数据");
+        const data = chunk.data;
+        if (data.section === "repository") {
+          if (sawRepository || page || chunk.done) throw invalidSessionResponse("历史页仓库头位置无效");
+          if (chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) throw invalidSessionResponse("历史页仓库头 envelope 无效");
+          sawRepository = true;
+          repository = data.repository;
+          refs = data.refs.slice(0, MAX_REFS);
+          refsTruncated = data.refsTruncated || data.refs.length > MAX_REFS;
+          return;
+        }
+        if (data.section !== "historyPage") throw invalidSessionResponse(`历史页收到意外区块：${data.section}`);
+        if (!sawRepository) throw invalidSessionResponse("历史页缺少仓库头");
+        const currentMetadata = JSON.stringify({
+          cursor: data.cursor,
+          offset: data.offset,
+          pageSize: data.pageSize,
+          previousCursor: data.previousCursor,
+          hasMore: data.hasMore,
+        });
+        if (metadata && currentMetadata !== metadata) throw invalidSessionResponse("历史页分块元数据不一致");
+        metadata = currentMetadata;
+        if (data.pageSize !== pageSize || data.commits.length + commits.length > pageSize) {
+          throw invalidSessionResponse("历史页提交数量超过请求上限");
+        }
+        if ((cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
+          (cursor !== null && data.cursor !== cursor)) throw invalidSessionResponse("历史页游标与位置不一致");
+        if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
+          : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("历史页 envelope 终态无效");
+        commits.push(...data.commits);
+        page = {
+          commits,
+          offset: data.offset,
+          pageSize: data.pageSize,
+          cursor: data.cursor,
+          previousCursor: data.previousCursor,
+          hasMore: data.hasMore,
+        };
+        if (chunk.done) sawTerminalPage = true;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!repository || !sawRepository || !page || !sawTerminalPage || !completion.coverage.complete ||
+      completion.coverage.processed !== commits.length || completion.nextCursor && !page.hasMore ||
+      !completion.nextCursor && page.hasMore) {
+      throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
+    }
+    return { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };
+  }
+
+  private async refreshRepositoryRequest(
+    previous: RepositorySessionInfo,
+    pageSize: number,
+    abort: AbortController,
+  ): Promise<RefreshedRepository> {
+    let sessionData: SessionResponse | undefined;
+    let repository: RepositoryInfo | undefined;
+    let refs: RefInfo[] = [];
+    let refsTruncated = false;
+    let page: Omit<HistoryPage, "repository" | "refs" | "refsTruncated" | "nextCursor"> | undefined;
+    const commits: CommitSummary[] = [];
+    let metadata = "";
+    let sawTerminalPage = false;
+    const lifecycleEpoch = this.lifecycleEpoch;
+    const completion = await this.core.request("refreshRepository", { pageSize }, contextOf(previous), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      retainResultAfterAbort: true,
+      fatalOnTimeout: true,
+      signal: abort.signal,
+      onChunk: chunk => {
+        const data = chunk.data;
+        if (data.section === "repositorySession") {
+          if (sessionData || repository || chunk.done) throw invalidSessionResponse("刷新会话头位置无效");
+          if (chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) throw invalidSessionResponse("刷新会话头 envelope 无效");
+          sessionData = data;
+          return;
+        }
+        if (data.section === "repository") {
+          if (!sessionData || repository || chunk.done) throw invalidSessionResponse("刷新仓库头位置无效");
+          if (chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) throw invalidSessionResponse("刷新仓库头 envelope 无效");
+          repository = data.repository;
+          refs = data.refs.slice(0, MAX_REFS);
+          refsTruncated = data.refsTruncated || data.refs.length > MAX_REFS;
+          return;
+        }
+        if (data.section !== "historyPage" || !repository || sawTerminalPage) {
+          throw invalidSessionResponse("刷新收到意外或乱序区块");
+        }
+        const currentMetadata = JSON.stringify({ cursor: data.cursor, offset: data.offset, pageSize: data.pageSize,
+          previousCursor: data.previousCursor, hasMore: data.hasMore });
+        if (metadata && metadata !== currentMetadata) throw invalidSessionResponse("刷新历史页分块元数据不一致");
+        metadata = currentMetadata;
+        if (data.pageSize !== pageSize || commits.length + data.commits.length > pageSize) throw invalidSessionResponse("刷新历史页超过请求上限");
+        if (data.offset !== 0 || data.previousCursor !== null) throw invalidSessionResponse("刷新首屏位置无效");
+        if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
+          : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("刷新历史页 envelope 终态无效");
+        commits.push(...data.commits);
+        page = { commits, offset: data.offset, pageSize: data.pageSize, cursor: data.cursor,
+          previousCursor: data.previousCursor, hasMore: data.hasMore };
+        if (chunk.done) sawTerminalPage = true;
+      },
+    });
+    if (!sessionData || !repository || !page || !sawTerminalPage || !completion.coverage.complete ||
+      completion.coverage.processed !== commits.length || completion.nextCursor && !page.hasMore ||
+      !completion.nextCursor && page.hasMore) throw invalidSessionResponse("刷新响应不完整或不一致");
+    const nextSession = sessionData.session;
+    if (nextSession.repoId === previous.repoId || nextSession.generation === previous.generation ||
+      nextSession.repositoryKey !== previous.repositoryKey || nextSession.worktreeId !== previous.worktreeId ||
+      repository.path !== nextSession.repository.path) throw invalidSessionResponse("刷新返回了不匹配的新仓库会话");
+    if (this.disposed || lifecycleEpoch !== this.lifecycleEpoch || this.core.getStatus().state !== "ready") {
+      throw new ProtocolClientError("CORE_EXITED", "核心已关闭，忽略迟到的刷新会话", true);
+    }
+    this.current = nextSession;
+    this.core.observeLatestContext(contextOf(nextSession));
+    this.core.switchCurrentContext(contextOf(nextSession));
+    const historyPage: HistoryPage = { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };
+    return { session: nextSession, page: historyPage };
+  }
+
+  private async cancelAndDrainHistoryRead(error: ProtocolClientError): Promise<void> {
+    const active = this.activeHistoryRead;
+    if (!active) return;
+    active.abort.abort(new Error(error.message));
+    await active.done.catch(() => undefined);
   }
 
   private async singleSessionRequest(
@@ -248,6 +497,11 @@ export class RepositorySessionController {
     return this.current;
   }
 
+  private requireHistoryCapability(): RepositorySessionInfo {
+    this.requireCapability("historyPagination");
+    return this.requireCurrent();
+  }
+
   private ensureCurrent(session: RepositorySessionInfo): void {
     if (this.current !== session) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被切换", true);
   }
@@ -264,7 +518,10 @@ export class RepositorySessionController {
     if (status.state === "ready") return;
     this.lifecycleEpoch += 1;
     this.operation += 1;
+    this.pageIntent += 1;
     this.activeOpen?.abort.abort(new Error("核心已退出"));
+    this.activeHistoryRead?.abort.abort(new Error("核心已退出"));
+    this.activeRefresh?.abort.abort(new Error("核心已退出"));
     this.activeOpen = undefined;
     this.current = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);

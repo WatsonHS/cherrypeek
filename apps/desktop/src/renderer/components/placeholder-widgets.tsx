@@ -31,7 +31,7 @@ export function UpdatesPlaceholder(): React.JSX.Element {
     <Popover>
       <PopoverTrigger asChild>
         <button type="button" className="flex h-7 items-center gap-1.5 rounded-xl px-2 hover:bg-warn/10">
-          <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />有 4 处更新<ChevronDown className="size-3.5" strokeWidth={1.75} />
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />有 4 处更新<PlaceholderTag task="P3-03" /><ChevronDown className="size-3.5" strokeWidth={1.75} />
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="flex w-[440px] flex-col p-0">
@@ -49,7 +49,6 @@ export function UpdatesPlaceholder(): React.JSX.Element {
         <div className="border-t border-line bg-bg p-3"><Button className="w-full" disabled>刷新到最新状态</Button></div>
       </PopoverContent>
     </Popover>
-    <Button variant="outline" size="sm" className="h-6 rounded-xl border-0 px-2.5 font-semibold text-warn" disabled>刷新</Button>
   </div>;
 }
 

@@ -76,9 +76,9 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "chooseRepository", "closeRepositorySession", "copyText", "getCoreStatus", "getLaunchRepository",
+    "cancelHistoryRead", "chooseRepository", "closeRepositorySession", "copyText", "getCoreStatus", "getLaunchRepository",
     "getRepositorySession", "listRecentRepositories", "onCoreStatusChanged", "openRepositorySession",
-    "readSessionPreview", "recordRepositoryView",
+    "readHistoryPage", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");

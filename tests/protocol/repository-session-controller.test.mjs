@@ -31,11 +31,20 @@ function session(path, suffix) {
   };
 }
 
+function makeCommit(sessionInfo) {
+  return {
+    oid: sessionInfo.repository.headOid,
+    parents: [], summary: "summary", summaryTruncated: false, textLossy: false,
+    author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
+    committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" },
+  };
+}
+
 function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "historyPagination"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -61,8 +70,10 @@ function makeCore({ rejectOnAbort = false } = {}) {
 }
 
 function send(request, data, { done = true } = {}) {
-  request.options.onChunk?.({ data, done, sequence: 0 });
-  request.resolve({ coverage: { complete: true, processed: data.section === "commits" ? data.commits.length : 1 }, nextCursor: null });
+  const processed = data.section === "historyPage" ? data.commits.length : data.section === "commits" ? data.commits.length : 1;
+  request.options.onChunk?.({ data, done, sequence: 0, repoId: request.context.repoId, generation: request.context.generation,
+    coverage: { complete: done, processed }, nextCursor: null });
+  request.resolve({ coverage: { complete: true, processed }, nextCursor: null });
 }
 
 test("open binds the session context; get, preview, record, and close use it", async () => {
@@ -103,7 +114,7 @@ test("open binds the session context; get, preview, record, and close use it", a
   previewRequest.resolve({ coverage: { complete: true, processed: 0 }, nextCursor: null });
   assert.deepEqual(await reading, { repository: opened.repository, refs: [], refsTruncated: false, commits: [], hasMore: false });
 
-  const recording = controller.recordView();
+  const recording = controller.recordView(opened.generation);
   const recordRequest = await waitFor(() => core.requests[3]);
   assert.deepEqual(recordRequest.context, core.currentContext);
   send(recordRequest, { section: "repositoryViewRecorded", saved: true, status: "ok" });
@@ -237,4 +248,63 @@ test("a committed response continuation cannot revive a session after core exit 
     await assert.rejects(controller.get(), error => error.code === (invalidation === "core-exit" ? "CORE_EXITED" : "STALE_CONTEXT"));
     controller.dispose();
   }
+});
+
+test("history pages validate headers, cursor metadata, and page-local coverage", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const read = controller.readHistoryPage(null, 100);
+  const request = await waitFor(() => core.requests[1]);
+  assert.equal(request.method, "readHistoryPage");
+  assert.deepEqual(request.params, { cursor: null, pageSize: 100 });
+  request.options.onChunk({ data: { section: "repository", repository: opened.repository, refs: [], refsTruncated: false },
+    done: false, sequence: 0, repoId: opened.repoId, generation: opened.generation,
+    coverage: { complete: false, processed: 0 }, nextCursor: null });
+  const commit = makeCommit(opened);
+  request.options.onChunk({ data: { section: "historyPage", commits: [commit], offset: 0, pageSize: 100,
+    cursor: "cursor-0", previousCursor: null, hasMore: true }, done: true, sequence: 1,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 1 }, nextCursor: "cursor-1" });
+  request.resolve({ coverage: { complete: true, processed: 1 }, nextCursor: "cursor-1" });
+  const page = await read;
+  assert.deepEqual(page.commits, [commit]);
+  assert.equal(page.cursor, "cursor-0");
+  assert.equal(page.nextCursor, "cursor-1");
+  controller.dispose();
+});
+
+test("refresh publishes only a complete first page and switches context after terminal", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const oldSession = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: oldSession });
+  await opening;
+
+  const refreshed = { ...session("/tmp/repo-a", "b"), repositoryKey: oldSession.repositoryKey, worktreeId: oldSession.worktreeId };
+  const refreshing = controller.refreshRepository(100);
+  const request = await waitFor(() => core.requests[1]);
+  assert.equal(request.method, "refreshRepository");
+  assert.deepEqual(request.context, { repoId: oldSession.repoId, generation: oldSession.generation });
+  const commit = makeCommit(refreshed);
+  const chunks = [
+    { section: "repositorySession", session: refreshed },
+    { section: "repository", repository: refreshed.repository, refs: [], refsTruncated: false },
+    { section: "historyPage", commits: [commit], offset: 0, pageSize: 100, cursor: "fresh-0", previousCursor: null, hasMore: false },
+  ];
+  chunks.forEach((data, sequence) => request.options.onChunk({ data, sequence, done: sequence === 2,
+    repoId: oldSession.repoId, generation: oldSession.generation,
+    coverage: { complete: sequence === 2, processed: sequence === 2 ? 1 : 0 }, nextCursor: null }));
+  request.resolve({ coverage: { complete: true, processed: 1 }, nextCursor: null });
+  const value = await refreshing;
+  assert.equal(value.session, refreshed);
+  assert.deepEqual(value.page.commits, [commit]);
+  assert.deepEqual(core.currentContext, { repoId: refreshed.repoId, generation: refreshed.generation });
+  controller.dispose();
 });

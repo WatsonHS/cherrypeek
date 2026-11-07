@@ -75,6 +75,7 @@ pub enum Capability {
     GetRuntimeInfo,
     ReadRepositoryPreview,
     RepositorySessions,
+    HistoryPagination,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +103,7 @@ impl CoreReady {
                 Capability::GetRuntimeInfo,
                 Capability::ReadRepositoryPreview,
                 Capability::RepositorySessions,
+                Capability::HistoryPagination,
             ],
         }
     }
@@ -149,6 +151,8 @@ pub enum RequestParams {
     OpenRepository(OpenRepositoryParams),
     GetRepositorySession(EmptyParams),
     ReadSessionPreview(EmptyParams),
+    ReadHistoryPage(ReadHistoryPageParams),
+    RefreshRepository(RefreshRepositoryParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -170,6 +174,25 @@ pub struct ReadRepositoryPreviewParams {
 pub struct OpenRepositoryParams {
     #[schemars(length(min = 1, max = 16384))]
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadHistoryPageParams {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 512))]
+    pub cursor: Option<String>,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefreshRepositoryParams {
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -264,6 +287,21 @@ pub enum ResponseData {
     RecentRepositories {
         repositories: Vec<RecentRepository>,
         status: StoreStatus,
+    },
+    #[serde(rename = "historyPage")]
+    HistoryPage {
+        #[schemars(length(max = 500))]
+        commits: Vec<CommitSummary>,
+        offset: u32,
+        #[schemars(range(min = 1, max = 500))]
+        page_size: u16,
+        #[schemars(length(min = 1, max = 512))]
+        cursor: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        #[schemars(required)]
+        #[schemars(with = "NullableStringSchema")]
+        previous_cursor: Option<String>,
+        has_more: bool,
     },
 }
 
@@ -451,6 +489,8 @@ pub enum ErrorCode {
     ResourceLimit,
     GitError,
     PermissionDenied,
+    InvalidCursor,
+    SnapshotChanged,
 }
 
 #[must_use]

@@ -337,6 +337,7 @@ pub(super) fn map_git_failure(error: GitFailure) -> BenchError {
         GitFailure::ResourceLimit => {
             BenchError::new("RESOURCE_LIMIT", "Git output exceeded the limit")
         }
+        GitFailure::CommandFailed(message) => BenchError::new("GIT_ERROR", message),
         GitFailure::Unavailable(message) => BenchError::new("GIT_UNAVAILABLE", message),
     }
 }

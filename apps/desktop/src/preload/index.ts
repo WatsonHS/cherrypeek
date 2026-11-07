@@ -14,7 +14,10 @@ const api: CommitScopeApi = {
   openRepositorySession: path => ipcRenderer.invoke("commitscope:session:open", path),
   getRepositorySession: () => ipcRenderer.invoke("commitscope:session:get"),
   readSessionPreview: () => ipcRenderer.invoke("commitscope:session:preview"),
-  recordRepositoryView: () => ipcRenderer.invoke("commitscope:session:record-view"),
+  readHistoryPage: (cursor, pageSize) => ipcRenderer.invoke("commitscope:history:read-page", cursor, pageSize),
+  cancelHistoryRead: () => ipcRenderer.invoke("commitscope:history:cancel-read"),
+  refreshRepositorySession: pageSize => ipcRenderer.invoke("commitscope:history:refresh", pageSize),
+  recordRepositoryView: expectedGeneration => ipcRenderer.invoke("commitscope:session:record-view", expectedGeneration),
   closeRepositorySession: () => ipcRenderer.invoke("commitscope:session:close"),
   listRecentRepositories: () => ipcRenderer.invoke("commitscope:session:list-recent"),
 };

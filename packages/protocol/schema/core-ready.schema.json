@@ -6,7 +6,8 @@
       "enum": [
         "getRuntimeInfo",
         "readRepositoryPreview",
-        "repositorySessions"
+        "repositorySessions",
+        "historyPagination"
       ],
       "type": "string"
     },

@@ -56,6 +56,7 @@ export interface RequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   retainResultAfterAbort?: boolean;
+  drainAfterAbort?: boolean;
   fatalOnTimeout?: boolean;
   onChunk?: (chunk: ServerResponseMessage) => void;
 }
@@ -66,8 +67,10 @@ interface PendingRequest {
   context: RequestContext;
   gateBound: boolean;
   retainResultAfterAbort: boolean;
+  drainAfterAbort: boolean;
   fatalOnTimeout: boolean;
   cancelRequested: boolean;
+  cancelError?: ProtocolClientError;
   nextSequence: number;
   resolve: (completion: RequestCompletion) => void;
   reject: (error: ProtocolClientError) => void;
@@ -190,10 +193,13 @@ export class ProtocolTransport {
     if (options.signal?.aborted) {
       return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
     }
-    if (options.retainResultAfterAbort && method !== "openRepository") {
-      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅 openRepository 可在取消后排空终态"));
+    if (options.retainResultAfterAbort && method !== "openRepository" && method !== "refreshRepository") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开和刷新会话可保留迟到的成功终态"));
     }
-    if (options.fatalOnTimeout && method !== "openRepository" && method !== "closeRepository") {
+    if (options.drainAfterAbort && method !== "readHistoryPage") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅历史页请求可取消并排空终态"));
+    }
+    if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "refreshRepository"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅会话变更请求可因超时关闭连接"));
     }
 
@@ -208,6 +214,7 @@ export class ProtocolTransport {
         context: { ...context },
         gateBound: requestMode === "session",
         retainResultAfterAbort: options.retainResultAfterAbort === true,
+        drainAfterAbort: options.drainAfterAbort === true,
         fatalOnTimeout: options.fatalOnTimeout === true,
         cancelRequested: false,
         nextSequence: 0,
@@ -225,6 +232,7 @@ export class ProtocolTransport {
       if (options.signal) {
         pending.abortHandler = () => {
           if (pending.retainResultAfterAbort) this.cancelAndDrain(requestId);
+          else if (pending.drainAfterAbort) this.drainCancel(requestId, new ProtocolClientError("CANCELLED", abortMessage(options.signal!), true));
           else this.cancel(requestId, "CANCELLED", abortMessage(options.signal!));
         };
         options.signal.addEventListener("abort", pending.abortHandler, { once: true });
@@ -326,13 +334,26 @@ export class ProtocolTransport {
       return;
     }
     pending.nextSequence += 1;
-    try { pending.onChunk?.(message); }
-    catch (error) {
-      this.cancel(message.requestId, "PROTOCOL_ERROR", `分块回调失败：${errorMessage(error)}`);
-      return;
+    if (!(pending.drainAfterAbort && pending.cancelRequested)) {
+      try { pending.onChunk?.(message); }
+      catch (error) {
+        const protocolError = new ProtocolClientError("PROTOCOL_ERROR", `分块回调失败：${errorMessage(error)}`);
+        if (pending.retainResultAfterAbort) {
+          this.fail(protocolError);
+        } else if (message.done) {
+          this.finishReject(message.requestId, protocolError);
+        } else {
+          this.cancel(message.requestId, "PROTOCOL_ERROR", protocolError.message);
+        }
+        return;
+      }
     }
     if (message.done) {
-      this.finishResolve(message.requestId, { coverage: message.coverage, nextCursor: message.nextCursor ?? null });
+      if (pending.drainAfterAbort && pending.cancelRequested) {
+        this.finishReject(message.requestId, pending.cancelError ?? new ProtocolClientError("CANCELLED", "请求已取消", true));
+      } else {
+        this.finishResolve(message.requestId, { coverage: message.coverage, nextCursor: message.nextCursor ?? null });
+      }
     }
   }
 
@@ -347,12 +368,23 @@ export class ProtocolTransport {
       this.fail(new ProtocolClientError("PROTOCOL_ERROR", `错误上下文与请求 ${message.requestId} 不匹配`));
       return;
     }
-    this.finishReject(message.requestId, fromServerError(message));
+    const error = pending.drainAfterAbort && pending.cancelRequested
+      ? pending.cancelError ?? fromServerError(message)
+      : fromServerError(message);
+    this.finishReject(message.requestId, error);
   }
 
   private cancel(requestId: string, code: ProtocolErrorCode, message: string): void {
     const pending = this.pending.get(requestId);
     if (!pending) return;
+    if (pending.retainResultAfterAbort) {
+      this.cancelAndDrain(requestId);
+      return;
+    }
+    if (pending.drainAfterAbort) {
+      this.drainCancel(requestId, new ProtocolClientError(code, message, code === "TIMEOUT" || code === "CANCELLED"));
+      return;
+    }
     this.finishReject(requestId, new ProtocolClientError(code, message, code === "TIMEOUT" || code === "CANCELLED"));
     if (pending.cancelRequested) return;
     pending.cancelRequested = true;
@@ -366,6 +398,15 @@ export class ProtocolTransport {
     pending.cancelRequested = true;
     const cancelMessage = { type: "cancel", requestId } as const;
     void this.enqueue(cancelMessage).catch(error => this.fail(asProtocolError(error, "CORE_EXITED")));
+  }
+
+  private drainCancel(requestId: string, error: ProtocolClientError): void {
+    const pending = this.pending.get(requestId);
+    if (!pending || pending.cancelRequested) return;
+    pending.cancelRequested = true;
+    pending.cancelError = error;
+    const cancelMessage = { type: "cancel", requestId } as const;
+    void this.enqueue(cancelMessage).catch(writeError => this.fail(asProtocolError(writeError, "CORE_EXITED")));
   }
 
   private finishResolve(requestId: string, completion: RequestCompletion): void {
@@ -511,6 +552,11 @@ function validRequestParams(method: string, params: unknown): boolean {
     return params.path.length > 0 && Buffer.byteLength(params.path, "utf8") <= 16 * 1024 &&
       !params.path.includes("\0") && isAbsolute(params.path);
   }
+  if (method === "readHistoryPage" && isRecord(params) &&
+    (params.cursor === null || typeof params.cursor === "string") &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
+  if (method === "refreshRepository" && isRecord(params) &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
@@ -522,7 +568,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository"].includes(method)) return "session";
   return undefined;
 }
 

@@ -1,5 +1,6 @@
 mod framing;
 mod git_command;
+mod history;
 mod repository;
 mod runtime;
 mod server;

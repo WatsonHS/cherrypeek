@@ -48,12 +48,16 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry }: {
+export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry, onRetryPage, onCancelPage, onPreviousPage, onNextPage }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
   onCancel(): Promise<void>;
   onRetry(): Promise<void>;
+  onRetryPage(): Promise<void>;
+  onCancelPage(): Promise<void>;
+  onPreviousPage(): Promise<void>;
+  onNextPage(): Promise<void>;
 }): React.JSX.Element {
   const listRef = React.useRef<HTMLDivElement>(null);
   const layout = React.useMemo(() => layoutGraph(preview.commits, ROW), [preview.commits]);
@@ -90,7 +94,7 @@ export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry }
       <ActivityPlaceholder />
       <span className="flex items-center gap-2">
         {hiddenLanes ? <span title={`另有 ${hiddenLanes} 条分支线未画出`} className="rounded-full bg-sunken px-1.5 font-mono text-[11px] text-fg2">+{hiddenLanes}</span> : null}
-        <span>HEAD 可达 · 拓扑顺序 · 已加载 {preview.commits.length}</span>
+        <span>{preview.pageLoading ? "正在读取历史页…" : preview.refreshing ? "正在刷新快照…" : "HEAD 可达 · 本页拓扑顺序 · 本页 " + preview.commits.length + " 条"}</span>
       </span>
     </div>
 
@@ -98,6 +102,12 @@ export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry }
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>
       {preview.session ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetry(); }}>重试</Button> : null}
+    </div> : null}
+
+    {preview.pageError ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
+      <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{preview.pageErrorKind === "refresh" ? "刷新失败" : "历史页读取失败"}</span><span className="break-words text-fg2">{preview.pageError.message} <code className="font-mono text-xs text-fg3">{preview.pageError.code}</code></span></span>
+      {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetryPage(); }}>重试</Button> : null}
     </div> : null}
 
     <div ref={listRef} role="listbox" aria-label="提交" className="min-h-0 flex-1 overflow-auto px-2 pb-6 outline-none"
@@ -115,9 +125,22 @@ export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry }
         : <CommitRow key={entry.commit.oid} commit={entry.commit} graph={entry.graph} graphWidth={graphWidth}
           refs={refIndex.get(entry.commit.oid) ?? []} headReference={headReference} headOid={headOid}
           selected={entry.commit.oid === selectedOid} onSelect={() => onSelect(entry.commit.oid)} />)}
-      {preview.hasMore ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">只读取了前 {preview.commits.length} 个提交，更早的提交暂不加载。</p> : null}
+      {preview.selectionMissingOnPage && !preview.oldSelectedCommit ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">当前页未载入所选提交；这不表示它已不可达。</p> : null}
+      {preview.anchorMissing ? <p className="m-0 px-3 pt-2 text-center text-xs text-fg3">刷新后，原列表位置不在当前页。</p> : null}
+      {preview.hasMore ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">还有更早的提交，可继续翻页。</p> : null}
       {interrupted ? <p className="m-0 px-3 pt-4 text-center text-xs text-warn">读取没有完成，以上结果不完整。</p> : null}
+      {preview.anchorRestorationSpace > 0 ? <div aria-hidden="true" style={{ height: preview.anchorRestorationSpace }} /> : null}
     </div>
+    {preview.pageOffset !== null ? <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line px-3 py-2 text-xs text-fg3">
+      <Button variant="outline" size="sm" disabled={preview.previousCursor === null || preview.pageLoading || preview.refreshing}
+        onClick={() => { void onPreviousPage(); }}>上一页</Button>
+      <span>{preview.commits.length ? `${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条` : "当前页 0 条"}</span>
+      <span className="flex items-center gap-2">
+        {preview.pageLoading && !preview.refreshing ? <Button variant="outline" size="sm" onClick={() => { void onCancelPage(); }}>取消</Button> : null}
+        <Button variant="outline" size="sm" disabled={preview.nextCursor === null || preview.pageLoading || preview.refreshing}
+          onClick={() => { void onNextPage(); }}>下一页</Button>
+      </span>
+    </div> : null}
   </nav>;
 }
 
@@ -142,7 +165,7 @@ function DayRow({ entry, width }: { entry: Extract<ListEntry, { kind: "day" }>; 
     <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={entry.lanes} />
     <span className="flex flex-1 items-end justify-between pb-1.5 text-xs">
       <span className="font-semibold text-fg2">{entry.label}</span>
-      <span className="text-fg3">{entry.count} 个</span>
+      <span className="text-fg3">本页此组 {entry.count} 条</span>
     </span>
   </div>;
 }

@@ -5,6 +5,7 @@ import type {
   RefInfo,
   RepositoryInfo,
   RepositorySessionInfo,
+  ResponseData,
   StoreStatus,
 } from "./generated/server-message.js";
 
@@ -30,11 +31,34 @@ export interface RecentRepositoriesResult {
   status: StoreStatus;
 }
 
+type HistoryPageData = Extract<ResponseData, { section: "historyPage" }>;
+
+export interface HistoryPage {
+  repository: RepositoryInfo;
+  refs: RefInfo[];
+  refsTruncated: boolean;
+  commits: CommitSummary[];
+  offset: HistoryPageData["offset"];
+  pageSize: HistoryPageData["pageSize"];
+  cursor: HistoryPageData["cursor"];
+  previousCursor: HistoryPageData["previousCursor"];
+  nextCursor: string | null;
+  hasMore: HistoryPageData["hasMore"];
+}
+
+export interface RefreshedRepository {
+  session: RepositorySessionInfo;
+  page: HistoryPage;
+}
+
 export interface RepositorySessionApi {
   openRepositorySession(path: string): Promise<RepositorySessionResult<RepositorySessionInfo>>;
   getRepositorySession(): Promise<RepositorySessionResult<RepositorySessionInfo>>;
   readSessionPreview(): Promise<RepositorySessionResult<SessionPreview>>;
-  recordRepositoryView(): Promise<RepositorySessionResult<RepositoryViewRecorded>>;
+  readHistoryPage(cursor: string | null, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
+  cancelHistoryRead(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  refreshRepositorySession(pageSize?: number): Promise<RepositorySessionResult<RefreshedRepository>>;
+  recordRepositoryView(expectedGeneration: string): Promise<RepositorySessionResult<RepositoryViewRecorded>>;
   closeRepositorySession(): Promise<RepositorySessionResult<{ closed: true }>>;
   listRecentRepositories(): Promise<RepositorySessionResult<RecentRepositoriesResult>>;
 }

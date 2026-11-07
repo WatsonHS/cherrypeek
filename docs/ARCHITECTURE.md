@@ -1,6 +1,6 @@
 # 技术架构
 
-日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话、本地查看记录与非视觉接口已通过[验收](validation/p1-01-repository-sessions.md)；下述多范围快照、分页、事件、索引与查询缓存仍属设计，不代表发布性能已验收。
+日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。下述多范围快照、事件、索引、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
 
 ## 技术路线
 
@@ -43,6 +43,8 @@ P0-02 的已实现契约见 [代码级计划](implementation/p0-02-protocol.md)�
 
 P1-01 的会话契约见[代码级计划](implementation/p1-01-repository-sessions.md)：新增 `repositorySessions` capability，提供打开、读取会话、有界预览、显式记录查看、关闭与最近仓库六个方法。每个连接保留一个当前会话；打开时冻结 HEAD，尚不覆盖多引用范围、游标或自动刷新。稳定的 repositoryKey / worktreeId 区分对象库与 worktree，本次打开的 repoId / generation 使用随机标识并在重启后失效。server 主循环串行提交会话变更，Git 发现和历史读取仍在可取消 worker 中执行。
 
+P1-02 按[代码级计划](implementation/p1-02-history-pagination.md)增加 `historyPagination` capability、`readHistoryPage` 和 `refreshRepository`。页大小默认 200、最大 500；返回当前页、前后页的游标与位置，`coverage.complete` 只表示这页完整，`processed` 只计本页提交。刷新先重新发现同一仓库并准备第一页，成功后再提交新 session / generation；失败保留旧会话。main 对翻页执行取消后排空终态，对会话变更接收迟到的已提交成功结果，避免核心和界面使用不同会话。记录查看时额外核验 renderer 实际显示的 generation。
+
 main 持有会话上下文，preload 不接受 renderer 指定的 repoId / generation。open 的取消会等到核心最终响应，以同步可能已提交的状态；会话变更超时导致核心连接失败并回收，避免继续使用不确定的句柄。六个 IPC 接口返回可序列化的成功 / 错误结果。旧预览接口保留独立的 null 上下文；新接口是否接入界面与后端验收分开记录。UI-02 起 renderer 只用会话接口：打开、读取、取消（即关闭会话）与记录查看都由 renderer 发起，并按操作号丢弃过期结果；旧的 renderer 预览接口已移除，daemon 的 `readRepositoryPreview` 仍供 headless 测试与基准使用。`--repository=` 启动参数经 `getLaunchRepository` 交给 renderer，按正常路径打开。
 
 | 消息 | 必备字段和行为 |
@@ -82,6 +84,10 @@ P0-03 的仓库预览契约见[代码级计划](implementation/p0-03-repository-
 
 分页游标绑定查询、引用快照、遍历位置和图布局状态。Rust 保持有界的遍历 session，按需继续读取；不把 `--skip=N` 的反复全量遍历当最终分页方案。回滚到被淘汰的页时，可用检查点恢复或重算，并记录延迟；session 过期返回明确错误。M0 已确认每页从 HEAD 重算约 0.44 秒，需优先续读已有遍历；现有数据不足以决定检查点落盘格式，待 M1 测量随机回读与淘汰成本再选择，避免提前存储完整可达矩阵。
 
+P1-02 先绑定冻结 HEAD、页大小、排序版本、随机 query ID 和页起点；图布局状态由 P2-01 扩充。每个会话只保留一个带背压的 `rev-list --topo-order` 流，连续下一页沿用该流；对象摘要仍通过 cat-file 批量解码。已发行游标位置与流当前读到的位置分别记录，旧页淘汰后从冻结 HEAD 重放，不使已发行的深页游标失效。应用缓存最多 8 页且估算提交载荷不超过 16 MiB；renderer 只持有一页及至多一条旧选择摘要。Git 内部遍历内存、输出缓冲与临时解码内存不计入这个缓存额度，性能报告单独采样整个进程树。
+
+同一查询的历史顺序不依赖提交时间单调。history 命令禁用 commitGraph 加速；发现时记录 commonDir 的 shallow / info/grafts 有界内容指纹，每次读页前后复核，包括缓存命中。普通引用移动不影响旧页，历史边界改变则返回 `SNAPSHOT_CHANGED` 并要求刷新；不把重放得到的另一套历史拼入原查询。取消、超时或对象错误回收流，保留完成页与 query 身份，重试从固定快照恢复。会话替换、关闭及 daemon EOF 同样回收闲置 Git 子进程。
+
 Rust 生成每行的 lane、父边与跨页连接信息；React 仅渲染可见行和少量缓冲。布局检查点记录边界上的活跃 lane；同一快照内向前 / 向后翻页不让颜色和连线无故跳动。octopus merge、长边、detached HEAD 和浅克隆边界都有 fixture。
 
 文本 / 路径搜索先输出独立结果列表，不伪造被过滤节点之间的父子关系。“在历史中定位”恢复原范围、原快照的拓扑视图；取消全部字段筛选前保存查询和滚动锚点。元数据搜索在 M1 独立交付，此定位与返回能力在 M2 图布局就绪后接入。
@@ -110,7 +116,7 @@ FTS5 是加速候选，不能改变产品约定的字面子串语义。M1 先建
 
 固定 tip 不保证对象免于外部 GC。读取当前快照时遇到缺失对象，返回缺失 / 不完整状态并保留已读内容，不自动网络补拉，也不把中断查询标为完整；允许用户重试或刷新。M1 提供手动刷新与固定快照语义，M3 再增加文件事件、聚焦与定时复核的通知。
 
-缓存放 Electron 应用数据目录；SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。初始上限：renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
+磁盘缓存放 Electron 应用数据目录；后续 SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。MVP 预算上限为 renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；P1-02 先采用更小的一页 renderer 窗口和 8 页 / 16 MiB 内存缓存，尚无磁盘索引。缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
 
 ## 只读边界
 

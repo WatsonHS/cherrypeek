@@ -13,6 +13,7 @@
     "dev": "node scripts/launch.mjs --build",
     "start": "node scripts/launch.mjs",
     "test:smoke": "node tests/smoke/electron-smoke.mjs",
+    "test:smoke:history": "node tests/smoke/history-pagination-smoke.mjs",
     "test:protocol": "node scripts/test-protocol.mjs",
     "fixtures:generate": "node scripts/generate-fixtures.mjs",
     "test:repository": "node scripts/test-repository.mjs --ui-smoke",
@@ -21,6 +22,8 @@
     "benchmark:readers": "node scripts/benchmark-readers.mjs",
     "test:readers": "node scripts/test-readers.mjs",
     "test:sessions": "node scripts/test-sessions.mjs",
+    "test:history": "node scripts/test-history.mjs",
+    "benchmark:history": "node scripts/benchmark-history.mjs",
     "test:renderer": "node scripts/test-renderer.mjs"
   },
   "devDependencies": {

@@ -2,11 +2,16 @@ use crate::git_command::{CommandOutput, GitFailure, ReadOnlyGit, string_arg};
 use commitscope_core::{
     CommitIdentity, CommitSummary, ErrorCode, RefInfo, RefKind, RepositoryInfo,
 };
+use sha2::{Digest, Sha256};
 use std::{
+    fs::{self, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
+
+const GRAPH_BOUNDARY_FILE_LIMIT: usize = 1024 * 1024;
 
 const PATH_LIMIT: usize = 16 * 1024;
 const REF_LIMIT: usize = 2_000;
@@ -38,6 +43,13 @@ pub struct DiscoveredRepository {
     pub refs: Vec<RefInfo>,
     pub refs_truncated: bool,
     pub oid_length: usize,
+    pub graph_boundary: GraphBoundaryFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphBoundaryFingerprint {
+    shallow: Option<String>,
+    grafts: Option<String>,
 }
 
 pub fn read_repository_preview(
@@ -143,6 +155,7 @@ pub fn discover_repository(
         head_oid: head_oid.clone(),
         head_reference,
     };
+    let graph_boundary = graph_boundary_fingerprint(&repository.common_dir, cancelled, deadline)?;
 
     if cancelled.load(Ordering::Acquire) {
         return Err(cancelled_error());
@@ -152,6 +165,7 @@ pub fn discover_repository(
         refs,
         refs_truncated,
         oid_length,
+        graph_boundary,
     })
 }
 
@@ -193,6 +207,143 @@ fn canonical_git_path(path: String) -> Result<String, PreviewError> {
         .canonicalize()
         .map_err(|error| map_path_error(error, "Repository metadata path is unavailable"))?;
     path_to_string(&canonical)
+}
+
+pub fn verify_graph_fingerprint(
+    discovered: &DiscoveredRepository,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), PreviewError> {
+    let current = graph_boundary_fingerprint(&discovered.info.common_dir, cancelled, deadline)?;
+    if current != discovered.graph_boundary {
+        return Err(preview_error(
+            ErrorCode::SnapshotChanged,
+            "The shallow or graft history boundary changed; refresh the repository",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn graph_boundary_fingerprint(
+    common_dir: &str,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<GraphBoundaryFingerprint, PreviewError> {
+    check_active(cancelled, deadline)?;
+    let root = Path::new(common_dir);
+    Ok(GraphBoundaryFingerprint {
+        shallow: boundary_file_fingerprint(&root.join("shallow"), cancelled, deadline)?,
+        grafts: boundary_file_fingerprint(&root.join("info").join("grafts"), cancelled, deadline)?,
+    })
+}
+
+fn boundary_file_fingerprint(
+    path: &Path,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<String>, PreviewError> {
+    check_active(cancelled, deadline)?;
+    if let Some(parent) = path.parent() {
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(preview_error(
+                    ErrorCode::UnsupportedRepository,
+                    "A history boundary directory is not a regular directory",
+                    false,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(map_path_error(
+                    error,
+                    "History boundary directory is unavailable",
+                ));
+            }
+        }
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(map_path_error(
+                error,
+                "History boundary metadata is unavailable",
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.len() > GRAPH_BOUNDARY_FILE_LIMIT as u64 {
+        return Err(preview_error(
+            ErrorCode::UnsupportedRepository,
+            "A shallow or graft boundary file is unsafe or exceeds 1 MiB",
+            false,
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| {
+        preview_error(
+            ErrorCode::UnsupportedRepository,
+            format!("Could not safely open history boundary file: {error}"),
+            false,
+        )
+    })?;
+    let opened_metadata = file.metadata().map_err(|error| {
+        preview_error(
+            ErrorCode::UnsupportedRepository,
+            format!("Could not inspect history boundary file: {error}"),
+            false,
+        )
+    })?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > GRAPH_BOUNDARY_FILE_LIMIT as u64
+    {
+        return Err(preview_error(
+            ErrorCode::UnsupportedRepository,
+            "A shallow or graft boundary file changed or exceeds 1 MiB",
+            false,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(GRAPH_BOUNDARY_FILE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            preview_error(
+                ErrorCode::RepositoryUnavailable,
+                format!("Could not read history boundary file: {error}"),
+                false,
+            )
+        })?;
+    check_active(cancelled, deadline)?;
+    if bytes.len() > GRAPH_BOUNDARY_FILE_LIMIT {
+        return Err(preview_error(
+            ErrorCode::UnsupportedRepository,
+            "A shallow or graft boundary file exceeds 1 MiB",
+            false,
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"commitscope:history-boundary:v1\0");
+    hash.update(&bytes);
+    Ok(Some(format!("sha256:{:x}", hash.finalize())))
+}
+
+pub fn internal_error(message: &str) -> PreviewError {
+    preview_error(ErrorCode::RepositoryUnavailable, message, false)
+}
+
+pub fn git_error(message: &str) -> PreviewError {
+    preview_error(ErrorCode::GitError, message, false)
+}
+
+pub fn timeout_error() -> PreviewError {
+    preview_error(ErrorCode::Timeout, "History query timed out", true)
 }
 
 fn normalize_repository_path(input: &str) -> Result<PathBuf, PreviewError> {
@@ -569,6 +720,24 @@ fn read_commit_oids(
     let has_more = oids.len() > COMMIT_PAGE_LIMIT;
     oids.truncate(COMMIT_PAGE_LIMIT);
     Ok((oids, has_more))
+}
+
+pub fn read_commit_summaries(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    oids: &[String],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Vec<CommitSummary>, PreviewError> {
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+    read_commits(
+        &git,
+        Path::new(&discovered.info.path),
+        oids,
+        discovered.oid_length,
+        cancelled,
+        deadline,
+    )
 }
 
 fn read_commits(
@@ -988,7 +1157,7 @@ fn git_exit_error(output: &CommandOutput) -> PreviewError {
     preview_error(code, message, false)
 }
 
-fn is_missing_object_diagnostic(stderr: &[u8]) -> bool {
+pub fn is_missing_object_diagnostic(stderr: &[u8]) -> bool {
     let detail = String::from_utf8_lossy(stderr);
     detail.contains("bad object")
         || detail.contains("Could not read")
@@ -1003,13 +1172,14 @@ fn map_git_failure(error: GitFailure) -> PreviewError {
             preview_error(ErrorCode::Timeout, "Repository preview timed out", true)
         }
         GitFailure::ResourceLimit => resource_limit("Git output exceeded a resource limit"),
+        GitFailure::CommandFailed(message) => preview_error(ErrorCode::GitError, message, false),
         GitFailure::Unavailable(message) => {
             preview_error(ErrorCode::GitUnavailable, message, false)
         }
     }
 }
 
-fn cancelled_error() -> PreviewError {
+pub fn cancelled_error() -> PreviewError {
     preview_error(ErrorCode::Cancelled, "请求已取消", false)
 }
 
@@ -1027,7 +1197,7 @@ fn check_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), Preview
     }
 }
 
-fn resource_limit(message: &str) -> PreviewError {
+pub fn resource_limit(message: &str) -> PreviewError {
     preview_error(ErrorCode::ResourceLimit, message, false)
 }
 

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { RepositorySessionStore } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "repository-session-store.mjs")));
 
-const METHODS = ["openRepositorySession", "getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepositorySession"];
+const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession"];
 
 /** Session API whose every call waits until the test answers it. */
 function fakeApi() {
@@ -19,10 +19,19 @@ function fakeApi() {
     pending[name].push({ resolve, reject, args });
     return promise;
   }]));
+  api.cancelHistoryRead = async () => ok({ cancelled: true });
   return {
     api,
     calls,
     pending,
+    queue(name, args = []) {
+      let resolve;
+      let reject;
+      const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+      calls.push({ name, args });
+      pending[name].push({ resolve, reject, args });
+      return promise;
+    },
     names: () => calls.map(call => call.name),
     async answer(name, value) {
       await settled();
@@ -81,13 +90,31 @@ function makePreview(session) {
   };
 }
 
+function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, previousCursor = null, nextCursor = null, count = 1, commits } = {}) {
+  const preview = makePreview(session);
+  return {
+    ...preview,
+    commits: commits ?? (offset === 0 && count === 1 ? preview.commits : Array.from({ length: count }, (_, index) => ({
+      ...preview.commits[0],
+      oid: `${(offset + index + 1).toString(16).padStart(2, "0")}`.repeat(20),
+      summary: `summary ${offset + index + 1}`,
+    }))),
+    offset,
+    pageSize: 200,
+    cursor,
+    previousCursor,
+    nextCursor,
+    hasMore: nextCursor !== null,
+  };
+}
+
 /** Opens `id` and answers every call so the store ends ready. */
-async function openReady(fake, store, id) {
+async function openReady(fake, store, id, pageOptions = {}) {
   const session = makeSession(id);
   const done = store.open(`/repos/${id}`);
   if (store.getView().session) await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
   await fake.answer("openRepositorySession", ok(session));
-  await fake.answer("readSessionPreview", ok(makePreview(session)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, pageOptions)));
   await done;
   return session;
 }
@@ -110,7 +137,7 @@ test("open shows the session once its first page arrives", async () => {
   assert.equal(store.getView().session, session);
   assert.equal(store.getView().repository.path, "/repos/a");
 
-  await fake.answer("readSessionPreview", ok(makePreview(session)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session)));
   await done;
   const view = store.getView();
   assert.equal(view.state, "ready");
@@ -131,7 +158,7 @@ test("a newer open wins; late results from the older open are dropped", async ()
   const sessionB = makeSession("b");
   await settled();
   fake.pending.openRepositorySession[1].resolve(ok(sessionB));
-  await fake.answer("readSessionPreview", ok(makePreview(sessionB)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionB)));
   await second;
   assert.equal(store.getView().session, sessionB);
 
@@ -139,7 +166,7 @@ test("a newer open wins; late results from the older open are dropped", async ()
   await first;
   assert.equal(store.getView().session, sessionB);
   assert.equal(store.getView().commits[0].summary, "summary repo-b");
-  assert.equal(fake.pending.readSessionPreview.length, 0, "the superseded open must not read its preview");
+  assert.equal(fake.pending.readHistoryPage.length, 0, "the superseded open must not read its preview");
 });
 
 test("a page that arrives after a newer open started does not replace the newer view", async () => {
@@ -148,10 +175,10 @@ test("a page that arrives after a newer open started does not replace the newer 
   const sessionA = makeSession("a");
   const first = store.open("/repos/a");
   await fake.answer("openRepositorySession", ok(sessionA));
-  assert.equal(fake.pending.readSessionPreview.length, 1);
+  assert.equal(fake.pending.readHistoryPage.length, 1);
 
   const second = store.open("/repos/b");
-  await fake.answer("readSessionPreview", ok(makePreview(sessionA)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionA)));
   await first;
   assert.equal(store.getView().state, "loading");
   assert.equal(store.getView().opening, "/repos/b");
@@ -159,7 +186,7 @@ test("a page that arrives after a newer open started does not replace the newer 
 
   const sessionB = makeSession("b");
   await fake.answer("openRepositorySession", ok(sessionB));
-  await fake.answer("readSessionPreview", ok(makePreview(sessionB)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionB)));
   await second;
   assert.equal(store.getView().session, sessionB);
 });
@@ -230,7 +257,7 @@ test("cancel closes the session and ignores the open that was in flight", async 
   await done;
   assert.equal(store.getView().state, "cancelled");
   assert.equal(store.getView().session, null);
-  assert.equal(fake.pending.readSessionPreview.length, 0);
+  assert.equal(fake.pending.readHistoryPage.length, 0);
 });
 
 test("cancel is a no-op when nothing is loading", async () => {
@@ -248,7 +275,7 @@ test("a failed read keeps the repository and retry reads the same session again"
   const session = makeSession("a");
   const done = store.open("/repos/a");
   await fake.answer("openRepositorySession", ok(session));
-  await fake.answer("readSessionPreview", err("MISSING_OBJECT", "missing"));
+  await fake.answer("readHistoryPage", err("MISSING_OBJECT", "missing"));
   await done;
   assert.equal(store.getView().state, "error");
   assert.equal(store.getView().repository.path, "/repos/a");
@@ -257,7 +284,7 @@ test("a failed read keeps the repository and retry reads the same session again"
   const retried = store.retry();
   assert.equal(store.getView().state, "loading");
   assert.equal(store.getView().error, null);
-  await fake.answer("readSessionPreview", ok(makePreview(session)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session)));
   await retried;
   assert.equal(store.getView().state, "ready");
   assert.equal(fake.names().filter(name => name === "openRepositorySession").length, 1);
@@ -286,7 +313,7 @@ test("only content that reached the screen is recorded, and markShown records on
   await fake.answer("openRepositorySession", ok(session));
   await store.recordView();
   assert.ok(!fake.names().includes("recordRepositoryView"), "a loading view is not recorded");
-  await fake.answer("readSessionPreview", ok(makePreview(session)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session)));
   await done;
 
   const shown = store.markShown();
@@ -315,7 +342,7 @@ test("a record answered after a switch is not attached to the new session", asyn
   await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
   await recording;
   await fake.answer("openRepositorySession", ok(sessionB));
-  await fake.answer("readSessionPreview", ok(makePreview(sessionB)));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionB)));
   await switching;
   assert.equal(store.getView().session, sessionB);
   assert.equal(store.getView().record, null);
@@ -354,4 +381,138 @@ test("when the core goes away, shown data stays but is no longer recorded, and l
   assert.equal(other.getView().state, "error");
   assert.equal(other.getView().error.code, "CORE_EXITED");
   assert.equal(other.getView().opening, null);
+});
+
+test("failed next page keeps the current page and retries the failed cursor", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a", { nextCursor: "cursor-200" });
+  const firstPage = store.getView().commits;
+
+  const next = store.nextPage();
+  await settled();
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200]);
+  await fake.answer("readHistoryPage", err("GIT_ERROR", "temporary"));
+  await next;
+  assert.equal(store.getView().state, "ready");
+  assert.deepEqual(store.getView().commits, firstPage);
+  assert.equal(store.getView().pageErrorKind, "read");
+
+  const retry = store.retryPage();
+  await settled();
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200]);
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { offset: 200, cursor: "cursor-200", previousCursor: "cursor-0" })));
+  await retry;
+  assert.equal(store.getView().pageOffset, 200);
+  assert.equal(store.getView().commits[0].summary, "summary 201");
+  assert.deepEqual(fake.pending.readHistoryPage, []);
+});
+
+test("cancelling a page read drains it without replacing the visible page", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a", { nextCursor: "cursor-200" });
+  const firstPage = store.getView().commits;
+  const next = store.nextPage();
+  await settled();
+  const cancelled = store.cancelPage();
+  await fake.answer("readHistoryPage", err("CANCELLED", "cancelled"));
+  await Promise.all([next, cancelled]);
+  assert.equal(store.getView().pageLoading, false);
+  assert.deepEqual(store.getView().commits, firstPage);
+  assert.equal(store.getView().state, "ready");
+});
+
+test("refresh failure preserves the old session and page", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a");
+  const page = store.getView().commits;
+  const refreshing = store.refresh(page[0].oid, { oid: page[0].oid, offset: 0 });
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await settled();
+  assert.deepEqual(fake.pending.refreshRepositorySession[0].args, [200]);
+  await fake.answer("refreshRepositorySession", err("GIT_ERROR", "refresh failed"));
+  await refreshing;
+  assert.equal(store.getView().session, session);
+  assert.deepEqual(store.getView().commits, page);
+  assert.equal(store.getView().refreshing, false);
+  assert.equal(store.getView().pageErrorKind, "refresh");
+});
+
+test("refresh preserves an old selection and anchor status, then records the new shown session", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const oldSession = await openReady(fake, store, "a");
+  const oldCommit = store.getView().commits[0];
+  store.setSelectedOid(oldCommit.oid);
+  const newSession = {
+    ...makeSession("a"),
+    repositoryKey: oldSession.repositoryKey,
+    worktreeId: oldSession.worktreeId,
+    observedAtUnixMs: oldSession.observedAtUnixMs + 10_000,
+    repository: { ...oldSession.repository, headOid: "b".repeat(40) },
+  };
+  const refreshing = store.refresh(oldCommit.oid, { oid: "not-on-first-page", offset: 24 });
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await settled();
+  await fake.answer("refreshRepositorySession", ok({ session: newSession, page: makeHistoryPage(newSession) }));
+  await refreshing;
+  assert.equal(store.getView().session, newSession);
+  assert.equal(store.getView().oldSelectedCommit, oldCommit);
+  assert.equal(store.getView().oldSelectedObservedAtUnixMs, oldSession.observedAtUnixMs);
+  assert.equal(store.getView().selectionMissingOnPage, true);
+  assert.equal(store.getView().anchorMissing, true);
+
+  const shown = store.markShown();
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await shown;
+  assert.deepEqual(fake.pending.recordRepositoryView, []);
+  assert.equal(fake.calls.filter(call => call.name === "recordRepositoryView").length, 2);
+});
+
+test("a committed refresh stays visible when the following open fails", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const oldSession = await openReady(fake, store, "a");
+  const newSession = { ...makeSession("a"), repositoryKey: oldSession.repositoryKey, worktreeId: oldSession.worktreeId,
+    repository: { ...oldSession.repository, headOid: "b".repeat(40) } };
+  const refreshing = store.refresh();
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await settled();
+
+  const opening = store.open("/repos/b");
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await settled();
+  await fake.answer("refreshRepositorySession", ok({ session: newSession, page: makeHistoryPage(newSession) }));
+  await refreshing;
+  assert.equal(store.getView().session, newSession);
+  await fake.answer("openRepositorySession", err("NOT_A_REPOSITORY", "failed"));
+  await settled();
+  await fake.answer("getRepositorySession", ok(newSession));
+  await opening;
+  assert.equal(store.getView().session, newSession);
+  assert.equal(store.getView().commits[0].summary, "summary repo-a");
+  assert.equal(store.getView().notice.code, "NOT_A_REPOSITORY");
+});
+
+test("a newer open intent prevents a refresh still recording the old view from starting", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const refreshing = store.refresh();
+  assert.equal(store.getView().refreshing, true);
+  const duplicateRefresh = store.refresh();
+  const opening = store.open("/repos/b");
+  assert.equal(store.getView().refreshing, false);
+
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await Promise.all([refreshing, duplicateRefresh]);
+  await settled();
+  assert.equal(fake.names().includes("refreshRepositorySession"), false);
+  const sessionB = makeSession("b");
+  await fake.answer("openRepositorySession", ok(sessionB));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionB)));
+  await opening;
+  assert.equal(store.getView().session, sessionB);
 });

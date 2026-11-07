@@ -18,6 +18,11 @@ export interface RepositoryActions {
   choose(): Promise<void>;
   cancel(): Promise<void>;
   retry(): Promise<void>;
+  retryPage(): Promise<void>;
+  cancelPage(): Promise<void>;
+  previousPage(): Promise<void>;
+  nextPage(): Promise<void>;
+  refresh(): Promise<void>;
 }
 
 /** Subscribes to core status, ignoring stale revisions. */
@@ -108,6 +113,8 @@ export function App(): React.JSX.Element {
   const [path, setPathState] = React.useState("");
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
+  const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
+  const restoredPageRevision = React.useRef(0);
   const pathEdited = React.useRef(false);
 
   useViewRecording(store, view);
@@ -120,13 +127,57 @@ export function App(): React.JSX.Element {
   // Keep the path field and the selection in step with what is shown.
   React.useEffect(() => {
     if (view.repository && !pathEdited.current) setPathState(view.repository.path);
-    setSelectedOid(current => view.commits.some(commit => commit.oid === current) ? current : view.commits[0]?.oid);
+    setSelectedOid(current => {
+      if (current && (view.commits.some(commit => commit.oid === current) || view.selectionMissingOnPage)) return current;
+      return view.commits[0]?.oid;
+    });
   }, [view.repository, view.commits]);
+
+  React.useEffect(() => {
+    store.setSelectedOid(selectedOid);
+  }, [selectedOid, store]);
+
+  React.useEffect(() => {
+    if (view.pageRevision === 0 || view.pageRevision === restoredPageRevision.current) return;
+    restoredPageRevision.current = view.pageRevision;
+    const anchor = anchorBeforeRefresh.current;
+    anchorBeforeRefresh.current = undefined;
+    if (!anchor || view.anchorMissing) return;
+    let frame = 0;
+    const restore = () => {
+      const list = document.querySelector<HTMLElement>('[aria-label="提交列表"] [data-testid="commit-row"][data-oid="' + CSS.escape(anchor.oid) + '"]');
+      const container = document.querySelector<HTMLElement>('[aria-label="提交列表"] [role="listbox"]');
+      if (!list || !container) return;
+      const target = container.scrollTop + list.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      const extra = Math.ceil(Math.max(0, target - maxScroll));
+      const space = store.getView().anchorRestorationSpace;
+      if (extra > space) {
+        store.setAnchorRestorationSpace(Math.min(container.clientHeight, extra));
+        frame = requestAnimationFrame(() => { frame = requestAnimationFrame(restore); });
+        return;
+      }
+      container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight - container.clientHeight));
+    };
+    frame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(frame);
+  }, [view.pageRevision, view.anchorMissing, store]);
 
   const run = async (action: () => Promise<void>) => {
     setActionError(undefined);
     try { await action(); } catch (error) { setActionError(String(error)); }
   };
+  const refresh = () => run(async () => {
+    const container = document.querySelector<HTMLElement>('[aria-label="提交列表"] [role="listbox"]');
+    const containerTop = container?.getBoundingClientRect().top ?? 0;
+    const anchorRow = container ? [...container.querySelectorAll<HTMLElement>('[data-testid="commit-row"]')]
+      .find(row => row.getBoundingClientRect().bottom > containerTop) : undefined;
+    anchorBeforeRefresh.current = anchorRow ? {
+      oid: anchorRow.dataset.oid ?? "",
+      offset: anchorRow.getBoundingClientRect().top - containerTop,
+    } : undefined;
+    await store.refresh(selectedOid, anchorBeforeRefresh.current);
+  });
   const actions: RepositoryActions = {
     path,
     setPath(next) { pathEdited.current = true; setPathState(next); },
@@ -140,6 +191,11 @@ export function App(): React.JSX.Element {
     }),
     cancel: () => run(() => store.cancel()),
     retry: () => run(() => store.retry()),
+    retryPage: () => view.pageErrorKind === "refresh" ? refresh() : run(() => store.retryPage(selectedOid)),
+    cancelPage: () => run(() => store.cancelPage()),
+    previousPage: () => run(() => store.previousPage()),
+    nextPage: () => run(() => store.nextPage()),
+    refresh,
   };
 
   const alerts = [
@@ -167,7 +223,9 @@ export function App(): React.JSX.Element {
       ? <div className="flex min-h-0 flex-1 flex-col">
         <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={setSelectedOid} />
         <div className="flex min-h-0 flex-1">
-          <CommitList preview={view} selectedOid={selectedOid} onSelect={setSelectedOid} onCancel={actions.cancel} onRetry={actions.retry} />
+          <CommitList preview={view} selectedOid={selectedOid} onSelect={setSelectedOid} onCancel={actions.cancel}
+            onRetry={actions.retry} onRetryPage={actions.retryPage} onCancelPage={actions.cancelPage}
+            onPreviousPage={actions.previousPage} onNextPage={actions.nextPage} />
           <CommitDetail preview={view} selectedOid={selectedOid} onSelect={setSelectedOid} />
         </div>
       </div>

@@ -1,6 +1,6 @@
 /* Generated from Rust protocol types. Do not edit by hand. */
 
-export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions";
+export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions" | "historyPagination";
 
 export interface CoreReady {
   capabilities: Capability[];

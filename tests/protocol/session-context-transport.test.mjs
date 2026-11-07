@@ -17,7 +17,7 @@ test("control and legacy null-context requests bypass the session gate; session 
     coreVersion: "0.1.0-test",
     pid: 8123,
     git: { available: true, version: "git version fixture", error: null },
-    capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions"],
+      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination"],
   };
   stdin.on("data", bytes => {
     for (const line of bytes.toString("utf8").trim().split("\n")) {
@@ -133,6 +133,82 @@ test("cancelled open drains its terminal response; uncertain open timeout is fat
     assert.equal(fatalErrors.length, 1);
     assert.equal(fatalErrors[0].code, "TIMEOUT");
     await assert.rejects(transport.request("listRecentRepositories", {}, nullContext), error => error.code === "CORE_EXITED");
+  } finally {
+    transport.close(new ProtocolClientError("CORE_EXITED", "test cleanup", true));
+    stdout.destroy();
+    stdin.destroy();
+  }
+});
+
+test("history page cancellation drains and discards chunks; refresh retains a committed terminal", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const requests = [];
+  const gate = new ViewContextGate();
+  const session = { repoId: "repo-a", generation: "generation-a" };
+  gate.switchCurrent(session);
+  const transport = new ProtocolTransport(stdout, stdin, { contextGate: gate, maxPendingRequests: 4 });
+  const ready = {
+    protocolVersion: 1, coreVersion: "0.1.0-test", pid: 8126,
+    git: { available: true, version: "git version fixture", error: null },
+    capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination"],
+  };
+  stdin.on("data", bytes => {
+    for (const line of bytes.toString("utf8").trim().split("\n")) {
+      const message = JSON.parse(line);
+      if (message.type === "hello") stdout.write(`${JSON.stringify({ type: "hello", core: ready })}\n`);
+      if (message.type === "request") requests.push(message);
+    }
+  });
+  const respond = (request, sequence, done, data, processed, nextCursor = null) => stdout.write(`${JSON.stringify({
+    type: "response", requestId: request.requestId, repoId: request.repoId, generation: request.generation,
+    sequence, done, coverage: { complete: done, processed }, nextCursor, data,
+  })}\n`);
+
+  try {
+    await transport.handshake(8126);
+    const abortPage = new AbortController();
+    const delivered = [];
+    const page = transport.request("readHistoryPage", { cursor: null, pageSize: 200 }, session, {
+      signal: abortPage.signal, drainAfterAbort: true, fatalOnTimeout: true, timeoutMs: 1000,
+      onChunk: chunk => delivered.push(chunk),
+    });
+    const pageRejected = assert.rejects(page, error => error.code === "CANCELLED");
+    await new Promise(resolve => setImmediate(resolve));
+    abortPage.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    const pageRequest = requests.find(item => item.method === "readHistoryPage");
+    assert.ok(pageRequest);
+    respond(pageRequest, 0, true, { section: "historyPage", commits: [], offset: 0, pageSize: 200,
+      cursor: "cursor-0", previousCursor: null, hasMore: false }, 0);
+    await pageRejected;
+    assert.deepEqual(delivered, [], "a cancelled page drains framing without delivering payload chunks");
+
+    const abortRefresh = new AbortController();
+    const chunks = [];
+    const refresh = transport.request("refreshRepository", { pageSize: 200 }, session, {
+      signal: abortRefresh.signal, retainResultAfterAbort: true, fatalOnTimeout: true, timeoutMs: 1000,
+      onChunk: chunk => chunks.push(chunk),
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    abortRefresh.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    const refreshRequest = requests.find(item => item.method === "refreshRepository");
+    assert.ok(refreshRequest);
+    respond(refreshRequest, 0, true, { section: "repositoryClosed", closed: true }, 1);
+    assert.deepEqual((await refresh).coverage, { complete: true, processed: 1 });
+    assert.equal(chunks.length, 1, "a committed mutation terminal remains visible after abort");
+
+    const malformed = transport.request("readHistoryPage", { cursor: null, pageSize: 200 }, session, {
+      timeoutMs: 1000, drainAfterAbort: true, fatalOnTimeout: true,
+      onChunk: () => { throw new Error("malformed terminal consumer"); },
+    });
+    const malformedRejected = assert.rejects(malformed, error => error.code === "PROTOCOL_ERROR");
+    await new Promise(resolve => setImmediate(resolve));
+    const malformedRequest = requests.findLast(item => item.method === "readHistoryPage");
+    respond(malformedRequest, 0, true, { section: "historyPage", commits: [], offset: 0, pageSize: 200,
+      cursor: "cursor-0", previousCursor: null, hasMore: false }, 0);
+    await malformedRejected;
   } finally {
     transport.close(new ProtocolClientError("CORE_EXITED", "test cleanup", true));
     stdout.destroy();

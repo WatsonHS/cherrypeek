@@ -25,7 +25,7 @@ export type ServerMessage =
       retryable: boolean;
       type: "error";
     };
-export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions";
+export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions" | "historyPagination";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -64,6 +64,18 @@ export type ResponseData =
       repositories: RecentRepository[];
       section: "recentRepositories";
       status: StoreStatus;
+    }
+  | {
+      /**
+       * @maxItems 500
+       */
+      commits: CommitSummary[];
+      cursor: string;
+      hasMore: boolean;
+      offset: number;
+      pageSize: number;
+      previousCursor: string | null;
+      section: "historyPage";
     };
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
@@ -85,7 +97,9 @@ export type ErrorCode =
   | "UNSUPPORTED_REPOSITORY"
   | "RESOURCE_LIMIT"
   | "GIT_ERROR"
-  | "PERMISSION_DENIED";
+  | "PERMISSION_DENIED"
+  | "INVALID_CURSOR"
+  | "SNAPSHOT_CHANGED";
 
 export interface CoreReady {
   capabilities: Capability[];

@@ -15,12 +15,17 @@ function coreLabel(status: CoreStatus): string {
 
 export function previewLabel(preview: RepositoryView): string {
   if (preview.opening !== null) return "正在打开仓库…";
-  if (preview.state === "loading") return "正在读取仓库…";
-  if (preview.state === "error") return preview.commits.length ? "读取失败 · 结果不完整" : "读取失败";
+  if (preview.state === "loading") return "正在读取首屏…";
+  if (preview.refreshing) return "正在刷新快照…";
+  if (preview.pageLoading) return "正在读取其他页…";
+  if (preview.pageError) return `读取失败 · 保留当前页`;
+  if (preview.state === "error") return preview.commits.length ? "读取失败 · 保留当前页" : "读取失败";
   if (preview.state === "cancelled") return "已取消";
   if (preview.state === "idle") return "未打开仓库";
   if (preview.repository?.headOid === null || preview.commits.length === 0) return "当前 HEAD 没有提交";
-  if (preview.hasMore) return `已显示前 ${preview.commits.length} 个提交`;
+  const refsWarning = preview.refsTruncated ? " · 引用列表不完整" : "";
+  if (preview.pageOffset !== null && preview.hasMore) return `已显示第 ${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条，仍有更多${refsWarning}`;
+  if (preview.pageOffset !== null) return `当前页第 ${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条${refsWarning}`;
   if (preview.refsTruncated) return "首屏已加载 · 引用列表不完整";
   return "首屏已加载";
 }

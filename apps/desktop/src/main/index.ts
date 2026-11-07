@@ -23,6 +23,9 @@ const IPC_SESSION_PREVIEW = "commitscope:session:preview";
 const IPC_SESSION_RECORD_VIEW = "commitscope:session:record-view";
 const IPC_SESSION_CLOSE = "commitscope:session:close";
 const IPC_SESSION_LIST_RECENT = "commitscope:session:list-recent";
+const IPC_HISTORY_READ = "commitscope:history:read-page";
+const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
+const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
@@ -83,9 +86,9 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.readPreview());
   });
-  ipcMain.handle(IPC_SESSION_RECORD_VIEW, event => {
+  ipcMain.handle(IPC_SESSION_RECORD_VIEW, (event, expectedGeneration: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.recordView());
+    return sessionResult(() => repositorySessions!.recordView(expectedGeneration));
   });
   ipcMain.handle(IPC_SESSION_CLOSE, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
@@ -94,6 +97,18 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_SESSION_LIST_RECENT, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.listRecent());
+  });
+  ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readHistoryPage(cursor, pageSize === undefined ? 200 : pageSize as number));
+  });
+  ipcMain.handle(IPC_HISTORY_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelHistoryRead());
+  });
+  ipcMain.handle(IPC_HISTORY_REFRESH, (event, pageSize: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.refreshRepository(pageSize === undefined ? 200 : pageSize as number));
   });
 }
 

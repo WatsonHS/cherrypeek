@@ -19,14 +19,15 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
 }): React.JSX.Element {
   const commits = preview.commits;
   const index = commits.findIndex(commit => commit.oid === selectedOid);
-  const commit = index === -1 ? undefined : commits[index];
+  const oldSelection = index === -1 && preview.oldSelectedCommit?.oid === selectedOid;
+  const commit = index === -1 ? oldSelection ? preview.oldSelectedCommit : undefined : commits[index];
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
   const byOid = React.useMemo(() => new Map(commits.map(item => [item.oid, item])), [commits]);
   const repository = preview.repository;
 
   if (!commit || !repository) {
     return <section aria-label="提交详情" className="flex min-w-0 flex-1 items-center justify-center bg-panel">
-      <p className="m-0 text-[13px] text-fg3">选择一条提交查看详情。</p>
+      <p className="m-0 text-[13px] text-fg3">{preview.selectionMissingOnPage ? "当前页未载入所选提交；这不表示它已不可达。" : "选择一条提交查看详情。"}</p>
     </section>;
   }
   const isMerge = commit.parents.length > 1;
@@ -35,17 +36,21 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
   return <section aria-label="提交详情" className="min-w-0 flex-1 overflow-auto bg-panel">
     <div className="mx-auto flex max-w-[920px] flex-col gap-5 px-11 pt-7 pb-12">
       <div className="flex flex-wrap items-center gap-2">
-        <RefTags refs={refIndex.get(commit.oid) ?? []} headReference={repository.headReference}
-          isHeadCommit={repository.headReference === null && isHead} size="default" limit={6} />
+        {!oldSelection ? <RefTags refs={refIndex.get(commit.oid) ?? []} headReference={repository.headReference}
+          isHeadCommit={repository.headReference === null && isHead} size="default" limit={6} /> : null}
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
         <div className="flex-1" />
         <HandoffMenu commit={commit} repository={repository} />
         <CopyOidButton oid={commit.oid} />
         <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={index <= 0}
           onClick={() => onSelect(commits[index - 1]!.oid)}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
-        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={index >= commits.length - 1}
+        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={index < 0 || index >= commits.length - 1}
           onClick={() => onSelect(commits[index + 1]!.oid)}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
       </div>
+
+      {oldSelection ? <p role="status" className="m-0 rounded-md border border-line bg-bg px-3 py-2 text-xs text-fg3">
+        这条详情来自刷新前的观察 {preview.oldSelectedObservedAtUnixMs ? new Date(preview.oldSelectedObservedAtUnixMs).toLocaleString() : ""}；它不在当前页，不能据此判断是否已不可达。
+      </p> : null}
 
       <div className="flex flex-col gap-2">
         <h1 className="m-0 text-2xl leading-[1.3] font-semibold tracking-[-0.01em] break-words [text-wrap:pretty]">{commit.summary}</h1>
@@ -83,17 +88,16 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
               </dl>
             </Section>
             <Section title="位置与引用">
+              {oldSelection ? <p className="m-0 text-xs text-fg3">旧观察的引用关系未随详情保留；当前快照也不能证明这条提交是否仍可达。</p> : null}
               <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] gap-x-3.5 gap-y-2.5 text-[13px]">
-                <dt className="text-fg3">引用</dt>
-                <dd className="m-0 flex min-w-0 flex-wrap gap-1.5">
+                {!oldSelection ? <><dt className="text-fg3">引用</dt><dd className="m-0 flex min-w-0 flex-wrap gap-1.5">
                   {(refIndex.get(commit.oid) ?? []).length
                     ? <RefTags refs={refIndex.get(commit.oid) ?? []} headReference={repository.headReference} size="default" limit={12} />
                     : <span className="text-fg2">没有引用直接指向它</span>}
-                </dd>
-                <dt className="text-fg3">HEAD</dt>
-                <dd className="m-0 text-fg2">{isHead
+                </dd></> : null}
+                {!oldSelection ? <><dt className="text-fg3">HEAD</dt><dd className="m-0 text-fg2">{isHead
                   ? `本窗口 HEAD 指向这里${repository.headReference ? `（${shortRefName(repository.headReference)}）` : "（detached）"}`
-                  : "不是本窗口 HEAD"}</dd>
+                  : "不是本窗口 HEAD"}</dd></> : null}
                 <dt className="text-fg3">包含它的分支</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-2">
                   <Button variant="outline" size="sm" disabled>按需计算</Button>

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cloud, Folder, GitBranch, LoaderCircle, Tag } from "lucide-react";
+import { ChevronDown, Cloud, Folder, GitBranch, LoaderCircle, RefreshCw, Tag } from "lucide-react";
 import type { RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView, ViewRecord } from "../lib/repository-session-store.js";
 import type { RepositoryActions } from "../app.js";
@@ -32,6 +32,11 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <div className="flex-1" />
     <SearchPlaceholder />
     <UpdatesPlaceholder />
+    {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
+      onClick={() => { void actions.refresh(); }} aria-label="刷新仓库历史">
+      <RefreshCw className={cn("size-3.5", preview.refreshing && "animate-spin motion-reduce:animate-none")} strokeWidth={1.75} />
+      {preview.refreshing ? "刷新中…" : "刷新"}
+    </Button> : null}
     {busy ? <div className="flex min-w-0 items-center gap-2 text-[13px] text-fg2">
       <LoaderCircle className="size-4 shrink-0 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" />
       <span className="max-w-[220px] truncate" title={preview.opening ?? undefined}>{preview.opening !== null ? `正在打开 ${repositoryName(preview.opening)}…` : "正在读取…"}</span>
@@ -66,11 +71,11 @@ function RepositorySwitcher({ repository, session, record, actions, recent, onRe
         <span className="text-xs text-fg3">对象格式 {repository.objectFormat}{repository.isBare ? " · bare 仓库" : ""}{repository.isShallow ? " · 浅克隆" : ""}</span>
         {session ? <SessionFacts session={session} record={record} /> : <span className="text-xs text-warn">核心已断开，这里显示的是之前读取的内容。</span>}
       </div>
-      <RecentList recent={recent} currentWorktreeId={session?.worktreeId ?? null} disabled={loading} onOpen={openPath} />
+    <RecentList recent={recent} currentWorktreeId={session?.worktreeId ?? null} disabled={false} onOpen={openPath} />
       <div className="flex flex-col gap-2">
         <span className="text-[11.5px] font-semibold text-fg3">打开其他仓库</span>
-        <PathField actions={actions} disabled={loading} onOpened={() => setOpen(false)} />
-        <Button variant="soft" className="self-start" disabled={loading} onClick={() => { setOpen(false); void actions.choose(); }}>选择目录…</Button>
+        <PathField actions={actions} disabled={false} onOpened={() => setOpen(false)} />
+        <Button variant="soft" className="self-start" onClick={() => { setOpen(false); void actions.choose(); }}>选择目录…</Button>
       </div>
     </PopoverContent>
   </Popover>;
@@ -90,7 +95,7 @@ function SessionFacts({ session, record }: { session: RepositorySessionInfo; rec
     record && !record.saved ? `这次查看没有保存${record.error ? `：${record.error.message}` : record.status ? `（${storeStatusText(record.status) ?? record.status}）` : ""}` : null,
   ].filter((note): note is string => Boolean(note));
   return <>
-    <span className="text-xs text-fg3">HEAD 读取于 {momentLabel(session.observedAtUnixMs)}；之后的新提交要重新打开才会显示</span>
+    <span className="text-xs text-fg3">HEAD 读取于 {momentLabel(session.observedAtUnixMs)}；手动刷新可读取新提交</span>
     <span className="text-xs text-fg3" data-testid="previous-view">{visit}</span>
     {notes.map(note => <span key={note} className="text-xs text-warn">{note}</span>)}
   </>;

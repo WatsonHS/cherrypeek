@@ -1,4 +1,4 @@
-use crate::{repository::DiscoveredRepository, session_store::SessionStore};
+use crate::{history::HistoryState, repository::DiscoveredRepository, session_store::SessionStore};
 use commitscope_core::{
     ErrorCode, RecentRepository, RepositoryScope, RepositorySessionInfo, SessionPersistenceStatus,
     StoreStatus,
@@ -17,6 +17,7 @@ use std::{
 pub struct RepositorySession {
     pub info: RepositorySessionInfo,
     pub discovered: Arc<DiscoveredRepository>,
+    pub history: Arc<HistoryState>,
 }
 
 pub struct SessionCommit {
@@ -60,6 +61,45 @@ impl SessionManager {
         intent: u64,
         cancelled: &AtomicBool,
         discovered: Arc<DiscoveredRepository>,
+    ) -> Result<SessionCommit, SessionError> {
+        self.commit_open_with_history(intent, cancelled, discovered, Arc::new(HistoryState::new()))
+    }
+
+    pub fn commit_refresh(
+        &mut self,
+        intent: u64,
+        expected_repo_id: &str,
+        expected_generation: &str,
+        cancelled: &AtomicBool,
+        discovered: Arc<DiscoveredRepository>,
+        history: Arc<HistoryState>,
+    ) -> Result<SessionCommit, SessionError> {
+        let current = match self.require_current(expected_repo_id, expected_generation) {
+            Ok(current) => current,
+            Err(error) => {
+                self.finish_open_failure(intent);
+                return Err(error);
+            }
+        };
+        let repository_key = repository_key(&discovered)?;
+        let worktree_id = worktree_id(&repository_key, &discovered)?;
+        if repository_key != current.info.repository_key || worktree_id != current.info.worktree_id
+        {
+            self.finish_open_failure(intent);
+            return Err(SessionError::new(
+                ErrorCode::RepositoryUnavailable,
+                "The selected path no longer identifies the open repository worktree",
+            ));
+        }
+        self.commit_open_with_history(intent, cancelled, discovered, history)
+    }
+
+    fn commit_open_with_history(
+        &mut self,
+        intent: u64,
+        cancelled: &AtomicBool,
+        discovered: Arc<DiscoveredRepository>,
+        history: Arc<HistoryState>,
     ) -> Result<SessionCommit, SessionError> {
         if cancelled.load(Ordering::Acquire) || intent != self.latest_open_intent {
             self.pending_opens.remove(&intent);
@@ -105,7 +145,11 @@ impl SessionManager {
                 last_seen: stored.last_seen_status,
             },
         };
-        let session = Arc::new(RepositorySession { info, discovered });
+        let session = Arc::new(RepositorySession {
+            info,
+            discovered,
+            history,
+        });
         let replaced_repo_id = self
             .current
             .replace(Arc::clone(&session))

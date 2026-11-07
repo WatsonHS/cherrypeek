@@ -19,6 +19,29 @@
       ],
       "type": "object"
     },
+    "ReadHistoryPageParams": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cursor",
+        "pageSize"
+      ],
+      "type": "object"
+    },
     "ReadRepositoryPreviewParams": {
       "additionalProperties": false,
       "properties": {
@@ -30,6 +53,21 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "RefreshRepositoryParams": {
+      "additionalProperties": false,
+      "properties": {
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pageSize"
       ],
       "type": "object"
     },
@@ -49,6 +87,12 @@
         },
         {
           "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/ReadHistoryPageParams"
+        },
+        {
+          "$ref": "#/definitions/RefreshRepositoryParams"
         },
         {
           "$ref": "#/definitions/EmptyParams"
