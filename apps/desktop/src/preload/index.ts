@@ -18,6 +18,7 @@ const api: CommitScopeApi = {
     ipcRenderer.on("commitscope:repository:changed", wrapped);
     return () => ipcRenderer.removeListener("commitscope:repository:changed", wrapped);
   },
+  copyText: text => ipcRenderer.invoke("commitscope:clipboard:write-text", text) as Promise<void>,
   openRepositorySession: path => ipcRenderer.invoke("commitscope:session:open", path),
   getRepositorySession: () => ipcRenderer.invoke("commitscope:session:get"),
   readSessionPreview: () => ipcRenderer.invoke("commitscope:session:preview"),

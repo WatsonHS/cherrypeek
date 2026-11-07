@@ -27,7 +27,11 @@ try {
   const previewState = page.getByTestId("preview-state");
   await previewState.waitFor({ state: "visible", timeout: 15000 });
   await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"]')?.getAttribute("data-state") === "ready", { timeout: 20000 });
+  // The path field lives in the repository switcher popover once a repository is open.
+  const switcher = page.getByRole("button", { name: /^切换仓库/ });
+  await switcher.click();
   assert.equal(await page.locator("#repository-path").inputValue(), expectedRepositoryPath);
+  await page.keyboard.press("Escape");
   const row = page.getByTestId("commit-row").first();
   await row.waitFor({ state: "visible" });
   const oid = await row.getAttribute("data-oid");
@@ -36,11 +40,14 @@ try {
   assert.equal((await page.locator("img").count()), 0, "untrusted commit text must not create DOM elements");
   const hostileSummary = "literal <img src=x onerror=alert(1)> <script>fixture</script> & text";
   const hostileRow = page.getByTestId("commit-row").filter({ hasText: hostileSummary });
-  await page.getByText(hostileSummary, { exact: true }).waitFor({ state: "visible" });
+  await page.getByText(hostileSummary, { exact: true }).first().waitFor({ state: "visible" });
   assert.equal(await hostileRow.locator("img, script").count(), 0, "HTML-like commit summary must remain a text node");
   await row.click();
   await page.getByText(oid, { exact: true }).last().waitFor({ state: "visible" });
   assert.equal(await row.getAttribute("aria-selected"), "true");
+  await page.getByRole("button", { name: `复制完整 OID ${oid}` }).click();
+  await page.getByText("已复制", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), oid);
   const mergeRow = page.getByTestId("commit-row").filter({ hasText: "merge side into main" });
   await mergeRow.click();
   const mergeOid = await mergeRow.getAttribute("data-oid");
@@ -54,6 +61,7 @@ try {
   await page.screenshot({ path: resolve(screenshotDir, "p0-03-repository-preview.png") });
 
   const emptyPath = resolve(expectedRepositoryPath, "../empty");
+  await switcher.click();
   await page.locator("#repository-path").fill(emptyPath);
   await page.getByRole("button", { name: "打开", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"]')?.getAttribute("data-state") === "ready", { timeout: 15000 });
@@ -61,6 +69,7 @@ try {
   assert.equal(await page.getByTestId("commit-row").count(), 0);
   await page.screenshot({ path: resolve(screenshotDir, "p0-03-empty-repository.png") });
 
+  await page.getByRole("button", { name: /^切换仓库/ }).click();
   await page.locator("#repository-path").fill(resolve(repository, "does-not-exist"));
   await page.getByRole("button", { name: "打开", exact: true }).click();
   await page.getByRole("alert").waitFor({ state: "visible" });

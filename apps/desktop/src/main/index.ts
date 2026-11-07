@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, type IpcMainInvokeEvent } from "electron";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CoreProcess } from "./core-process.js";
@@ -28,6 +28,8 @@ const IPC_SESSION_PREVIEW = "commitscope:session:preview";
 const IPC_SESSION_RECORD_VIEW = "commitscope:session:record-view";
 const IPC_SESSION_CLOSE = "commitscope:session:close";
 const IPC_SESSION_LIST_RECENT = "commitscope:session:list-recent";
+const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
+const MAX_COPY_TEXT_LENGTH = 64 * 1024;
 let window: BrowserWindow | undefined;
 let core: CoreProcess | undefined;
 let preview: RepositoryPreviewController | undefined;
@@ -62,6 +64,11 @@ function registerStatusIpc(): void {
   ipcMain.handle(IPC_CANCEL_REPOSITORY, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     preview?.cancel();
+  });
+  ipcMain.handle(IPC_COPY_TEXT, (event, text: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    if (typeof text !== "string" || text.length === 0 || text.length > MAX_COPY_TEXT_LENGTH) throw new Error("Invalid clipboard text");
+    clipboard.writeText(text);
   });
   ipcMain.handle(IPC_GET_REPOSITORY, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

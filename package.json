@@ -23,6 +23,7 @@
     "test:sessions": "node scripts/test-sessions.mjs"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.5",
     "@types/node": "24.19.2",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -31,6 +32,7 @@
     "esbuild": "0.28.2",
     "json-schema-to-typescript": "16.0.0",
     "playwright": "1.65.0",
+    "tailwindcss": "4.3.5",
     "typescript": "7.0.2",
     "vite": "8.3.6"
   },

@@ -16,4 +16,5 @@ export interface CommitScopeApi extends RepositorySessionApi {
   cancelRepositoryPreview(): Promise<void>;
   getRepositoryPreview(): Promise<RepositoryPreviewState>;
   onRepositoryPreviewChanged(listener: (state: RepositoryPreviewState) => void): () => void;
+  copyText(text: string): Promise<void>;
 }

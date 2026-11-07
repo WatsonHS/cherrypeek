@@ -2,12 +2,12 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0 及 P1-01 后端与非视觉接口已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；核心新增固定 HEAD 的仓库会话、最近打开与按 worktree 保存的上次查看记录，窄接口已提供，界面尚待接入。已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、图与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：M0 及 P1-01 后端与非视觉接口已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；核心新增固定 HEAD 的仓库会话、最近打开与按 worktree 保存的上次查看记录，窄接口已提供，界面尚待接入。界面已按 v3 设计换成 Tailwind + shadcn 外壳（UI-01），后端未接入的区域显示标注“占位”的示例内容。已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、Rust 图布局与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
 - 独立新建项目，不 fork GitComet，不引入或复制其后端及状态层代码。
-- Electron 桌面外壳，React + TypeScript 界面，Rust 承担 Git 读取、查询、缓存和后台任务。
+- Electron 桌面外壳，React + TypeScript 界面（Tailwind CSS 4 + shadcn 风格组件），Rust 承担 Git 读取、查询、缓存和后台任务。
 - 第一版聚焦历史、搜索、分支、近期提交统计和按需查看 diff。
 - 点击分支改变浏览范围，不切换工作区；先实现只读闭环，适配 Agent 同时操作仓库。
 - 当前浏览固定引用快照，外部变化只提示有更新，用户点击刷新后才切换快照。
@@ -22,6 +22,7 @@
 | [界面设计稿](https://claude.ai/artifact/LssQVaEeGiqB1WdCRn2jDa) | 已确认的「v3 · B 细化」画板（示例数据；默认仅所有者可见；以产品范围的文字为准） |
 | [界面规范](docs/DESIGN.md) | 颜色、字体、间距、组件与状态的实现规范（以此为准） |
 | [交给 Agent 模板](docs/HANDOFF.md) | 各场景 prompt 的文案、变量与防注入规则 |
+| [UI-01 验收记录](docs/validation/ui-01-foundation.md) | 界面基础的实现范围、真实数据与占位划分、测试与未验证项 |
 | [技术架构](docs/ARCHITECTURE.md) | Electron / Rust 分工、通信、Git 读取、分页、索引与刷新 |
 | [路线图](docs/ROADMAP.md) | 从技术验证到可日用版本的阶段和验收关卡 |
 | [实施计划](docs/PLAN.md) | 可直接开始执行的任务、依赖、交付物和完成条件 |

@@ -76,7 +76,7 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "cancelRepositoryPreview", "chooseRepository", "closeRepositorySession", "getCoreStatus",
+    "cancelRepositoryPreview", "chooseRepository", "closeRepositorySession", "copyText", "getCoreStatus",
     "getRepositoryPreview", "getRepositorySession", "listRecentRepositories", "onCoreStatusChanged",
     "onRepositoryPreviewChanged", "openRepositoryPreview", "openRepositorySession", "readSessionPreview", "recordRepositoryView",
   ]);
