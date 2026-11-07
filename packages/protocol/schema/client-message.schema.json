@@ -85,6 +85,27 @@
       ],
       "type": "object"
     },
+    "LocateCommitParams": {
+      "additionalProperties": false,
+      "properties": {
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oid",
+        "pageSize"
+      ],
+      "type": "object"
+    },
     "MetadataIndexAction": {
       "enum": [
         "pause",
@@ -320,6 +341,9 @@
         },
         {
           "$ref": "#/definitions/ReadHistoryPageParams"
+        },
+        {
+          "$ref": "#/definitions/LocateCommitParams"
         },
         {
           "$ref": "#/definitions/RefreshRepositoryParams"

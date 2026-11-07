@@ -297,8 +297,8 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
 
     {preview.pageError ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
-      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{preview.pageErrorKind === "refresh" ? "刷新失败" : "历史页读取失败"}</span><span className="break-words text-fg2">{preview.pageError.message} <code className="font-mono text-xs text-fg3">{preview.pageError.code}</code></span></span>
-      {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetryPage(); }}>重试</Button> : null}
+      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{preview.pageErrorKind === "refresh" ? "刷新失败" : preview.pageErrorKind === "location" ? "历史定位失败" : "历史页读取失败"}</span><span className="break-words text-fg2">{preview.pageError.code === "SCOPE_UNAVAILABLE" ? "提交不在当前快照范围内。" : preview.pageError.message} <code className="font-mono text-xs text-fg3">{preview.pageError.code}</code></span></span>
+      {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetryPage(); }}>{preview.pageErrorKind === "location" ? "重试定位" : "重试"}</Button> : null}
     </div> : null}
 
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}

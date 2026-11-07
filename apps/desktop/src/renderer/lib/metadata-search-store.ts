@@ -49,6 +49,16 @@ export interface HistoryReturnPoint {
   anchor: { oid: string; offset: number } | null;
 }
 
+export interface SearchLocationReturnPoint {
+  sessionKey: string;
+  query: SearchQuery;
+  selectedOid: string;
+  selectedCommit: CommitSummary | null;
+  anchor: { oid: string; offset: number } | null;
+  matchedCount: number;
+  partial: boolean;
+}
+
 export const DEFAULT_SEARCH_QUERY: SearchQuery = {
   message: "", caseSensitive: false, authors: [], committers: [], oidPrefix: "",
   timeField: "committer", fromTimestamp: null, toTimestamp: null,
@@ -84,6 +94,7 @@ export class MetadataSearchStore {
   private pages: SearchPage[] = [];
   private sessionKey: string | null = null;
   private historyReturn: HistoryReturnPoint | null = null;
+  private locationReturn: SearchLocationReturnPoint | null = null;
 
   constructor(private readonly api: SearchApi) {}
 
@@ -100,6 +111,51 @@ export class MetadataSearchStore {
   }
   getHistoryReturn(): HistoryReturnPoint | null { return this.historyReturn; }
   clearHistoryReturn(): void { this.historyReturn = null; }
+  getLocationReturn(): SearchLocationReturnPoint | null { return this.locationReturn; }
+  clearLocationReturn(): void { this.locationReturn = null; }
+
+  async suspendForHistoryLocation(sessionKey: string): Promise<SearchLocationReturnPoint | null> {
+    const window = this.view.window;
+    const selectedOid = this.view.selectedOid;
+    if (!this.view.active || !window || !selectedOid) return null;
+    const point: SearchLocationReturnPoint = {
+      sessionKey,
+      query: this.view.query,
+      selectedOid,
+      selectedCommit: window.commits.find(commit => commit.oid === selectedOid) ?? this.view.oldSelectedCommit,
+      anchor: this.view.anchorOid ? { oid: this.view.anchorOid, offset: this.view.anchorOffset } : null,
+      matchedCount: window.matchedCount,
+      partial: !window.coverage.complete,
+    };
+    this.locationReturn = point;
+    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    this.clearDebounce();
+    ++this.operation;
+    ++this.identityIntent;
+    ++this.identityOperation.author;
+    ++this.identityOperation.committer;
+    this.pages = [];
+    this.update({ ...this.view, active: false, query: DEFAULT_SEARCH_QUERY, loading: false, pageLoading: false,
+      window: null, selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
+      authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, error: null });
+    if (pending) await this.api.cancelSearch();
+    return point;
+  }
+
+  async resumeAfterHistoryLocation(sessionKey: string, queryOverride?: SearchQuery): Promise<boolean> {
+    const point = this.locationReturn;
+    if (!point || point.sessionKey !== sessionKey || this.sessionKey !== sessionKey) return false;
+    this.locationReturn = null;
+    const query = queryOverride ?? point.query;
+    const sameQuery = searchQueryKey(query) === searchQueryKey(point.query);
+    this.pages = [];
+    this.update({ ...this.view, active: true, query, loading: false, pageLoading: false, error: null, window: null,
+      selectedOid: sameQuery ? point.selectedOid : undefined, oldSelectedCommit: sameQuery ? point.selectedCommit : null,
+      anchorOid: sameQuery ? point.anchor?.oid ?? null : null,
+      anchorOffset: sameQuery ? point.anchor?.offset ?? 0 : 0 });
+    void this.runSearch({ cursor: null, anchorOid: sameQuery ? point.anchor?.oid ?? null : null });
+    return true;
+  }
 
   updateQuery(query: SearchQuery, composing = false): { wasActive: boolean; active: boolean } {
     this.composing = composing;
@@ -142,6 +198,7 @@ export class MetadataSearchStore {
   bindSession(sessionKey: string | null, ready: boolean): void {
     if (sessionKey !== this.sessionKey) {
       this.sessionKey = sessionKey;
+      this.locationReturn = null;
       if (this.historyReturn) this.historyReturn = { ...this.historyReturn, cursor: null };
       this.clearDebounce();
       ++this.operation;
@@ -242,6 +299,7 @@ export class MetadataSearchStore {
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
     const hadRequest = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    this.locationReturn = null;
     this.pages = [];
     this.update({ ...this.view, active: false, query: DEFAULT_SEARCH_QUERY, loading: false, pageLoading: false,
       window: null, selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,

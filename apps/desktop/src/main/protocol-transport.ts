@@ -196,12 +196,12 @@ export class ProtocolTransport {
     if (options.retainResultAfterAbort && method !== "openRepository" && method !== "refreshRepository" && method !== "selectRepositoryScope") {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开、刷新和范围切换可保留迟到的成功终态"));
     }
-    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
+    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" &&
       !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
-    if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "refreshRepository", "selectRepositoryScope"].includes(method)) {
+    if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "selectRepositoryScope"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅会话变更请求可因超时关闭连接"));
     }
 
@@ -557,6 +557,9 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "readHistoryPage" && isRecord(params) &&
     (params.cursor === null || typeof params.cursor === "string") &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
+  if (method === "locateCommit" && isRecord(params) && hasExactKeys(params, ["oid", "pageSize"]) &&
+    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (method === "refreshRepository" && isRecord(params) &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (method === "selectRepositoryScope" && isRecord(params) &&
@@ -633,7 +636,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
   return undefined;
 }
 

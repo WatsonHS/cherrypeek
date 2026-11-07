@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { RepositorySessionStore } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "repository-session-store.mjs")));
 
-const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"];
+const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "locateCommit", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"];
 
 /** Session API whose every call waits until the test answers it. */
 function fakeApi() {
@@ -151,6 +151,27 @@ test("open shows the session once its first page arrives", async () => {
   assert.equal(view.commits[0].summary, "summary repo-a");
   assert.deepEqual(fake.calls[0], { name: "openRepositorySession", args: ["/repos/a"] });
   assert.ok(notifications >= 3);
+});
+
+test("cancelling a history location ignores its late page and keeps the current window", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "locate-cancel");
+  const originalOid = store.getView().commits[0].oid;
+  const targetOid = "ab".repeat(20);
+  const locating = store.locateCommit(targetOid);
+  await settled();
+  assert.equal(fake.pending.locateCommit.length, 1);
+
+  const cancelling = store.cancelPage();
+  await fake.answer("locateCommit", ok(makeHistoryPage(session, {
+    offset: 400, cursor: "cursor-400", previousCursor: "cursor-200", nextCursor: "cursor-600",
+    commits: [{ ...makePreview(session).commits[0], oid: targetOid }],
+  })));
+  await cancelling;
+  assert.equal(await locating, false);
+  assert.equal(store.getView().pageLoading, false);
+  assert.equal(store.getView().commits[0].oid, originalOid);
 });
 
 test("a newer open wins; late results from the older open are dropped", async () => {

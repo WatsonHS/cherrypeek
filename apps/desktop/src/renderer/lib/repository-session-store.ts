@@ -54,7 +54,8 @@ export interface RepositoryView {
   pageRequestKind: "prefetch" | "navigation" | null;
   refreshing: boolean;
   pageError: ViewError | null;
-  pageErrorKind: "read" | "refresh" | null;
+  pageErrorKind: "read" | "refresh" | "location" | null;
+  retryLocationOid: string | null;
   retryCursor: string | null;
   retryDirection: "before" | "after";
   oldSelectedCommit: HistoryCommit | null;
@@ -96,7 +97,7 @@ export interface ScopeSwitchResult {
 }
 
 export type SessionApi = Pick<RepositorySessionApi,
-  "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "cancelHistoryRead" |
+  "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "locateCommit" | "cancelHistoryRead" |
   "refreshRepositorySession" | "recordRepositoryView" | "closeRepositorySession" |
   "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus" |
   "getMetadataIndexStatus" | "controlMetadataIndex">;
@@ -108,7 +109,7 @@ function emptyView(revision: number, state: RepositoryViewState = "idle"): Repos
     pageOffset: null, pageSize: 200, pageCursor: null, previousCursor: null, nextCursor: null,
     windowPreviousCursor: null, windowNextCursor: null, canNavigatePrevious: false, canNavigateNext: false,
     pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
-    refreshing: false, pageError: null, pageErrorKind: null, retryCursor: null, retryDirection: "after",
+    refreshing: false, pageError: null, pageErrorKind: null, retryLocationOid: null, retryCursor: null, retryDirection: "after",
     oldSelectedCommit: null, oldSelectedObservedAtUnixMs: null,
     selectionMissingOnPage: false, anchorMissing: false, anchorRestorationSpace: 0, pageRevision: 0,
     windowRevision: 0, windowPageCount: 0,
@@ -464,8 +465,53 @@ export class RepositorySessionStore {
     this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null });
   }
 
+  async locateCommit(oid: string): Promise<boolean> {
+    const session = this.view.session;
+    if (!session || this.view.state !== "ready" || this.view.opening !== null || this.view.refreshing || this.view.scopeSwitching) return false;
+    if (this.pageRequest) await this.cancelPage();
+    if (!sameSession(this.view.session, session) || this.view.state !== "ready" || this.view.refreshing || this.view.scopeSwitching) return false;
+    const operation = ++this.pageOperation;
+    this.update({ ...this.view, pageLoading: true, pageRequestDirection: null, pageRequestKind: "navigation", pageError: null, pageErrorKind: null, retryLocationOid: oid });
+    const done = (async (): Promise<boolean> => {
+      const result = await settle(this.api.locateCommit(oid, this.view.pageSize));
+      if (operation !== this.pageOperation || !sameSession(this.view.session, session)) return false;
+      if (!result.ok) {
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: result.error, pageErrorKind: "location", retryLocationOid: oid });
+        return false;
+      }
+      const page = result.value;
+      if (!validHistoryPage(page, this.view.pageSize) || !page.commits.some(commit => commit.oid === oid)) {
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+          pageError: { code: "PROTOCOL_ERROR", message: "定位结果没有包含目标提交" }, pageErrorKind: "location", retryLocationOid: oid });
+        return false;
+      }
+      this.pages = [page];
+      this.activePageCursor = page.cursor;
+      this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
+      this.selectedOid = oid;
+      this.viewportAnchorOid = oid;
+      this.applyWindow(session, this.pages, "ready", {
+        pageRevision: this.view.pageRevision + 1,
+        oldSelectedCommit: null,
+        oldSelectedObservedAtUnixMs: null,
+        selectionMissingOnPage: false,
+        anchorMissing: false,
+        retryCursor: null,
+        pageErrorKind: null,
+        retryLocationOid: null,
+      });
+      return true;
+    })();
+    const tracked = done.then(() => undefined);
+    this.pageRequest = { cursor: null, done: tracked };
+    const located = await done;
+    if (this.pageRequest?.done === tracked) this.pageRequest = undefined;
+    return located;
+  }
+
   async retryPage(selectedOid = this.selectedOid): Promise<void> {
     if (this.view.pageErrorKind === "refresh") return this.refresh(selectedOid);
+    if (this.view.pageErrorKind === "location" && this.view.retryLocationOid) { await this.locateCommit(this.view.retryLocationOid); return; }
     if (this.view.pageErrorKind === "read") return this.readPageAndReturn(this.view.retryCursor ?? "", "navigation").then(() => undefined);
     if (this.view.state === "error") return this.retry();
   }
@@ -551,6 +597,7 @@ export class RepositorySessionStore {
       pageRequestKind: null,
       refreshing: false,
       pageError: null,
+      retryLocationOid: null,
       pageErrorKind: null,
       retryCursor: null,
       oldSelectedCommit: selectedStillLoaded ? null : selected ?? null,
@@ -851,6 +898,7 @@ export class RepositorySessionStore {
       windowRevision: this.view.windowRevision + 1,
       anchorRestorationSpace: 0,
       pageError: null,
+      retryLocationOid: null,
       error: null,
       ...extra,
     });

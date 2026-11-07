@@ -14,7 +14,7 @@ import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
-export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext }: {
+export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, selectedTab = "overview", onTabChange }: {
   preview: RepositoryView;
   detail: CommitDetailView;
   onRetryDetails(): void;
@@ -33,6 +33,9 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   timeField?: SearchTimeField;
   canMovePrevious?: boolean;
   canMoveNext?: boolean;
+  onLocateInHistory?(): void;
+  selectedTab?: string;
+  onTabChange?(tab: string): void;
 }): React.JSX.Element {
   const commits = commitsOverride ?? preview.commits;
   const index = commits.findIndex(commit => commit.oid === selectedOid);
@@ -64,6 +67,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
         {oldDetailContext && shownDetails?.refs.length ? <RefTags refs={shownDetails.refs} headReference={null} size="default" limit={6} /> : null}
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
         <div className="flex-1" />
+        {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory}>在历史中定位</Button> : null}
         <HandoffMenu commit={commit} repository={repository} />
         <CopyOidButton oid={commit.oid} />
         <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
@@ -90,7 +94,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
         {shownDetails ? <MessageBody details={shownDetails} /> : null}
       </div>
 
-      <Tabs defaultValue="overview" className="flex flex-col gap-5">
+      <Tabs value={selectedTab} onValueChange={onTabChange} className="flex flex-col gap-5">
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="changes">文件改动</TabsTrigger>

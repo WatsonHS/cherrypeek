@@ -18,6 +18,7 @@ import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repos
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
 import { CommitDetailStore } from "./lib/commit-detail-store.js";
+import { Button } from "./components/ui/button.js";
 
 export interface RepositoryActions {
   path: string;
@@ -168,6 +169,9 @@ export function App(): React.JSX.Element {
   const [path, setPathState] = React.useState("");
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
+  const [historyLocation, setHistoryLocation] = React.useState<{ oid: string; sessionKey: string; loading: boolean; cancelled: boolean; error: string | null } | null>(null);
+  const [detailTab, setDetailTab] = React.useState("overview");
+  const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
   const pathEdited = React.useRef(false);
   const setViewportAnchor = React.useCallback((oid: string | undefined) => store.setViewportAnchor(oid), [store]);
@@ -175,6 +179,65 @@ export function App(): React.JSX.Element {
   const loadMergeStatus = React.useCallback((names: string[]) => store.loadRefMergeStatus(names), [store]);
   const cancelMergeStatus = React.useCallback(() => store.cancelRefMergeStatus(), [store]);
   const loadSearchIdentities = React.useCallback((field: SearchTimeField, text: string) => { void searchStore.loadIdentities(field, text); }, [searchStore]);
+  const currentSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  const returnToSearch = React.useCallback(async (queryOverride?: SearchQuery): Promise<boolean> => {
+    const location = historyLocation;
+    const point = searchStore.getLocationReturn();
+    if (!location || !point) return false;
+    const intent = ++locationIntent.current;
+    if (store.getView().pageLoading) await store.cancelPage();
+    if (intent !== locationIntent.current) return false;
+    const session = store.getView().session;
+    const sessionKey = session ? `${session.repoId}:${session.generation}` : null;
+    if (sessionKey !== location.sessionKey) {
+      searchStore.clearLocationReturn();
+      setHistoryLocation(null);
+      return false;
+    }
+    store.suspendHistoryWindow(undefined, null);
+    setHistoryLocation(null);
+    setSelectedOid(point.selectedOid);
+    return searchStore.resumeAfterHistoryLocation(sessionKey, queryOverride);
+  }, [historyLocation, searchStore, store]);
+  const cancelHistoryLocation = React.useCallback(async () => {
+    const location = historyLocation;
+    if (!location?.loading) return;
+    const intent = ++locationIntent.current;
+    await store.cancelPage();
+    if (intent === locationIntent.current) setHistoryLocation(current => current?.sessionKey === location.sessionKey
+      ? { ...current, loading: false, cancelled: true, error: null } : current);
+  }, [historyLocation, store]);
+  const abandonHistoryLocation = React.useCallback(async () => {
+    if (!historyLocation) return;
+    const intent = ++locationIntent.current;
+    await store.cancelPage();
+    if (intent !== locationIntent.current) return;
+    searchStore.clearLocationReturn();
+    searchStore.clearHistoryReturn();
+    setHistoryLocation(null);
+  }, [historyLocation, searchStore, store]);
+  const locateSelectedInHistory = React.useCallback(async (oid: string) => {
+    const sessionKey = currentSessionKey;
+    if (!sessionKey || !searchStore.getView().active) return;
+    const intent = ++locationIntent.current;
+    setHistoryLocation({ oid, sessionKey, loading: true, cancelled: false, error: null });
+    const point = await searchStore.suspendForHistoryLocation(sessionKey);
+    const session = store.getView().session;
+    const nowKey = session ? `${session.repoId}:${session.generation}` : null;
+    if (intent !== locationIntent.current || !point || nowKey !== sessionKey || searchStore.getLocationReturn()?.sessionKey !== sessionKey) {
+      if (intent === locationIntent.current) setHistoryLocation(null);
+      return;
+    }
+    setSelectedOid(undefined);
+    const found = await store.locateCommit(oid);
+    if (intent !== locationIntent.current) return;
+    if (found) setSelectedOid(oid);
+    const pageError = store.getView().pageError;
+    setHistoryLocation(current => current?.sessionKey === sessionKey ? {
+      ...current, loading: false, error: found ? null : pageError?.code === "SCOPE_UNAVAILABLE"
+        ? "提交不在当前快照范围内。" : pageError?.message ?? "历史定位未完成。",
+    } : current);
+  }, [currentSessionKey, searchStore, store]);
   const restoreHistoryAfterSearch = React.useCallback(async () => {
     const point = searchStore.getHistoryReturn();
     await searchStore.leave();
@@ -185,6 +248,14 @@ export function App(): React.JSX.Element {
     if (restored && !searchStore.getView().active) searchStore.clearHistoryReturn();
   }, [searchStore, store]);
   const updateSearchQuery = React.useCallback((query: SearchQuery, composing = false) => {
+    if (historyLocation) {
+      if (!hasSearchCriteria(query)) {
+        searchStore.updateQuery(query, composing);
+        return;
+      }
+      void returnToSearch(query);
+      return;
+    }
     const before = searchStore.getView();
     const nextActive = hasSearchCriteria(query);
     if (!before.active && nextActive && view.session) {
@@ -204,7 +275,7 @@ export function App(): React.JSX.Element {
     }
     const transition = searchStore.updateQuery(query, composing);
     if (transition.wasActive && !transition.active) void restoreHistoryAfterSearch();
-  }, [searchStore, view.session, store, selectedOid, restoreHistoryAfterSearch]);
+  }, [historyLocation, returnToSearch, searchStore, view.session, store, selectedOid, restoreHistoryAfterSearch]);
   const finishSearchComposition = React.useCallback((composing: boolean) => {
     if (composing) searchStore.beginComposition();
     else searchStore.finishComposition();
@@ -231,8 +302,16 @@ export function App(): React.JSX.Element {
   const searchPartialBusy = searchView.active && (searchRequestBusy || advancingPartialSearch);
   useMetadataIndexPolling(ready, metadataIndexSupported, store, view, searchPartialBusy);
 
-  const sessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  const sessionKey = currentSessionKey;
   const boundSearchSession = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (historyLocation && historyLocation.sessionKey !== sessionKey) {
+      ++locationIntent.current;
+      searchStore.clearLocationReturn();
+      searchStore.clearHistoryReturn();
+      setHistoryLocation(null);
+    }
+  }, [historyLocation?.sessionKey, sessionKey, searchStore]);
   React.useEffect(() => {
     if (searchView.active && view.state === "ready" && view.session &&
       (!searchStore.getHistoryReturn() || boundSearchSession.current !== sessionKey)) {
@@ -321,6 +400,7 @@ export function App(): React.JSX.Element {
     try { await action(); } catch (error) { setActionError(String(error)); }
   };
   const refresh = () => run(async () => {
+    await abandonHistoryLocation();
     const activeSearch = searchStore.getView();
     if (activeSearch.active) {
       const anchor = activeSearch.anchorOid ? { oid: activeSearch.anchorOid, offset: activeSearch.anchorOffset } : undefined;
@@ -341,12 +421,13 @@ export function App(): React.JSX.Element {
   const actions: RepositoryActions = {
     path,
     setPath(next) { pathEdited.current = true; setPathState(next); },
-    open: (target = path) => run(() => store.open(target)),
+    open: (target = path) => run(async () => { await abandonHistoryLocation(); await store.open(target); }),
     choose: () => run(async () => {
       const chosen = await window.commitScope.chooseRepository();
       if (!chosen) return;
       pathEdited.current = true;
       setPathState(chosen);
+      await abandonHistoryLocation();
       await store.open(chosen);
     }),
     cancel: () => run(() => store.cancel()),
@@ -357,6 +438,7 @@ export function App(): React.JSX.Element {
     nextPage: () => store.nextPage(),
     refresh,
     switchScope: scope => run(async () => {
+      await abandonHistoryLocation();
       const selectionToken = captureSelectionIntent();
       const container = document.querySelector<HTMLElement>('[aria-label="提交列表"] [role="listbox"]');
       const containerTop = container?.getBoundingClientRect().top ?? 0;
@@ -376,6 +458,41 @@ export function App(): React.JSX.Element {
       }
     }),
   };
+
+  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab });
+  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab };
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      const actions = shortcutActions.current;
+      const key = event.key.toLowerCase();
+      if (event.code === "KeyF" && !event.altKey) {
+        event.preventDefault();
+        const focus = () => requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="search-input"]')?.focus());
+        if (actions.historyLocation) void actions.returnToSearch().then(focus);
+        else focus();
+      } else if (key === "[" && !event.altKey && actions.historyLocation) {
+        event.preventDefault();
+        void actions.returnToSearch();
+      } else if (key === "]" && !event.altKey && actions.searchView.active && actions.searchView.selectedOid) {
+        event.preventDefault();
+        void actions.locateSelectedInHistory(actions.searchView.selectedOid);
+      } else if (event.code === "Digit1" && !event.altKey) {
+        event.preventDefault();
+        actions.setDetailTab("overview");
+      } else if (event.code === "Digit2" && !event.altKey) {
+        event.preventDefault();
+        actions.setDetailTab("changes");
+      } else if (event.code === "KeyR" && event.altKey) {
+        event.preventDefault();
+        void actions.refresh();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const alerts = [
     status.state === "error" ? `核心不可用：${status.message}` : undefined,
@@ -398,6 +515,14 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener("focus", refreshDetailHint);
   }, [detailStore]);
   React.useEffect(() => () => { void detailStore.cancel(); }, [detailStore]);
+  const locationReturn = searchStore.getLocationReturn();
+  const pausedFilterLabels = locationReturn ? [
+    locationReturn.query.message ? "消息" : null,
+    locationReturn.query.authors.length ? "Author" : null,
+    locationReturn.query.committers.length ? "Committer" : null,
+    locationReturn.query.fromTimestamp !== null || locationReturn.query.toTimestamp !== null ? "日期" : null,
+    locationReturn.query.oidPrefix ? "OID" : null,
+  ].filter((label): label is string => Boolean(label)) : [];
   const statusView = searchView.active && searchPartialBusy && searchView.window
     ? { ...view, metadataIndex: searchView.window.index, metadataIndexLoading: false } : view;
   const moveSearchSelection = async (delta: -1 | 1) => {
@@ -442,6 +567,19 @@ export function App(): React.JSX.Element {
     </div> : null}
     {view.repository
       ? <div className="flex min-h-0 flex-1 flex-col">
+        {historyLocation ? <div role="status" data-testid="history-location-banner" className="flex flex-wrap items-center gap-2 border-b border-line bg-bg px-4 py-2 text-xs text-fg2">
+          <span className="min-w-0 flex-1" aria-live="polite">
+            {historyLocation.loading ? "正在当前历史快照中定位…" : historyLocation.error ? `定位失败：${historyLocation.error}` : historyLocation.cancelled
+              ? "定位已取消；仍保留当前范围和快照。" : "已在当前历史快照中定位。"}
+            <span className="ml-1 text-fg3">{pausedFilterLabels.length
+              ? `暂时移除了${pausedFilterLabels.join("、")}筛选；范围和快照保持不变。`
+              : "暂时离开搜索；范围和快照保持不变。"}</span>
+          </span>
+          {historyLocation.loading ? <Button variant="outline" size="sm" data-testid="cancel-history-location" onClick={() => { void cancelHistoryLocation(); }}>取消定位</Button> : null}
+          <Button variant="outline" size="sm" data-testid="return-to-search" onClick={() => { void returnToSearch(); }}>
+            {locationReturn?.partial ? `返回已发现 ${locationReturn.matchedCount} 个结果` : `返回 ${locationReturn?.matchedCount ?? 0} 个结果`}
+          </Button>
+        </div> : null}
         <div className="flex min-h-0 flex-1">
           {searchView.active
             ? <SearchResultList view={searchView} onSelect={selectDisplayedCommit} onAnchor={setSearchAnchor}
@@ -461,7 +599,9 @@ export function App(): React.JSX.Element {
             onRetryMerge={() => detailStore.retryMerge()} onLoadMerge={(parentIndex, offset) => detailStore.loadMerge(parentIndex, offset)}
             onToggleDiff={(file, parentIndex) => { void detailStore.toggleDiff(file, parentIndex); }}
             onLoadContaining={() => detailStore.loadContaining()} onRetryContaining={() => detailStore.retryContaining()}
+            onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
+            selectedTab={detailTab} onTabChange={setDetailTab}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}

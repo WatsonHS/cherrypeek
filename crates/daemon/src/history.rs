@@ -4,7 +4,8 @@ use crate::{
     repository::{self, DiscoveredRepository, PreviewError},
 };
 use commitscope_core::{
-    ErrorCode, HistoryCommit, LastViewedSnapshot, NewSinceLastSeenStatus, StoreStatus,
+    ErrorCode, HistoryCommit, LastViewedSnapshot, LocateCommitParams, NewSinceLastSeenStatus,
+    StoreStatus,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -144,7 +145,6 @@ impl HistoryState {
         deadline: Instant,
         emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<T, PreviewError> {
-        let mut emit = Some(emit);
         if !(1..=500).contains(&page_size) {
             return Err(invalid_request("pageSize must be between 1 and 500"));
         }
@@ -155,7 +155,6 @@ impl HistoryState {
                 return Err(repository::internal_error("History state is unavailable"));
             }
         };
-
         if cursor.is_none()
             && query
                 .as_ref()
@@ -169,17 +168,129 @@ impl HistoryState {
             *query = Some(Query::new(page_size, baseline)?);
         }
         let query = query.as_mut().ok_or_else(invalid_cursor)?;
-        if query.page_size != page_size {
-            return Err(invalid_cursor());
+        with_page_in_query(
+            query, executable, discovered, cursor, None, page_size, cancelled, deadline, emit,
+        )
+    }
+
+    pub fn with_located_page<T>(
+        &self,
+        executable: &Path,
+        discovered: &DiscoveredRepository,
+        params: &LocateCommitParams,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+        emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
+    ) -> Result<T, PreviewError> {
+        if !(1..=500).contains(&params.page_size) {
+            return Err(invalid_request("pageSize must be between 1 and 500"));
         }
-        let offset = match cursor {
+        validate_topology_oid(&params.oid, discovered.oid_length)?;
+        let mut query = match self.query.try_lock() {
+            Ok(query) => query,
+            Err(TryLockError::WouldBlock) => return Err(busy_error()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(repository::internal_error("History state is unavailable"));
+            }
+        };
+        let same_query = query
+            .as_ref()
+            .is_some_and(|query| query.page_size == params.page_size);
+        if same_query {
+            return with_page_in_query(
+                query.as_mut().expect("matching query exists"),
+                executable,
+                discovered,
+                None,
+                Some(&params.oid),
+                params.page_size,
+                cancelled,
+                deadline,
+                emit,
+            );
+        }
+        let baseline = self
+            .baseline
+            .lock()
+            .map_err(|_| repository::internal_error("History baseline is unavailable"))?
+            .clone();
+        let mut fresh = Query::new(params.page_size, baseline)?;
+        let result = with_page_in_query(
+            &mut fresh,
+            executable,
+            discovered,
+            None,
+            Some(&params.oid),
+            params.page_size,
+            cancelled,
+            deadline,
+            emit,
+        )?;
+        *query = Some(fresh);
+        Ok(result)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn with_page_in_query<T>(
+    query: &mut Query,
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    cursor: Option<&str>,
+    locate_oid: Option<&str>,
+    page_size: u16,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
+) -> Result<T, PreviewError> {
+    let mut emit = Some(emit);
+    if query.page_size != page_size {
+        return Err(invalid_cursor());
+    }
+    let located = locate_oid.is_some();
+    let offset = if let Some(oid) = locate_oid {
+        if discovered.scope_tips.is_empty() {
+            return Err(scope_unavailable());
+        }
+        if let Some(page) = query
+            .cached_pages
+            .iter()
+            .find(|page| page.commits.iter().any(|commit| commit.commit.oid == oid))
+        {
+            page.offset
+        } else {
+            if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
+                query.reset_walk();
+                return Err(error);
+            }
+            query.reset_stream();
+            let offset =
+                locate_oid_offset(executable, discovered, oid, page_size, cancelled, deadline)?;
+            if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
+                query.reset_walk();
+                return Err(error);
+            }
+            offset
+        }
+    } else {
+        match cursor {
             None => 0,
             Some(cursor) => parse_cursor(cursor, &query.id, page_size)?,
-        };
-        if offset > query.issued_frontier {
-            return Err(invalid_cursor());
         }
+    };
+    if !located && offset > query.issued_frontier {
+        return Err(invalid_cursor());
+    }
 
+    if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
+        query.reset_walk();
+        if error.code == ErrorCode::SnapshotChanged {
+            query.clear_graph_cache();
+        }
+        return Err(error);
+    }
+    if let Some(page) = query.cached_pages.iter().find(|page| page.offset == offset) {
+        let result = make_page(query, page);
         if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
             query.reset_walk();
             if error.code == ErrorCode::SnapshotChanged {
@@ -187,119 +298,127 @@ impl HistoryState {
             }
             return Err(error);
         }
-        if let Some(page) = query.cached_pages.iter().find(|page| page.offset == offset) {
-            let result = make_page(query, page);
-            if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
-                query.reset_walk();
-                if error.code == ErrorCode::SnapshotChanged {
-                    query.clear_graph_cache();
-                }
-                return Err(error);
-            }
-            check_page_active(query, cancelled, deadline)?;
-            return emit_page(query, &result, &mut emit);
-        }
-
-        let mut layout_work = if discovered.scope_tips.is_empty() {
-            LayoutWork::default()
-        } else {
-            match prepare_layout_at_offset(
-                query, executable, discovered, offset, cancelled, deadline,
-            ) {
-                Ok(layout) => layout,
-                Err(error) => {
-                    query.reset_walk();
-                    return Err(error);
-                }
-            }
-        };
-        let (mut page, topology) = if discovered.scope_tips.is_empty() {
-            if offset != 0 {
-                return Err(invalid_cursor());
-            }
-            (
-                Page {
-                    offset: 0,
-                    commits: Vec::new(),
-                    has_more: false,
-                    bytes: 0,
-                },
-                Vec::new(),
-            )
-        } else {
-            match read_page_from_stream(query, executable, discovered, offset, cancelled, deadline)
-            {
-                Ok(page) => page,
-                Err(error) => {
-                    query.reset_walk();
-                    return Err(error);
-                }
-            }
-        };
-        if let Err(error) = layout_page(
-            &mut page,
-            &topology,
-            &mut layout_work,
-            query.checkpoint_bytes,
-            query.checkpoints.len(),
-            cancelled,
-            deadline,
-        ) {
-            query.reset_walk();
-            return Err(error);
-        }
-        let marker_state = query.marker_state();
-        if let Err(error) = mark_page(
-            query, &mut page, executable, discovered, cancelled, deadline,
-        ) {
-            query.restore_marker_state(marker_state);
-            query.reset_walk();
-            return Err(error);
-        }
-        if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
-            query.restore_marker_state(marker_state);
-            query.reset_walk();
-            return Err(error);
-        }
-        if !page.has_more && !layout_work.state.active_slots.is_empty() {
-            query.reset_walk();
-            return Err(repository::git_error(
-                "Git history ended with unresolved graph lanes",
-            ));
-        }
-        let next_position = offset.saturating_add(page.commits.len() as u32);
-        let result = make_page(query, &page);
-        if let Err(error) = check_page_active(query, cancelled, deadline) {
-            query.restore_marker_state(marker_state);
-            return Err(error);
-        }
-        let emitted = match emit_page(query, &result, &mut emit) {
-            Ok(emitted) => emitted,
-            Err(error) => {
-                query.restore_marker_state(marker_state);
-                query.reset_walk();
-                return Err(error);
-            }
-        };
-        query.stream_position = next_position;
-        query.layout = layout_work.state;
-        query.issued_frontier = query.issued_frontier.max(query.stream_position);
-        commit_checkpoints(query, &layout_work.checkpoints);
-        if page.bytes <= CACHE_BYTES_LIMIT {
-            while query.cached_pages.len() >= CACHE_PAGE_LIMIT
-                || query.cached_bytes.saturating_add(page.bytes) > CACHE_BYTES_LIMIT
-            {
-                if let Some(evicted) = query.cached_pages.pop_front() {
-                    query.cached_bytes = query.cached_bytes.saturating_sub(evicted.bytes);
-                } else {
-                    break;
-                }
-            }
-            query.cached_bytes = query.cached_bytes.saturating_add(page.bytes);
-            query.cached_pages.push_back(page);
-        }
-        Ok(emitted)
+        check_page_active(query, cancelled, deadline)?;
+        return emit_page(query, &result, &mut emit);
     }
+
+    let mut layout_work = if discovered.scope_tips.is_empty() {
+        LayoutWork::default()
+    } else {
+        match prepare_layout_at_offset(query, executable, discovered, offset, cancelled, deadline) {
+            Ok(layout) => layout,
+            Err(error) => {
+                query.reset_walk();
+                return Err(error);
+            }
+        }
+    };
+    let (mut page, topology) = if discovered.scope_tips.is_empty() {
+        if offset != 0 {
+            return Err(invalid_cursor());
+        }
+        (
+            Page {
+                offset: 0,
+                commits: Vec::new(),
+                has_more: false,
+                bytes: 0,
+            },
+            Vec::new(),
+        )
+    } else {
+        match read_page_from_stream(query, executable, discovered, offset, cancelled, deadline) {
+            Ok(page) => page,
+            Err(error) => {
+                query.reset_walk();
+                return Err(error);
+            }
+        }
+    };
+    if let Err(error) = layout_page(
+        &mut page,
+        &topology,
+        &mut layout_work,
+        query.checkpoint_bytes,
+        query.checkpoints.len(),
+        cancelled,
+        deadline,
+    ) {
+        query.reset_walk();
+        return Err(error);
+    }
+    let marker_state = query.marker_state();
+    if let Err(error) = mark_page(
+        query, &mut page, executable, discovered, cancelled, deadline,
+    ) {
+        query.restore_marker_state(marker_state);
+        query.reset_walk();
+        return Err(error);
+    }
+    if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
+        query.restore_marker_state(marker_state);
+        query.reset_walk();
+        return Err(error);
+    }
+    if !page.has_more && !layout_work.state.active_slots.is_empty() {
+        query.reset_walk();
+        return Err(repository::git_error(
+            "Git history ended with unresolved graph lanes",
+        ));
+    }
+    let next_position = offset.saturating_add(page.commits.len() as u32);
+    let result = make_page(query, &page);
+    if let Err(error) = check_page_active(query, cancelled, deadline) {
+        query.restore_marker_state(marker_state);
+        return Err(error);
+    }
+    let emitted = match emit_page(query, &result, &mut emit) {
+        Ok(emitted) => emitted,
+        Err(error) => {
+            query.restore_marker_state(marker_state);
+            return Err(error);
+        }
+    };
+    query.stream_position = next_position;
+    query.layout = layout_work.state;
+    query.issued_frontier = query.issued_frontier.max(query.stream_position);
+    commit_checkpoints(query, &layout_work.checkpoints);
+    if page.bytes <= CACHE_BYTES_LIMIT {
+        while query.cached_pages.len() >= CACHE_PAGE_LIMIT
+            || query.cached_bytes.saturating_add(page.bytes) > CACHE_BYTES_LIMIT
+        {
+            if let Some(evicted) = query.cached_pages.pop_front() {
+                query.cached_bytes = query.cached_bytes.saturating_sub(evicted.bytes);
+            } else {
+                break;
+            }
+        }
+        query.cached_bytes = query.cached_bytes.saturating_add(page.bytes);
+        query.cached_pages.push_back(page);
+    }
+    Ok(emitted)
+}
+
+fn locate_oid_offset(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    oid: &str,
+    page_size: u16,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<u32, PreviewError> {
+    let mut stream = start_stream(executable, discovered)?;
+    let mut ordinal = 0_u32;
+    while let Some(entry) = read_stream_entry(&mut stream, discovered, cancelled, deadline)? {
+        if entry.oid.eq_ignore_ascii_case(oid) {
+            let page_size = u32::from(page_size);
+            return Ok(ordinal / page_size * page_size);
+        }
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            repository::resource_limit("History position exceeds the supported cursor range")
+        })?;
+    }
+    Err(scope_unavailable())
 }
 
 fn check_page_active(
@@ -727,6 +846,15 @@ fn next_topology_entry(
     let Some(stream) = query.stream.as_mut() else {
         return Ok(None);
     };
+    read_stream_entry(stream, discovered, cancelled, deadline)
+}
+
+fn read_stream_entry(
+    stream: &mut GitLineStream,
+    discovered: &DiscoveredRepository,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<TopologyEntry>, PreviewError> {
     let line = stream
         .next_line(cancelled, deadline)
         .map_err(map_git_failure)?;
@@ -1081,6 +1209,14 @@ fn invalid_cursor() -> PreviewError {
     }
 }
 
+fn scope_unavailable() -> PreviewError {
+    PreviewError {
+        code: ErrorCode::ScopeUnavailable,
+        message: "Commit is not reachable in the current snapshot scope".into(),
+        retryable: false,
+    }
+}
+
 fn busy_error() -> PreviewError {
     PreviewError {
         code: ErrorCode::Busy,
@@ -1225,6 +1361,25 @@ mod tests {
         )
     }
 
+    fn locate_page(
+        state: &HistoryState,
+        discovered: &DiscoveredRepository,
+        oid: &str,
+        size: u16,
+    ) -> Result<HistoryPage, PreviewError> {
+        state.with_located_page(
+            &git_executable(),
+            discovered,
+            &LocateCommitParams {
+                oid: oid.to_owned(),
+                page_size: size,
+            },
+            &AtomicBool::new(false),
+            Instant::now() + std::time::Duration::from_secs(5),
+            |page| Ok(page.clone()),
+        )
+    }
+
     #[test]
     fn pages_continue_replay_after_eviction_and_reject_unissued_offsets() {
         let (_repo, path) = make_repo(10);
@@ -1278,6 +1433,70 @@ mod tests {
                 .code,
             ErrorCode::InvalidCursor
         );
+    }
+
+    #[test]
+    fn locate_beyond_issued_frontier_returns_page_with_working_previous_and_next_cursors() {
+        let (_repo, path) = make_repo(12);
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        let first = read_page(&state, &discovered, None, 2).expect("first page");
+        let target = run_git(&path, &["rev-parse", "HEAD~8"]);
+        let located = locate_page(&state, &discovered, &target, 2).expect("locate commit");
+        assert_eq!(located.offset, 8);
+        assert!(
+            located
+                .commits
+                .iter()
+                .any(|commit| commit.commit.oid == target)
+        );
+        assert_eq!(
+            located.cursor,
+            format!("v1:{}:8", first.cursor.split(':').nth(1).unwrap())
+        );
+        let previous = read_page(&state, &discovered, located.previous_cursor.as_deref(), 2)
+            .expect("previous page");
+        assert_eq!(previous.offset, 6);
+        let next =
+            read_page(&state, &discovered, located.next_cursor.as_deref(), 2).expect("next page");
+        assert_eq!(next.offset, 10);
+    }
+
+    #[test]
+    fn locate_scope_miss_and_cancellation_preserve_existing_cursor() {
+        let (_repo, path) = make_repo(8);
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        let first = read_page(&state, &discovered, None, 2).expect("first page");
+        let missing = "f".repeat(discovered.oid_length);
+        assert_eq!(
+            locate_page(&state, &discovered, &missing, 2)
+                .unwrap_err()
+                .code,
+            ErrorCode::ScopeUnavailable
+        );
+        let second = read_page(&state, &discovered, first.next_cursor.as_deref(), 2)
+            .expect("cursor survives scope miss");
+        assert_eq!(second.offset, 2);
+
+        let cancelled = AtomicBool::new(true);
+        let error = state
+            .with_located_page(
+                &git_executable(),
+                &discovered,
+                &LocateCommitParams {
+                    oid: second.commits[0].commit.oid.clone(),
+                    page_size: 2,
+                },
+                &cancelled,
+                Instant::now() + std::time::Duration::from_secs(5),
+                |page| Ok(page.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        let third = read_page(&state, &discovered, second.next_cursor.as_deref(), 2)
+            .expect("cursor survives cancelled locate");
+        assert_eq!(third.offset, 4);
     }
 
     #[test]

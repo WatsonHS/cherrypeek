@@ -255,6 +255,33 @@ export class RepositorySessionController {
     }
   }
 
+  async locateCommit(params: unknown): Promise<HistoryPage> {
+    const intent = ++this.pageIntent;
+    const session = this.requireHistoryCapability();
+    if (!isRecord(params) || !hasExactKeys(params, ["oid", "pageSize"]) ||
+      typeof params.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) ||
+      params.oid.length !== (session.repository.objectFormat === "sha1" ? 40 : 64) ||
+      !Number.isInteger(params.pageSize) || (params.pageSize as number) < 1 || (params.pageSize as number) > MAX_HISTORY_PAGE) {
+      throw new ProtocolClientError("INVALID_REQUEST", "历史定位参数无效");
+    }
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true));
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readHistoryPageRequest(session, null, params.pageSize as number, abort, params.oid.toLowerCase());
+    this.activeHistoryRead = active;
+    try {
+      return await active.done;
+    } finally {
+      if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
+    }
+  }
+
   async cancelHistoryRead(): Promise<{ cancelled: boolean }> {
     ++this.pageIntent;
     const active = this.activeHistoryRead;
@@ -954,6 +981,7 @@ export class RepositorySessionController {
     cursor: string | null,
     pageSize: number,
     abort: AbortController,
+    locateOid?: string,
   ): Promise<HistoryPage> {
     let repository: RepositoryInfo | undefined;
     let refs: RefInfo[] = [];
@@ -963,7 +991,8 @@ export class RepositorySessionController {
     let metadata = "";
     let sawRepository = false;
     let sawTerminalPage = false;
-    const completion = await this.core.request("readHistoryPage", { cursor, pageSize }, contextOf(session), {
+    const completion = await this.core.request(locateOid ? "locateCommit" : "readHistoryPage",
+      locateOid ? { oid: locateOid, pageSize } : { cursor, pageSize }, contextOf(session), {
       timeoutMs: SESSION_TIMEOUT_MS,
       drainAfterAbort: true,
       fatalOnTimeout: true,
@@ -1000,7 +1029,7 @@ export class RepositorySessionController {
         if (!Array.isArray(data.commits) || !data.commits.every(commit => validHistoryGraphCommit(commit, session.repository.objectFormat))) {
           throw invalidSessionResponse("历史页包含无效或缺失的图布局");
         }
-        if ((cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
+        if ((!locateOid && cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
           (cursor !== null && data.cursor !== cursor)) throw invalidSessionResponse("历史页游标与位置不一致");
         if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
           : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("历史页 envelope 终态无效");
@@ -1021,7 +1050,7 @@ export class RepositorySessionController {
     this.ensureCurrent(session);
     if (!repository || !sawRepository || !page || !sawTerminalPage || !completion.coverage.complete ||
       completion.coverage.processed !== commits.length || completion.nextCursor && !page.hasMore ||
-      !completion.nextCursor && page.hasMore) {
+      !completion.nextCursor && page.hasMore || locateOid && !commits.some(commit => commit.oid === locateOid)) {
       throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
     }
     return { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };

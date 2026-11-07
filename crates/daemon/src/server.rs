@@ -1,11 +1,12 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
-    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, MetadataIndexAction,
-    OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams, ReadHistoryPageParams,
-    ReadMergeCommitsParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
-    RefreshRepositoryParams, RepositoryScope, ResponseData, SearchCommitsParams,
-    SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams, ServerMessage,
+    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, LocateCommitParams,
+    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams,
+    ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
+    RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope, ResponseData,
+    SearchCommitsParams, SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams,
+    ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -44,6 +45,7 @@ enum RequestOperation {
     GetRepositorySession,
     ReadSessionPreview,
     ReadHistoryPage(ReadHistoryPageParams),
+    LocateCommit(LocateCommitParams),
     RefreshRepository(RefreshRepositoryParams),
     GetRepositoryNavigation,
     SelectRepositoryScope(SelectRepositoryScopeParams),
@@ -488,6 +490,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
         RequestOperation::GetRepositorySession
             | RequestOperation::ReadSessionPreview
             | RequestOperation::ReadHistoryPage(_)
+            | RequestOperation::LocateCommit(_)
             | RequestOperation::RefreshRepository(_)
             | RequestOperation::GetRepositoryNavigation
             | RequestOperation::SelectRepositoryScope(_)
@@ -737,6 +740,30 @@ fn dispatch_request(
             let metadata_tasks_worker = Arc::clone(metadata_tasks);
             workers.push(thread::spawn(move || {
                 execute_history_page(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    session,
+                    params,
+                    cancelled_for_worker,
+                    metadata_tasks_worker,
+                )
+            }));
+        }
+        RequestOperation::LocateCommit(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            let metadata_tasks_worker = Arc::clone(metadata_tasks);
+            workers.push(thread::spawn(move || {
+                execute_locate_commit(
                     &sender,
                     &stopping,
                     &request_map,
@@ -1735,6 +1762,7 @@ fn validate_request(
         "getRepositorySession"
         | "readSessionPreview"
         | "readHistoryPage"
+        | "locateCommit"
         | "refreshRepository"
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
@@ -1763,6 +1791,16 @@ fn validate_request(
                             )
                         })
                 }
+                "locateCommit" => serde_json::from_value::<LocateCommitParams>(params.clone())
+                    .and_then(|params| {
+                        if (1..=500).contains(&params.page_size) {
+                            Ok(params)
+                        } else {
+                            Err(serde::de::Error::custom("pageSize must be 1..=500"))
+                        }
+                    })
+                    .map(RequestOperation::LocateCommit)
+                    .map_err(|_| (ErrorCode::InvalidRequest, "locateCommit params 无效".into())),
                 "refreshRepository" => {
                     serde_json::from_value::<RefreshRepositoryParams>(params.clone())
                         .map(RequestOperation::RefreshRepository)
@@ -1896,6 +1934,7 @@ fn validate_request(
         "getRepositorySession"
         | "readSessionPreview"
         | "readHistoryPage"
+        | "locateCommit"
         | "refreshRepository"
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
@@ -2359,6 +2398,70 @@ fn execute_history_page(
     cancelled: Arc<AtomicBool>,
     metadata_tasks: Arc<crate::metadata_index::TaskManager>,
 ) {
+    execute_history_request(
+        sender,
+        shutdown,
+        requests,
+        request_id,
+        repo_id,
+        generation,
+        git_path,
+        session,
+        params.page_size,
+        params.cursor,
+        None,
+        cancelled,
+        metadata_tasks,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_locate_commit(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    params: LocateCommitParams,
+    cancelled: Arc<AtomicBool>,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+) {
+    execute_history_request(
+        sender,
+        shutdown,
+        requests,
+        request_id,
+        repo_id,
+        generation,
+        git_path,
+        session,
+        params.page_size,
+        None,
+        Some(params.oid),
+        cancelled,
+        metadata_tasks,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_history_request(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    page_size: u16,
+    cursor: Option<String>,
+    locate_oid: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+) {
     let Some(git_path) = git_path else {
         send_terminal_error(
             sender,
@@ -2404,53 +2507,46 @@ fn execute_history_page(
         remove_request(requests, request_id, &cancelled);
         return;
     }
-    let result = session.history.with_page(
-        git_path,
-        &session.discovered,
-        params.cursor.as_deref(),
-        params.page_size,
-        &cancelled,
-        deadline,
-        |page| {
-            let chunks =
-                pack_history_chunks(request_id, repo_id.as_deref(), generation.as_deref(), page)
-                    .map_err(|()| {
-                        repository::resource_limit("History page response exceeds the size limit")
-                    })?;
-            let total = page.commits.len() as u32;
-            let mut processed = 0_u32;
-            for (index, commits) in chunks.iter().enumerate() {
-                processed = processed.saturating_add(commits.len() as u32);
-                let done = index + 1 == chunks.len();
-                let message = ServerMessage::Response {
-                    request_id: request_id.to_owned(),
-                    repo_id: repo_id.clone(),
-                    generation: generation.clone(),
-                    sequence: index as u32 + 1,
-                    done,
-                    coverage: Coverage {
-                        complete: done,
-                        processed: if done { total } else { processed },
-                    },
-                    next_cursor: if done { page.next_cursor.clone() } else { None },
-                    data: ResponseData::HistoryPage {
-                        commits: commits.clone(),
-                        offset: page.offset,
-                        page_size: page.page_size,
-                        cursor: page.cursor.clone(),
-                        previous_cursor: page.previous_cursor.clone(),
-                        has_more: page.has_more,
-                        new_since_last_seen_status: page.new_since_last_seen_status,
-                        last_seen_divider_oid: page.last_seen_divider_oid.clone(),
-                    },
-                };
-                if !send_task_message(sender, shutdown, &cancelled, &message) {
-                    return Err(repository::cancelled_error());
-                }
-            }
-            Ok(())
-        },
-    );
+    let result = if let Some(oid) = locate_oid {
+        session.history.with_located_page(
+            git_path,
+            &session.discovered,
+            &LocateCommitParams { oid, page_size },
+            &cancelled,
+            deadline,
+            |page| {
+                send_history_page_chunks(
+                    sender,
+                    shutdown,
+                    &cancelled,
+                    request_id,
+                    &repo_id,
+                    &generation,
+                    page,
+                )
+            },
+        )
+    } else {
+        session.history.with_page(
+            git_path,
+            &session.discovered,
+            cursor.as_deref(),
+            page_size,
+            &cancelled,
+            deadline,
+            |page| {
+                send_history_page_chunks(
+                    sender,
+                    shutdown,
+                    &cancelled,
+                    request_id,
+                    &repo_id,
+                    &generation,
+                    page,
+                )
+            },
+        )
+    };
     match result {
         Ok(()) => {}
         Err(error) => {
@@ -2474,6 +2570,53 @@ fn execute_history_page(
     }
     remove_request(requests, request_id, &cancelled);
     ensure_metadata_index(&metadata_tasks, session, git_path, requests);
+}
+
+fn send_history_page_chunks(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    cancelled: &AtomicBool,
+    request_id: &str,
+    repo_id: &Option<String>,
+    generation: &Option<String>,
+    page: &crate::history::HistoryPage,
+) -> Result<(), repository::PreviewError> {
+    let chunks = pack_history_chunks(request_id, repo_id.as_deref(), generation.as_deref(), page)
+        .map_err(|()| {
+        repository::resource_limit("History page response exceeds the size limit")
+    })?;
+    let total = page.commits.len() as u32;
+    let mut processed = 0_u32;
+    for (index, commits) in chunks.iter().enumerate() {
+        processed = processed.saturating_add(commits.len() as u32);
+        let done = index + 1 == chunks.len();
+        let message = ServerMessage::Response {
+            request_id: request_id.to_owned(),
+            repo_id: repo_id.clone(),
+            generation: generation.clone(),
+            sequence: index as u32 + 1,
+            done,
+            coverage: Coverage {
+                complete: done,
+                processed: if done { total } else { processed },
+            },
+            next_cursor: if done { page.next_cursor.clone() } else { None },
+            data: ResponseData::HistoryPage {
+                commits: commits.clone(),
+                offset: page.offset,
+                page_size: page.page_size,
+                cursor: page.cursor.clone(),
+                previous_cursor: page.previous_cursor.clone(),
+                has_more: page.has_more,
+                new_since_last_seen_status: page.new_since_last_seen_status,
+                last_seen_divider_oid: page.last_seen_divider_oid.clone(),
+            },
+        };
+        if !send_task_message(sender, shutdown, cancelled, &message) {
+            return Err(repository::cancelled_error());
+        }
+    }
+    Ok(())
 }
 
 fn ensure_metadata_index(

@@ -334,6 +334,7 @@ pub enum RequestParams {
     GetRepositorySession(EmptyParams),
     ReadSessionPreview(EmptyParams),
     ReadHistoryPage(ReadHistoryPageParams),
+    LocateCommit(LocateCommitParams),
     RefreshRepository(RefreshRepositoryParams),
     GetRepositoryNavigation(EmptyParams),
     SelectRepositoryScope(SelectRepositoryScopeParams),
@@ -378,6 +379,15 @@ pub struct ReadHistoryPageParams {
     #[schemars(with = "NullableStringSchema")]
     #[schemars(length(max = 512))]
     pub cursor: Option<String>,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocateCommitParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
     #[schemars(range(min = 1, max = 500))]
     pub page_size: u16,
 }

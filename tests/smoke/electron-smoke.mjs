@@ -76,9 +76,9 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "cancelHistoryRead", "cancelRefMergeStatus", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "getCoreStatus", "getLaunchRepository",
-    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listRecentRepositories", "listSearchIdentities", "onCoreStatusChanged", "openRepositorySession",
-    "readHistoryPage", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "searchCommits", "selectRepositoryScope",
+    "branchesContaining", "cancelCommitDetails", "cancelHistoryRead", "cancelRefMergeStatus", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "getCommit", "getCoreStatus", "getLaunchRepository",
+    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "locateCommit", "onCoreStatusChanged", "openRepositorySession",
+    "readDiff", "readHistoryPage", "readMergeCommits", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "searchCommits", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");

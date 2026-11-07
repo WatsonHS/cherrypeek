@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cloud, Folder, GitBranch, LoaderCircle, RefreshCw, Tag } from "lucide-react";
+import { ChevronDown, Cloud, Folder, GitBranch, Keyboard, LoaderCircle, RefreshCw, Tag } from "lucide-react";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
@@ -48,6 +48,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <div className="flex-1" />
     <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
       onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} />
+    <ShortcutGuide />
     <UpdatesPlaceholder />
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
       onClick={() => { void actions.refresh(); }} aria-label="刷新仓库历史">
@@ -60,6 +61,26 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
       <Button variant="outline" size="sm" title="取消当前查询并关闭仓库，回到打开页" aria-label="取消并关闭仓库" onClick={() => { void actions.cancel(); }}>取消并关闭仓库</Button>
     </div> : null}
   </header>;
+}
+
+function ShortcutGuide(): React.JSX.Element {
+  const modifier = /Mac|iPhone|iPad/u.test(navigator.platform) ? "⌘" : "Ctrl+";
+  const refreshKey = modifier === "⌘" ? "⌥⌘R" : "Ctrl+Alt+R";
+  return <Popover>
+    <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="快捷键说明" data-testid="shortcut-guide-trigger"><Keyboard className="size-4" strokeWidth={1.75} /></Button></PopoverTrigger>
+    <PopoverContent align="end" className="w-[300px] p-3" data-testid="shortcut-guide">
+      <h2 className="m-0 mb-2 text-[13px] font-semibold">快捷键</h2>
+      <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
+        <dt className="text-fg2">聚焦搜索</dt><dd className="m-0 font-mono text-fg3">{modifier}F</dd>
+        <dt className="text-fg2">从搜索结果在历史中定位</dt><dd className="m-0 font-mono text-fg3">{modifier}]</dd>
+        <dt className="text-fg2">返回搜索结果</dt><dd className="m-0 font-mono text-fg3">{modifier}[</dd>
+        <dt className="text-fg2">切换详情：概览 / 文件</dt><dd className="m-0 font-mono text-fg3">{modifier}1 / 2</dd>
+        <dt className="text-fg2">刷新仓库历史</dt><dd className="m-0 font-mono text-fg3">{refreshKey}</dd>
+        <dt className="text-fg2">切换浏览范围</dt><dd className="m-0 text-fg3">顶部范围选择器</dd>
+        <dt className="text-fg2">历史列表中上下选择提交</dt><dd className="m-0 font-mono text-fg3">↑ / ↓</dd>
+      </dl>
+    </PopoverContent>
+  </Popover>;
 }
 
 function RepositorySwitcher({ repository, session, record, actions, recent, onRefreshRecent, loading }: {

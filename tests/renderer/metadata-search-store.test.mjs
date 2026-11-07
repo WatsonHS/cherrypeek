@@ -54,6 +54,41 @@ test("changing query clears old results and detail selection before the new resp
   assert.equal(view.loading, false);
 });
 
+test("history location releases search rows and resumes by the saved query and anchor", async () => {
+  const requests = [];
+  let calls = 0;
+  const store = new MetadataSearchStore({
+    searchCommits: async params => {
+      requests.push(params);
+      calls += 1;
+      return ok(page({ version: `v${calls}`, commits: [commit("a"), commit("b")], nextCursor: `next-${calls}` }));
+    },
+    listSearchIdentities: async () => ok({ identities: [], truncated: false, coverage: { processed: 0, complete: true } }),
+    cancelSearch: async () => ok({ cancelled: true }),
+  });
+  store.bindSession("repo:generation", true);
+  const query = { ...DEFAULT_SEARCH_QUERY, message: "fix", oidPrefix: "abc" };
+  store.updateQuery(query);
+  await new Promise(resolve => setTimeout(resolve, 275));
+  store.setSelectedOid("b");
+  store.setHistoryAnchor({ oid: "a", offset: -12 });
+
+  const point = await store.suspendForHistoryLocation("repo:generation");
+  assert.equal(store.getView().active, false);
+  assert.equal(store.getView().window, null);
+  assert.equal(point.query, query);
+  assert.equal(point.matchedCount, 2);
+  assert.deepEqual(point.anchor, { oid: "a", offset: -12 });
+
+  assert.equal(await store.resumeAfterHistoryLocation("repo:generation"), true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests.at(-1), { query, cursor: null, anchorOid: "a", pageSize: 200 });
+  assert.equal(store.getView().selectedOid, "b");
+  assert.deepEqual([store.getView().anchorOid, store.getView().anchorOffset], ["a", -12]);
+  assert.equal(store.getView().window.commits[0].oid, "a");
+  assert.equal(store.getLocationReturn(), null);
+});
+
 test("search paging slides a bounded 1,800-row window in both directions without losing selection", async () => {
   const pageSize = 200;
   const pageAt = offset => ({

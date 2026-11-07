@@ -32,7 +32,7 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
     const index = virtual.range(element.scrollTop, 1, 0).start;
     const oid = commits[index]?.oid;
     const rowOffset = oid ? virtual.offset(oid) : undefined;
-    onAnchor(oid && rowOffset !== undefined ? { oid, offset: rowOffset - element.scrollTop } : null);
+    if (window && oid && rowOffset !== undefined) onAnchor({ oid, offset: rowOffset - element.scrollTop });
     if (paginate && element.scrollTop < Math.max(element.clientHeight, 100) && window?.previousCursor && !view.pageLoading) onPrevious();
     else if (paginate && element.scrollHeight - element.scrollTop - element.clientHeight < Math.max(element.clientHeight, 100) && window?.nextCursor && !view.pageLoading) onNext();
   }, [virtual, commits, onAnchor, window?.nextCursor, window?.previousCursor, view.pageLoading, onNext, onPrevious]);
