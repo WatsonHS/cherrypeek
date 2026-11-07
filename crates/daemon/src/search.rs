@@ -1,13 +1,15 @@
 use crate::{
+    git_command::{GitFailure, ReadOnlyGit, string_arg},
     metadata_index::{self, IndexError, SearchSnapshot},
-    session,
+    repository, session,
     session_store::SessionStore,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use caseless::default_case_fold_str;
 use commitscope_core::{
-    CommitIdentity, CommitSummary, ErrorCode, MetadataIndexCoverage, SearchCommitsParams,
-    SearchIdentities, SearchIdentitiesParams, SearchIdentity, SearchPage, SearchQuery,
+    CommitIdentity, CommitSummary, ErrorCode, ListSearchPathsParams, MetadataIndexCoverage,
+    SearchCommitsParams, SearchIdentities, SearchIdentitiesParams, SearchIdentity, SearchPage,
+    SearchPathEntry, SearchPathFilter, SearchPathKind, SearchPathMatch, SearchPaths, SearchQuery,
     SearchTimeField,
 };
 use rusqlite::{Connection, params};
@@ -16,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeSet, BinaryHeap},
+    path::Path,
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::Instant,
 };
@@ -24,12 +27,16 @@ const MAX_CURSOR_BYTES: usize = 1024;
 const MAX_CURSOR_PAYLOAD_BYTES: usize = 512;
 const MAX_IDENTITIES: usize = 100;
 const JS_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+const PATH_DIFF_BATCH_SIZE: usize = 64;
+const PATH_DIFF_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+const PATH_COMPLETION_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct CompiledQuery {
     key: String,
     query: SearchQuery,
     message_needle: String,
+    path_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +73,7 @@ struct Candidate {
     timestamp: i64,
     oid: String,
     summary: CommitSummary,
+    parent_indices: Vec<Option<u16>>,
 }
 
 impl PartialEq for Candidate {
@@ -106,6 +114,7 @@ impl CandidateKey {
 }
 
 pub(crate) fn search_commits(
+    executable: Option<&Path>,
     store: &SessionStore,
     session: &session::RepositorySession,
     params: &SearchCommitsParams,
@@ -119,6 +128,12 @@ pub(crate) fn search_commits(
     }
     let (snapshot_key, _) = metadata_index::snapshot_identity(session)?;
     let compiled = compile_query(&params.query, session, &snapshot_key)?;
+    if compiled.path_bytes.is_some() && executable.is_none() {
+        return Err(IndexError {
+            code: ErrorCode::GitUnavailable,
+            message: "Git executable is required for path history search".into(),
+        });
+    }
     let cursor = params.cursor.as_deref().map(decode_cursor).transpose()?;
     let anchor_oid = params.anchor_oid.as_deref().map(str::to_ascii_lowercase);
     if anchor_oid.as_ref().is_some_and(|oid| {
@@ -146,6 +161,8 @@ pub(crate) fn search_commits(
             let boundary = match (&cursor, &anchor_oid) {
                 (Some(cursor), _) => Some(
                     find_matching_key(
+                        executable,
+                        session,
                         connection,
                         &page_snapshot,
                         &compiled,
@@ -156,6 +173,8 @@ pub(crate) fn search_commits(
                     .filter(|key| key.timestamp == cursor.timestamp),
                 ),
                 (None, Some(anchor_oid)) => Some(find_matching_key(
+                    executable,
+                    session,
                     connection,
                     &page_snapshot,
                     &compiled,
@@ -169,6 +188,8 @@ pub(crate) fn search_commits(
                 return Err(invalid_cursor());
             }
             collect_page(
+                executable,
+                Some(session),
                 connection,
                 &page_snapshot,
                 &compiled,
@@ -250,8 +271,124 @@ pub(crate) fn list_search_identities(
     )
 }
 
+pub(crate) fn list_search_paths(
+    executable: &Path,
+    session: &session::RepositorySession,
+    params: &ListSearchPathsParams,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<SearchPaths, IndexError> {
+    if params.text.len() > 32_768 || !(1..=100).contains(&params.limit) {
+        return Err(invalid_request("Path completion parameters are invalid"));
+    }
+    repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+        .map_err(map_repository_error)?;
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_path_git_failure)?;
+    let mut tips = session.discovered.scope_tips.clone();
+    tips.sort();
+    tips.dedup();
+    let prefix = params.text.as_bytes();
+    let mut entries = BTreeSet::<(Vec<u8>, u8)>::new();
+    let mut truncated = false;
+    for tip in tips {
+        check_active(cancelled, deadline)?;
+        let output = git
+            .run(
+                Path::new(&session.discovered.info.path),
+                &[
+                    string_arg("ls-tree"),
+                    string_arg("-r"),
+                    string_arg("-t"),
+                    string_arg("-z"),
+                    string_arg("--full-tree"),
+                    string_arg(&tip),
+                ],
+                None,
+                PATH_COMPLETION_OUTPUT_LIMIT,
+                cancelled,
+                deadline,
+            )
+            .map_err(map_path_git_failure)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IndexError {
+                code: if stderr.contains("missing") || stderr.contains("bad object") {
+                    ErrorCode::MissingObject
+                } else {
+                    ErrorCode::GitError
+                },
+                message: "Git could not list paths in the frozen scope".into(),
+            });
+        }
+        for record in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            check_active(cancelled, deadline)?;
+            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+                return Err(corrupt_index("Git returned a malformed tree path record"));
+            };
+            let metadata = &record[..tab];
+            let is_directory = metadata.split(|byte| *byte == b' ').nth(1) == Some(b"tree");
+            let raw_path = &record[tab + 1..];
+            if !raw_path.starts_with(prefix) {
+                continue;
+            }
+            insert_path_suggestion(
+                &mut entries,
+                raw_path.to_vec(),
+                if is_directory { 1 } else { 0 },
+                params.limit as usize,
+                &mut truncated,
+            );
+        }
+    }
+    repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+        .map_err(map_repository_error)?;
+    Ok(SearchPaths {
+        entries: entries
+            .into_iter()
+            .map(|(raw_path, kind)| SearchPathEntry {
+                path: commitscope_core::GitPath {
+                    display: String::from_utf8_lossy(&raw_path).into_owned(),
+                    raw_hex: hex(&raw_path),
+                    text_lossy: std::str::from_utf8(&raw_path).is_err(),
+                },
+                kind: if kind == 1 {
+                    SearchPathKind::Directory
+                } else {
+                    SearchPathKind::File
+                },
+            })
+            .collect(),
+        truncated,
+    })
+}
+
+fn insert_path_suggestion(
+    entries: &mut BTreeSet<(Vec<u8>, u8)>,
+    raw_path: Vec<u8>,
+    kind: u8,
+    limit: usize,
+    truncated: &mut bool,
+) {
+    entries.insert((raw_path, kind));
+    if entries.len() > limit {
+        entries.pop_last();
+        *truncated = true;
+    }
+}
+
+struct BufferedCandidate {
+    key: CandidateKey,
+    summary: CommitSummary,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_page(
+    executable: Option<&Path>,
+    session: Option<&session::RepositorySession>,
     connection: Option<&Connection>,
     snapshot: &SearchSnapshot,
     compiled: &CompiledQuery,
@@ -269,70 +406,82 @@ fn collect_page(
     let mut before_boundary = 0_u64;
     let mut boundary_seen = boundary.is_none();
     let mut anchor_found = anchor_requested.then_some(false);
-    if let Some(boundary) = &boundary
-        && cursor.is_none()
-    {
+    if boundary.is_some() && cursor.is_none() {
         anchor_found = Some(true);
-        let _ = boundary;
     }
     if let Some(connection) = connection {
         let mut statement = connection.prepare(SEARCH_SCAN_SQL).map_err(map_sql_error)?;
         let mut rows = statement
             .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
             .map_err(map_sql_error)?;
+        let mut batch = Vec::with_capacity(PATH_DIFF_BATCH_SIZE);
         while let Some(row) = rows.next().map_err(map_sql_error)? {
             check_active(cancelled, deadline)?;
             let Some(key) = matching_row_key(row, compiled, cancelled, deadline)? else {
                 continue;
             };
-            let relation = boundary
-                .as_ref()
-                .map(|boundary| key.compare_order(boundary))
-                .unwrap_or(Ordering::Greater);
-            if relation == Ordering::Equal {
-                boundary_seen = true;
-                if cursor.is_none() {
-                    anchor_found = Some(true);
+            if compiled.path_bytes.is_some() {
+                batch.push(BufferedCandidate {
+                    key,
+                    summary: summary_from_row(row)?,
+                });
+                if batch.len() == PATH_DIFF_BATCH_SIZE {
+                    process_path_batch(
+                        executable.expect("path query requires Git"),
+                        session.expect("path query requires session"),
+                        compiled,
+                        &mut batch,
+                        cancelled,
+                        deadline,
+                        &mut forward,
+                        &mut backward,
+                        &mut matched_count,
+                        &mut before_boundary,
+                        &mut boundary_seen,
+                        &mut anchor_found,
+                        boundary.as_ref(),
+                        cursor,
+                        anchor_requested,
+                        capacity,
+                    )?;
                 }
-            }
-            if relation == Ordering::Less {
-                before_boundary = before_boundary.saturating_add(1);
-            }
-            matched_count = matched_count
-                .checked_add(1)
-                .ok_or_else(|| invalid_request("Search match count overflow"))?;
-            let selected = match cursor.map(|cursor| cursor.direction) {
-                Some(CursorDirection::Next) => relation == Ordering::Greater,
-                Some(CursorDirection::Previous) => relation == Ordering::Less,
-                None if boundary.is_some() => relation != Ordering::Less,
-                None => true,
-            };
-            if !selected {
                 continue;
             }
-            let candidate_key = CandidateKey {
-                timestamp: key.timestamp,
-                oid: key.oid.clone(),
-            };
-            let previous =
-                cursor.is_some_and(|cursor| cursor.direction == CursorDirection::Previous);
-            let should_keep = if previous {
-                can_keep_latest(&backward, &candidate_key, capacity)
-            } else {
-                can_keep_earliest(&forward, &candidate_key, capacity)
-            };
-            if should_keep {
-                let candidate = Candidate {
-                    timestamp: key.timestamp,
-                    oid: key.oid,
-                    summary: summary_from_row(row)?,
-                };
-                if previous {
-                    keep_latest(&mut backward, candidate, capacity);
-                } else {
-                    keep_earliest(&mut forward, candidate, capacity);
-                }
-            }
+            consider_candidate(
+                key,
+                || summary_from_row(row),
+                Vec::new(),
+                &mut forward,
+                &mut backward,
+                &mut matched_count,
+                &mut before_boundary,
+                &mut boundary_seen,
+                &mut anchor_found,
+                boundary.as_ref(),
+                cursor,
+                anchor_requested,
+                capacity,
+            )?;
+        }
+        if !batch.is_empty() {
+            process_path_batch(
+                executable.expect("path query requires Git"),
+                session.expect("path query requires session"),
+                compiled,
+                &mut batch,
+                cancelled,
+                deadline,
+                &mut forward,
+                &mut backward,
+                &mut matched_count,
+                &mut before_boundary,
+                &mut boundary_seen,
+                &mut anchor_found,
+                boundary.as_ref(),
+                cursor,
+                anchor_requested,
+                capacity,
+            )?;
         }
     }
     if !boundary_seen {
@@ -379,6 +528,14 @@ fn collect_page(
     } else {
         None
     };
+    let path_matches = candidates
+        .iter()
+        .filter(|candidate| !candidate.parent_indices.is_empty())
+        .map(|candidate| SearchPathMatch {
+            oid: candidate.oid.clone(),
+            parent_indices: candidate.parent_indices.clone(),
+        })
+        .collect();
     let result_version = result_version(compiled, snapshot);
     Ok(SearchPage {
         query_key: compiled.key.clone(),
@@ -398,7 +555,131 @@ fn collect_page(
         },
         anchor_found,
         index: snapshot.index_status.clone(),
+        path_matches,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_path_batch(
+    executable: &Path,
+    session: &session::RepositorySession,
+    compiled: &CompiledQuery,
+    batch: &mut Vec<BufferedCandidate>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    forward: &mut BinaryHeap<Candidate>,
+    backward: &mut BinaryHeap<Reverse<Candidate>>,
+    matched_count: &mut u64,
+    before_boundary: &mut u64,
+    boundary_seen: &mut bool,
+    anchor_found: &mut Option<bool>,
+    boundary: Option<&CandidateKey>,
+    cursor: Option<&SearchCursor>,
+    anchor_requested: bool,
+    capacity: usize,
+) -> Result<(), IndexError> {
+    let path_filter = compiled.query.path.as_ref().expect("compiled path filter");
+    let path_bytes = compiled.path_bytes.as_deref().expect("compiled path bytes");
+    let summaries = batch
+        .iter()
+        .map(|candidate| candidate.summary.clone())
+        .collect::<Vec<_>>();
+    let matches = path_indices_for_commits(
+        executable,
+        Path::new(&session.discovered.info.path),
+        path_filter,
+        path_bytes,
+        &summaries,
+        cancelled,
+        deadline,
+    )?;
+    for (candidate, parent_indices) in batch.drain(..).zip(matches) {
+        if parent_indices.is_empty() {
+            continue;
+        }
+        consider_candidate(
+            candidate.key,
+            || Ok(candidate.summary),
+            parent_indices,
+            forward,
+            backward,
+            matched_count,
+            before_boundary,
+            boundary_seen,
+            anchor_found,
+            boundary,
+            cursor,
+            anchor_requested,
+            capacity,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consider_candidate(
+    key: CandidateKey,
+    summary: impl FnOnce() -> Result<CommitSummary, IndexError>,
+    parent_indices: Vec<Option<u16>>,
+    forward: &mut BinaryHeap<Candidate>,
+    backward: &mut BinaryHeap<Reverse<Candidate>>,
+    matched_count: &mut u64,
+    before_boundary: &mut u64,
+    boundary_seen: &mut bool,
+    anchor_found: &mut Option<bool>,
+    boundary: Option<&CandidateKey>,
+    cursor: Option<&SearchCursor>,
+    anchor_requested: bool,
+    capacity: usize,
+) -> Result<(), IndexError> {
+    let relation = boundary
+        .map(|boundary| key.compare_order(boundary))
+        .unwrap_or(Ordering::Greater);
+    if relation == Ordering::Equal {
+        *boundary_seen = true;
+        if cursor.is_none() && anchor_requested {
+            *anchor_found = Some(true);
+        }
+    }
+    if relation == Ordering::Less {
+        *before_boundary = before_boundary.saturating_add(1);
+    }
+    *matched_count = matched_count
+        .checked_add(1)
+        .ok_or_else(|| invalid_request("Search match count overflow"))?;
+    let selected = match cursor.map(|cursor| cursor.direction) {
+        Some(CursorDirection::Next) => relation == Ordering::Greater,
+        Some(CursorDirection::Previous) => relation == Ordering::Less,
+        None if boundary.is_some() => relation != Ordering::Less,
+        None => true,
+    };
+    if !selected {
+        return Ok(());
+    }
+    let candidate_key = CandidateKey {
+        timestamp: key.timestamp,
+        oid: key.oid.clone(),
+    };
+    let previous = cursor.is_some_and(|cursor| cursor.direction == CursorDirection::Previous);
+    let should_keep = if previous {
+        can_keep_latest(backward, &candidate_key, capacity)
+    } else {
+        can_keep_earliest(forward, &candidate_key, capacity)
+    };
+    if should_keep {
+        let candidate = Candidate {
+            timestamp: key.timestamp,
+            oid: key.oid,
+            summary: summary()?,
+            parent_indices,
+        };
+        if previous {
+            keep_latest(backward, candidate, capacity);
+        } else {
+            keep_earliest(forward, candidate, capacity);
+        }
+    }
+    Ok(())
 }
 
 fn matching_row_key(
@@ -500,6 +781,8 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> Result<CommitSummary, IndexError
 }
 
 fn find_matching_key(
+    executable: Option<&Path>,
+    session: &session::RepositorySession,
     connection: Option<&Connection>,
     snapshot: &SearchSnapshot,
     compiled: &CompiledQuery,
@@ -521,7 +804,29 @@ fn find_matching_key(
     let Some(row) = rows.next().map_err(map_sql_error)? else {
         return Ok(None);
     };
-    matching_row_key(row, compiled, cancelled, deadline)
+    let Some(key) = matching_row_key(row, compiled, cancelled, deadline)? else {
+        return Ok(None);
+    };
+    if let Some(path) = &compiled.path_bytes {
+        let summary = summary_from_row(row)?;
+        let matched = path_indices_for_commits(
+            executable.expect("path query requires Git"),
+            Path::new(&session.discovered.info.path),
+            compiled
+                .query
+                .path
+                .as_ref()
+                .expect("compiled path has filter"),
+            path,
+            std::slice::from_ref(&summary),
+            cancelled,
+            deadline,
+        )?;
+        if matched.first().is_none_or(Vec::is_empty) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(key))
 }
 
 fn compile_query(
@@ -542,6 +847,14 @@ fn compile_query(
         default_case_fold_str(&query.message)
     };
     query.message = message_needle.clone();
+    let path_bytes = query
+        .path
+        .as_ref()
+        .map(|filter| validate_and_decode_path(filter))
+        .transpose()?;
+    if let Some(filter) = query.path.as_mut() {
+        filter.raw_hex.make_ascii_lowercase();
+    }
     let bytes = serde_json::to_vec(&(
         session.info.repo_id.as_str(),
         session.info.generation.as_str(),
@@ -553,6 +866,7 @@ fn compile_query(
         key: hex(&Sha256::digest(bytes)),
         query,
         message_needle,
+        path_bytes,
     })
 }
 
@@ -568,6 +882,9 @@ fn validate_query(query: &SearchQuery, oid_length: usize) -> Result<(), IndexErr
             .any(|identity| identity.name.len() > 4096 || identity.email.len() > 4096)
     {
         return Err(invalid_request("Search query exceeds a field limit"));
+    }
+    if let Some(path) = &query.path {
+        validate_and_decode_path(path)?;
     }
     if !query.oid_prefix.is_empty()
         && (query.oid_prefix.len() < 4
@@ -599,6 +916,233 @@ fn validate_query(query: &SearchQuery, oid_length: usize) -> Result<(), IndexErr
         return Err(invalid_request("fromTimestamp must be before toTimestamp"));
     }
     Ok(())
+}
+
+fn validate_and_decode_path(filter: &SearchPathFilter) -> Result<Vec<u8>, IndexError> {
+    if filter.raw_hex.len() > 32_768
+        || filter.raw_hex.len() % 2 != 0
+        || !filter.raw_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid_request("Path rawHex must be bounded hexadecimal"));
+    }
+    let bytes = (0..filter.raw_hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&filter.raw_hex[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid_request("Path rawHex is invalid"))?;
+    if (filter.kind == SearchPathKind::File && bytes.is_empty())
+        || bytes.contains(&0)
+        || bytes.first() == Some(&b'/')
+        || (filter.kind == SearchPathKind::Directory && bytes.last() == Some(&b'/'))
+        || (!bytes.is_empty()
+            && bytes
+                .split(|byte| *byte == b'/')
+                .any(|part| part.is_empty() || part == b"." || part == b".."))
+    {
+        return Err(invalid_request(
+            "Path must be a normalized repository-relative path",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn path_indices_for_commits(
+    executable: &Path,
+    repository_path: &Path,
+    filter: &SearchPathFilter,
+    path: &[u8],
+    commits: &[CommitSummary],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Vec<Vec<Option<u16>>>, IndexError> {
+    let mut input = Vec::new();
+    let mut pairs = Vec::new();
+    for (candidate_index, commit) in commits.iter().enumerate() {
+        if commit.parents.is_empty() {
+            input.extend_from_slice(commit.oid.as_bytes());
+            input.push(b'\n');
+            pairs.push((candidate_index, None, commit.oid.as_str()));
+        } else {
+            for (parent_index, parent_oid) in commit.parents.iter().enumerate() {
+                let parent_index = u16::try_from(parent_index).map_err(|_| {
+                    map_repository_error(repository::resource_limit(
+                        "Commit has too many raw parents",
+                    ))
+                })?;
+                input.extend_from_slice(commit.oid.as_bytes());
+                input.push(b' ');
+                input.extend_from_slice(parent_oid.as_bytes());
+                input.push(b'\n');
+                pairs.push((candidate_index, Some(parent_index), commit.oid.as_str()));
+            }
+        }
+    }
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut args = vec![
+        string_arg("-c"),
+        string_arg("core.commitGraph=false"),
+        string_arg("-c"),
+        string_arg(format!("core.attributesFile={null_device}")),
+        string_arg("-c"),
+        string_arg("diff.external="),
+        string_arg("--literal-pathspecs"),
+        string_arg("diff-tree"),
+        string_arg("--stdin"),
+        string_arg("--root"),
+        string_arg("--always"),
+        string_arg("-r"),
+        string_arg("--raw"),
+        string_arg("-z"),
+        string_arg("--no-abbrev"),
+        string_arg("--no-renames"),
+        string_arg("--no-ext-diff"),
+        string_arg("--no-textconv"),
+        string_arg("--ignore-submodules=none"),
+        string_arg("--no-relative"),
+        string_arg("--submodule=short"),
+        string_arg("--diff-algorithm=myers"),
+        string_arg("--indent-heuristic"),
+        string_arg(format!("-O{null_device}")),
+        string_arg("--"),
+    ];
+    if !path.is_empty() {
+        let mut pathspec = path.to_vec();
+        if filter.kind == SearchPathKind::Directory {
+            pathspec.push(b'/');
+        }
+        args.push(raw_path_argument(&pathspec)?);
+    }
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_path_git_failure)?;
+    let output = git
+        .run(
+            repository_path,
+            &args,
+            Some(&input),
+            PATH_DIFF_OUTPUT_LIMIT,
+            cancelled,
+            deadline,
+        )
+        .map_err(map_path_git_failure)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(IndexError {
+            code: if stderr.contains("missing") || stderr.contains("bad object") {
+                ErrorCode::MissingObject
+            } else {
+                ErrorCode::GitError
+            },
+            message: "Git could not compare the frozen commit paths".into(),
+        });
+    }
+    let mut matches = vec![Vec::new(); commits.len()];
+    let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut field_index = 0;
+    for (candidate_index, parent_index, expected_oid) in pairs {
+        while field_index < fields.len() && fields[field_index].is_empty() {
+            field_index += 1;
+        }
+        let header = fields
+            .get(field_index)
+            .ok_or_else(|| corrupt_index("Git returned fewer raw path groups than requested"))?;
+        let header_oid = header
+            .split(|byte| byte.is_ascii_whitespace())
+            .next()
+            .unwrap_or_default();
+        if header_oid != expected_oid.as_bytes() {
+            return Err(corrupt_index("Git raw path groups are out of order"));
+        }
+        field_index += 1;
+        while field_index < fields.len() && fields[field_index].first() == Some(&b':') {
+            let raw_header = fields[field_index];
+            let status = raw_header
+                .rsplit(|byte| byte.is_ascii_whitespace())
+                .next()
+                .unwrap_or_default();
+            field_index += 1;
+            let changed_path = fields
+                .get(field_index)
+                .ok_or_else(|| corrupt_index("Git raw path record has no path field"))?;
+            if status
+                .first()
+                .is_some_and(|status| matches!(status, b'R' | b'C'))
+            {
+                return Err(corrupt_index("Rename detection was unexpectedly enabled"));
+            }
+            if path_matches(filter, path, changed_path) {
+                let parent_indices = &mut matches[candidate_index];
+                if !parent_indices.contains(&parent_index) {
+                    parent_indices.push(parent_index);
+                }
+            }
+            field_index += 1;
+        }
+    }
+    if fields[field_index..]
+        .iter()
+        .any(|field| !field.is_empty() && field.first() == Some(&b':'))
+    {
+        return Err(corrupt_index("Git returned unexpected raw path records"));
+    }
+    Ok(matches)
+}
+
+fn path_matches(filter: &SearchPathFilter, raw_path: &[u8], changed_path: &[u8]) -> bool {
+    match filter.kind {
+        SearchPathKind::File => changed_path == raw_path,
+        SearchPathKind::Directory if raw_path.is_empty() => {
+            filter.include_descendants || !changed_path.contains(&b'/')
+        }
+        SearchPathKind::Directory => {
+            let Some(remainder) = changed_path
+                .strip_prefix(raw_path)
+                .and_then(|remainder| remainder.strip_prefix(b"/"))
+            else {
+                return false;
+            };
+            filter.include_descendants || !remainder.contains(&b'/')
+        }
+    }
+}
+
+fn raw_path_argument(bytes: &[u8]) -> Result<std::ffi::OsString, IndexError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
+    }
+    #[cfg(windows)]
+    {
+        String::from_utf8(bytes.to_vec())
+            .map(std::ffi::OsString::from)
+            .map_err(|_| invalid_request("This platform cannot represent the raw path"))
+    }
+}
+
+fn map_path_git_failure(error: GitFailure) -> IndexError {
+    let (code, message) = match error {
+        GitFailure::Cancelled => (ErrorCode::Cancelled, "Search was cancelled"),
+        GitFailure::Timeout => (ErrorCode::Timeout, "Path search timed out"),
+        GitFailure::ResourceLimit => (
+            ErrorCode::ResourceLimit,
+            "Path search output exceeded its limit",
+        ),
+        GitFailure::Unavailable(_) => (
+            ErrorCode::GitUnavailable,
+            "Git is unavailable for path search",
+        ),
+        GitFailure::CommandFailed(_) => (ErrorCode::GitError, "Git failed while searching paths"),
+    };
+    IndexError {
+        code,
+        message: message.into(),
+    }
+}
+
+fn map_repository_error(error: repository::PreviewError) -> IndexError {
+    IndexError {
+        code: error.code,
+        message: error.message,
+    }
 }
 
 fn validate_identity_params(params: &SearchIdentitiesParams) -> Result<(), IndexError> {
@@ -857,7 +1401,86 @@ const SEARCH_ONE_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.commit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commitscope_core::{MetadataIndexCoverage, MetadataIndexStatus};
+    use commitscope_core::{CommitIdentity, MetadataIndexCoverage, MetadataIndexStatus};
+    use std::{
+        fs,
+        path::PathBuf,
+        process::{Command, Output},
+        sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
+    };
+
+    static NEXT_REPO: AtomicU64 = AtomicU64::new(1);
+
+    struct TestRepo(PathBuf);
+
+    impl TestRepo {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "commitscope-path-search-{}-{}",
+                std::process::id(),
+                NEXT_REPO.fetch_add(1, AtomicOrdering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            git(&path, &["init", "-q"]);
+            git(&path, &["config", "user.name", "Path Test"]);
+            git(&path, &["config", "user.email", "path@example.test"]);
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(path: &Path, args: &[&str]) -> Output {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    fn git_text(path: &Path, args: &[&str]) -> String {
+        String::from_utf8(git(path, args).stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn commit_summary(oid: String, parents: Vec<String>) -> CommitSummary {
+        CommitSummary {
+            oid,
+            parents,
+            summary: "test".into(),
+            summary_truncated: false,
+            author: CommitIdentity {
+                name: "Path Test".into(),
+                email: "path@example.test".into(),
+                timestamp: "1".into(),
+                offset: "+0000".into(),
+            },
+            committer: CommitIdentity {
+                name: "Path Test".into(),
+                email: "path@example.test".into(),
+                timestamp: "1".into(),
+                offset: "+0000".into(),
+            },
+            text_lossy: false,
+        }
+    }
 
     fn query() -> CompiledQuery {
         CompiledQuery {
@@ -872,8 +1495,10 @@ mod tests {
                 from_timestamp: None,
                 to_timestamp: None,
                 time_zone: "UTC".into(),
+                path: None,
             },
             message_needle: String::new(),
+            path_bytes: None,
         }
     }
 
@@ -943,6 +1568,8 @@ mod tests {
             oid: "c".repeat(40),
         };
         let page = collect_page(
+            None,
+            None,
             Some(&connection),
             &snapshot,
             &query,
@@ -960,6 +1587,124 @@ mod tests {
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].oid, "c".repeat(40));
         assert_eq!(page.anchor_found, Some(true));
+    }
+
+    #[test]
+    fn git_path_filter_matches_root_deletion_and_only_second_merge_parent() {
+        let repo = TestRepo::new();
+        git(repo.path(), &["checkout", "-q", "-b", "main"]);
+        fs::write(repo.path().join("wild[*].txt"), "root\n").unwrap();
+        fs::create_dir_all(repo.path().join("dir")).unwrap();
+        fs::write(repo.path().join("dir/deleted.txt"), "delete me\n").unwrap();
+        fs::write(repo.path().join("merge.txt"), "base\n").unwrap();
+        git(repo.path(), &["add", "-A"]);
+        git(repo.path(), &["commit", "-q", "-m", "root"]);
+        let root = git_text(repo.path(), &["rev-parse", "HEAD"]);
+
+        fs::remove_file(repo.path().join("dir/deleted.txt")).unwrap();
+        git(repo.path(), &["add", "-A"]);
+        git(repo.path(), &["commit", "-q", "-m", "delete"]);
+        let deleted = git_text(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["checkout", "-q", "-b", "side", &root]);
+        fs::write(repo.path().join("merge.txt"), "side version\n").unwrap();
+        git(repo.path(), &["add", "merge.txt"]);
+        git(repo.path(), &["commit", "-q", "-m", "side"]);
+        let side = git_text(repo.path(), &["rev-parse", "HEAD"]);
+
+        git(repo.path(), &["checkout", "-q", "main"]);
+        let tree = git_text(repo.path(), &["rev-parse", "main^{tree}"]);
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["commit-tree", &tree, "-p", &deleted, "-p", &side])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"merge\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let merge = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+
+        let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| directory.join("git"))
+            .find(|candidate| candidate.is_file())
+            .unwrap();
+        let run = |filter: SearchPathFilter, raw_path: &[u8], commits: Vec<CommitSummary>| {
+            path_indices_for_commits(
+                &executable,
+                repo.path(),
+                &filter,
+                raw_path,
+                &commits,
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .unwrap()
+        };
+        let special = b"wild[*].txt";
+        assert_eq!(
+            run(
+                SearchPathFilter {
+                    raw_hex: hex(special),
+                    kind: SearchPathKind::File,
+                    include_descendants: false,
+                },
+                special,
+                vec![commit_summary(root.clone(), Vec::new())]
+            ),
+            vec![vec![None]]
+        );
+        assert_eq!(
+            run(
+                SearchPathFilter {
+                    raw_hex: hex(b"dir/deleted.txt"),
+                    kind: SearchPathKind::File,
+                    include_descendants: false,
+                },
+                b"dir/deleted.txt",
+                vec![commit_summary(deleted.clone(), vec![root])]
+            ),
+            vec![vec![Some(0)]]
+        );
+        assert_eq!(
+            run(
+                SearchPathFilter {
+                    raw_hex: hex(b"merge.txt"),
+                    kind: SearchPathKind::File,
+                    include_descendants: false,
+                },
+                b"merge.txt",
+                vec![commit_summary(merge, vec![deleted, side])]
+            ),
+            vec![vec![Some(1)]]
+        );
+    }
+
+    #[test]
+    fn directory_matching_and_completion_keep_raw_path_boundaries() {
+        let directory = SearchPathFilter {
+            raw_hex: hex(b"src"),
+            kind: SearchPathKind::Directory,
+            include_descendants: false,
+        };
+        assert!(path_matches(&directory, b"src", b"src/main.rs"));
+        assert!(!path_matches(&directory, b"src", b"src/nested/lib.rs"));
+        assert!(!path_matches(&directory, b"src", b"src-old/main.rs"));
+        let recursive = SearchPathFilter {
+            include_descendants: true,
+            ..directory
+        };
+        assert!(path_matches(&recursive, b"src", b"src/nested/lib.rs"));
+
+        let mut entries = BTreeSet::new();
+        let mut truncated = false;
+        insert_path_suggestion(&mut entries, b"src/main.rs".to_vec(), 0, 1, &mut truncated);
+        insert_path_suggestion(&mut entries, b"src/lib.rs".to_vec(), 0, 1, &mut truncated);
+        assert!(truncated);
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]

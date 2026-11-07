@@ -88,7 +88,7 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
       {!view.loading && !window && !view.error ? <div role="status" className="p-4 text-sm text-fg3">输入消息或添加筛选条件开始搜索。</div> : null}
       {window && commits.length ? <>
         <div aria-hidden="true" style={{ height: range.top }} />
-        {commits.slice(range.start, range.end).map((commit, localIndex) => resultRow(commit, view, window.pageOffset + range.start + localIndex, onSelect))}
+        {commits.slice(range.start, range.end).map((commit, localIndex) => resultRow(commit, view, window.pathMatches[commit.oid], window.pageOffset + range.start + localIndex, onSelect))}
         <div aria-hidden="true" style={{ height: range.bottom }} />
       </> : null}
       {view.pageLoading ? <div role="status" className="p-3 text-center text-xs text-fg3">正在读取相邻结果…</div> : null}
@@ -98,16 +98,19 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
   </nav>;
 }
 
-function resultRow(commit: CommitSummary, view: SearchView, rank: number, onSelect: (oid: string) => void): React.JSX.Element {
+function resultRow(commit: CommitSummary, view: SearchView, pathParents: (number | null)[] | undefined, rank: number, onSelect: (oid: string) => void): React.JSX.Element {
   const timestamp = view.query.timeField === "author" ? commit.author.timestamp : commit.committer.timestamp;
   const identity = view.query.timeField === "author" ? commit.author : commit.committer;
   const selected = view.selectedOid === commit.oid;
+  const pathParentLabel = pathParents?.some(parent => parent === null) ? "根提交空树" : pathParents?.length
+    ? `路径命中父提交 ${pathParents.map(parent => (parent! + 1).toString()).join("、")}` : null;
   return <button key={commit.oid} type="button" role="option" aria-selected={selected} data-testid={`search-result-${commit.oid}`} data-oid={commit.oid}
     style={{ height: ROW_HEIGHT }} className={`flex w-full items-center gap-2 px-3 text-left hover:bg-hover ${selected ? "bg-selected" : ""}`}
     onClick={() => onSelect(commit.oid)}>
     <span className="flex min-w-0 flex-1 flex-col gap-1">
       <span className="truncate text-[13px] font-medium text-fg">{commit.summary || "（空摘要）"}</span>
       <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg3"><span className="truncate">{identity.name || identity.email || "未知身份"}</span>
+        {pathParentLabel ? <span className="shrink-0 text-accent-fg" title={pathParentLabel} data-testid={`search-path-match-${commit.oid}`}>{pathParentLabel}</span> : null}
         <span className="shrink-0">{identityTime(identity)}</span><span className="ml-auto shrink-0 font-mono">#{rank + 1}</span></span>
     </span>
     <code className="shrink-0 font-mono text-[10.5px] text-fg3">{shortOid(commit.oid)}</code>

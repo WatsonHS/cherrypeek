@@ -55,6 +55,10 @@ export type ResponseData =
       section: "searchIdentities";
     }
   | {
+      paths: SearchPaths;
+      section: "searchPaths";
+    }
+  | {
       details: CommitDetails;
       section: "commitDetails";
     }
@@ -156,6 +160,7 @@ export type ErrorCode =
 export type MetadataIndexState =
   "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
 export type SearchTimeField = "author" | "committer";
+export type SearchPathKind = "file" | "directory";
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
 export type CommitUpdateReason = "scopeUnavailable" | "noLongerReachable";
 export type CommitUpdateState = "unaffected" | "affected" | "unknown";
@@ -217,6 +222,10 @@ export interface SearchPage {
   matchedCount: number;
   nextCursor: string | null;
   pageOffset: number;
+  /**
+   * @maxItems 500
+   */
+  pathMatches: SearchPathMatch[];
   previousCursor: string | null;
   queryKey: string;
   resultVersion: string;
@@ -237,6 +246,13 @@ export interface CommitIdentity {
   offset: string;
   timestamp: string;
 }
+export interface SearchPathMatch {
+  oid: string;
+  /**
+   * @maxItems 128
+   */
+  parentIndices: (number | null)[];
+}
 export interface SearchIdentities {
   coverage: MetadataIndexCoverage;
   field: SearchTimeField;
@@ -250,6 +266,22 @@ export interface SearchIdentities {
 export interface SearchIdentity {
   email: string;
   name: string;
+}
+export interface SearchPaths {
+  /**
+   * @maxItems 100
+   */
+  entries: SearchPathEntry[];
+  truncated: boolean;
+}
+export interface SearchPathEntry {
+  kind: SearchPathKind;
+  path: GitPath;
+}
+export interface GitPath {
+  display: string;
+  rawHex: string;
+  textLossy: boolean;
 }
 export interface CommitDetails {
   commit: CommitSummary;
@@ -328,11 +360,6 @@ export interface ChangedFile {
   oldPath: GitPath | null;
   similarity: number | null;
   status: ChangedFileStatus;
-}
-export interface GitPath {
-  display: string;
-  rawHex: string;
-  textLossy: boolean;
 }
 export interface ChangeOverview {
   additions: number;

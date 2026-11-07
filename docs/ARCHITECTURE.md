@@ -121,7 +121,7 @@ P1-06 已按[代码级计划](implementation/p1-06-metadata-search.md)实现并�
 
 时间过滤应遍历所需可达集合再按选定时间字段过滤，避免遇到乱序时间就提前停止。Git `--since-as-filter` 与普通 `--since` 行为不同；Author time 筛选不能直接等同于默认 Git 日期筛选。[Git log 文档](https://git-scm.com/docs/git-log)。
 
-路径搜索按 PRODUCT 的 merge 口径验证，不直接依赖默认历史简化得到的集合。第一版不建立全库文件内容索引，不扫描每条提交的完整 patch 来做启动统计。
+P3-01 路径条件进入同一个 SearchQuery，与元数据谓词取交集。按 metadata watermark 扫描候选，以有界批次将提交与各原始父送入只读 `diff-tree --stdin --raw -z --no-renames`，root 对空树，按原始路径字节匹配文件或目录；不使用默认历史简化，也不生成 patch 或建立全库内容索引。SearchPage 的 pathMatches 只附带当前页命中的父序号，并随 commits 分块、合并和淘汰；无路径条件保持原有 SQLite 搜索路径。`listSearchPaths` 只从冻结 scope tips 的 tree 提供当前路径建议，已删除路径允许手输；补全复用搜索取消域，不读取工作目录。路径扫描仍受已有请求截止与输出上限约束，超限保留旧结果并明确报错，性能需后续实测，见[代码计划](implementation/p3-01-path-history.md)。
 
 ## 外部变化与缓存
 

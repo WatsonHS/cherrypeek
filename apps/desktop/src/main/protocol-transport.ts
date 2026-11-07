@@ -197,7 +197,7 @@ export class ProtocolTransport {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开、刷新和范围切换可保留迟到的成功终态"));
     }
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
-      method !== "searchCommits" && method !== "listSearchIdentities" &&
+      method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
       !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
@@ -589,6 +589,9 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.field === "author" || params.field === "committer") && typeof params.text === "string" &&
     Buffer.byteLength(params.text, "utf8") <= 1024 && Number.isInteger(params.limit) &&
     (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
+  if (method === "listSearchPaths" && isRecord(params) && hasExactKeys(params, ["limit", "text"]) &&
+    typeof params.text === "string" && Buffer.byteLength(params.text, "utf8") <= 32 * 1024 && Number.isInteger(params.limit) &&
+    (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
   if (["getCommit", "branchesContaining"].includes(method) && isRecord(params) && hasExactKeys(params, ["oid"]) &&
     typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid)) return true;
   if (["listChangedFiles", "readMergeCommits"].includes(method) && isRecord(params) &&
@@ -612,7 +615,7 @@ function validRequestParams(method: string, params: unknown): boolean {
 }
 
 function isSearchQuery(value: unknown): boolean {
-  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "timeField", "timeZone", "toTimestamp"])) return false;
+  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"])) return false;
   const timestamp = (item: unknown) => item === null || Number.isSafeInteger(item);
   const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
     isRecord(identity) && hasExactKeys(identity, ["email", "name"]) &&
@@ -623,7 +626,17 @@ function isSearchQuery(value: unknown): boolean {
     typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
     (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
     (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
-    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128;
+    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128 &&
+    validSearchPathFilter(value.path);
+}
+
+function validSearchPathFilter(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isRecord(value) || !hasExactKeys(value, ["includeDescendants", "kind", "rawHex"]) ||
+    (value.kind !== "file" && value.kind !== "directory") || typeof value.includeDescendants !== "boolean" ||
+    typeof value.rawHex !== "string" || value.rawHex.length > 32 * 1024 || value.rawHex.length % 2 !== 0 ||
+    !/^[0-9a-fA-F]*$/.test(value.rawHex) || value.kind === "file" && value.rawHex.length === 0) return false;
+  return !Buffer.from(value.rawHex, "hex").includes(0);
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
@@ -636,7 +649,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
   return undefined;
 }
 

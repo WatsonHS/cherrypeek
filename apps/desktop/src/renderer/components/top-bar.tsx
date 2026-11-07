@@ -18,7 +18,7 @@ import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
-  searchView, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities }: {
+  searchView, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths }: {
   preview: RepositoryView;
   actions: RepositoryActions;
   recent: RecentState;
@@ -32,6 +32,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onSearchQueryChange(query: SearchQuery, composing?: boolean): void;
   onSearchComposition(composing: boolean): void;
   onLoadSearchIdentities(field: SearchTimeField, text: string): void;
+  onLoadSearchPaths(text: string): void;
 }): React.JSX.Element | null {
   const [scopeOpen, setScopeOpen] = React.useState(false);
   const repository = preview.repository;
@@ -47,7 +48,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="flex-1" />
     <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
-      onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} />
+      onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} />
     <ShortcutGuide />
     <UpdatesPlaceholder />
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}

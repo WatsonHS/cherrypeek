@@ -1,9 +1,9 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
-    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, LocateCommitParams,
-    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams,
-    ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
+    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, ListSearchPathsParams,
+    LocateCommitParams, MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION,
+    ReadDiffParams, ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
     RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope, ResponseData,
     SearchCommitsParams, SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams,
     ServerMessage,
@@ -54,6 +54,7 @@ enum RequestOperation {
     ControlMetadataIndex(MetadataIndexAction),
     SearchCommits(SearchCommitsParams),
     ListSearchIdentities(SearchIdentitiesParams),
+    ListSearchPaths(ListSearchPathsParams),
     GetCommit(GetCommitParams),
     ListChangedFiles(ListChangedFilesParams),
     ReadMergeCommits(ReadMergeCommitsParams),
@@ -499,6 +500,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ControlMetadataIndex(_)
             | RequestOperation::SearchCommits(_)
             | RequestOperation::ListSearchIdentities(_)
+            | RequestOperation::ListSearchPaths(_)
             | RequestOperation::GetCommit(_)
             | RequestOperation::ListChangedFiles(_)
             | RequestOperation::ReadMergeCommits(_)
@@ -786,6 +788,7 @@ fn dispatch_request(
             let cancelled = Arc::clone(&cancelled);
             let metadata_tasks = Arc::clone(metadata_tasks);
             let request_id = request_id.clone();
+            let git_path = git_path.map(std::path::Path::to_path_buf);
             workers.push(thread::spawn(move || {
                 execute_search_commits(
                     &sender,
@@ -794,6 +797,7 @@ fn dispatch_request(
                     &request_id,
                     repo_id,
                     generation,
+                    git_path.as_deref(),
                     session,
                     params,
                     metadata_tasks,
@@ -823,6 +827,33 @@ fn dispatch_request(
                     cancelled,
                 );
             }));
+        }
+        RequestOperation::ListSearchPaths(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let paths = crate::search::list_search_paths(
+                        git, session, &params, cancelled, deadline,
+                    )
+                    .map_err(|error| crate::details::DetailError {
+                        retryable: matches!(error.code, ErrorCode::Busy | ErrorCode::Timeout),
+                        code: error.code,
+                        message: error.message,
+                    })?;
+                    let processed = paths.entries.len() as u32;
+                    Ok((ResponseData::SearchPaths { paths }, processed))
+                },
+            );
         }
         RequestOperation::GetCommit(params) => {
             let session = bound_session.expect("session context was checked before dispatch");
@@ -1771,6 +1802,7 @@ fn validate_request(
         | "controlMetadataIndex"
         | "searchCommits"
         | "listSearchIdentities"
+        | "listSearchPaths"
         | "getCommit"
         | "listChangedFiles"
         | "readMergeCommits"
@@ -1854,6 +1886,16 @@ fn validate_request(
                             (
                                 ErrorCode::InvalidRequest,
                                 "listSearchIdentities params 无效".into(),
+                            )
+                        })
+                }
+                "listSearchPaths" => {
+                    serde_json::from_value::<ListSearchPathsParams>(params.clone())
+                        .map(RequestOperation::ListSearchPaths)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "listSearchPaths params 无效".into(),
                             )
                         })
                 }
@@ -1943,6 +1985,7 @@ fn validate_request(
         | "controlMetadataIndex"
         | "searchCommits"
         | "listSearchIdentities"
+        | "listSearchPaths"
         | "getCommit"
         | "listChangedFiles"
         | "readMergeCommits"
@@ -2645,6 +2688,7 @@ fn execute_search_commits(
     request_id: &str,
     repo_id: Option<String>,
     generation: Option<String>,
+    git_path: Option<&std::path::Path>,
     session: Arc<session::RepositorySession>,
     params: SearchCommitsParams,
     metadata_tasks: Arc<crate::metadata_index::TaskManager>,
@@ -2652,6 +2696,7 @@ fn execute_search_commits(
 ) {
     let cache_epoch = metadata_tasks.search_cache_epoch(&session);
     let result = crate::search::search_commits(
+        git_path,
         &session_store::SessionStore::from_env(),
         &session,
         &params,
@@ -2982,6 +3027,12 @@ fn search_page_response(
     commits: Vec<commitscope_core::CommitSummary>,
 ) -> ServerMessage {
     let mut page = page.clone();
+    let chunk_oids = commits
+        .iter()
+        .map(|commit| commit.oid.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    page.path_matches
+        .retain(|path_match| chunk_oids.contains(path_match.oid.as_str()));
     page.commits = commits;
     ServerMessage::Response {
         request_id: request_id.to_owned(),
@@ -3606,6 +3657,7 @@ mod search_response_tests {
                 quota_bytes: 4096,
                 error: None,
             },
+            path_matches: Vec::new(),
         };
         let chunks =
             pack_search_page_chunks("request", Some("repo"), Some("generation"), &page).unwrap();

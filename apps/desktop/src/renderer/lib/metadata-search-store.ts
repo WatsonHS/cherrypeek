@@ -1,8 +1,8 @@
-import type { CommitSummary, HistoryCommit, MetadataIndexStatus, SearchIdentity, SearchPage } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { CommitSummary, HistoryCommit, MetadataIndexStatus, SearchIdentity, SearchPage, SearchPathEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchCommitsParams, SearchQuery, SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositorySessionApi } from "../../../../../packages/protocol/src/repository-session.js";
 
-export type SearchApi = Pick<RepositorySessionApi, "searchCommits" | "listSearchIdentities" | "cancelSearch">;
+export type SearchApi = Pick<RepositorySessionApi, "searchCommits" | "listSearchIdentities" | "listSearchPaths" | "cancelSearch">;
 export type SearchField = "author" | "committer";
 
 export interface SearchWindow {
@@ -17,6 +17,7 @@ export interface SearchWindow {
   nextCursor: string | null;
   anchorFound: boolean | null;
   commits: CommitSummary[];
+  pathMatches: Record<string, (number | null)[]>;
 }
 
 export interface SearchIdentityState {
@@ -40,6 +41,7 @@ export interface SearchView {
   anchorOffset: number;
   authorIdentities: SearchIdentityState;
   committerIdentities: SearchIdentityState;
+  pathSuggestions: { text: string; entries: SearchPathEntry[]; loading: boolean; error: string | null; truncated: boolean };
 }
 
 export interface HistoryReturnPoint {
@@ -62,16 +64,18 @@ export interface SearchLocationReturnPoint {
 export const DEFAULT_SEARCH_QUERY: SearchQuery = {
   message: "", caseSensitive: false, authors: [], committers: [], oidPrefix: "",
   timeField: "committer", fromTimestamp: null, toTimestamp: null,
+  path: null,
   timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
 };
 
 const EMPTY_IDENTITIES: SearchIdentityState = { values: [], loading: false, error: null, truncated: false, coverage: null };
+const EMPTY_PATH_SUGGESTIONS = { text: "", entries: [] as SearchPathEntry[], loading: false, error: null as string | null, truncated: false };
 const PAGE_SIZE = 200;
 const MAX_WINDOW = 1_800;
 
 export function hasSearchCriteria(query: SearchQuery): boolean {
   return query.message !== "" || query.authors.length > 0 || query.committers.length > 0 || query.oidPrefix !== "" ||
-    query.fromTimestamp !== null || query.toTimestamp !== null || query.timeField === "author";
+    query.fromTimestamp !== null || query.toTimestamp !== null || query.timeField === "author" || query.path !== null;
 }
 
 export function searchQueryKey(query: SearchQuery): string {
@@ -82,11 +86,12 @@ export class MetadataSearchStore {
   private view: SearchView = {
     active: false, query: DEFAULT_SEARCH_QUERY, loading: false, pageLoading: false, error: null,
     window: null, selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
-    authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES,
+    authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, pathSuggestions: EMPTY_PATH_SUGGESTIONS,
   };
   private readonly listeners = new Set<() => void>();
   private operation = 0;
   private identityOperation = { author: 0, committer: 0 };
+  private pathSuggestionOperation = 0;
   private identityIntent = 0;
   private identityTail: Promise<void> = Promise.resolve();
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,16 +133,17 @@ export class MetadataSearchStore {
       partial: !window.coverage.complete,
     };
     this.locationReturn = point;
-    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading;
     this.clearDebounce();
     ++this.operation;
     ++this.identityIntent;
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
+    ++this.pathSuggestionOperation;
     this.pages = [];
     this.update({ ...this.view, active: false, query: DEFAULT_SEARCH_QUERY, loading: false, pageLoading: false,
       window: null, selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
-      authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, error: null });
+      authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, pathSuggestions: EMPTY_PATH_SUGGESTIONS, error: null });
     if (pending) await this.api.cancelSearch();
     return point;
   }
@@ -168,12 +174,13 @@ export class MetadataSearchStore {
       ++this.identityIntent;
       ++this.identityOperation.author;
       ++this.identityOperation.committer;
-      if (this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.pages.length) void this.api.cancelSearch();
+      ++this.pathSuggestionOperation;
+      if (this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading || this.pages.length) void this.api.cancelSearch();
       this.pages = [];
       this.update({ ...this.view, query, active, window: null, loading: false, pageLoading: false, error: null,
         selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
         authorIdentities: { ...this.view.authorIdentities, loading: false },
-        committerIdentities: { ...this.view.committerIdentities, loading: false } });
+        committerIdentities: { ...this.view.committerIdentities, loading: false }, pathSuggestions: EMPTY_PATH_SUGGESTIONS });
     } else if (active !== this.view.active) {
       this.update({ ...this.view, active });
     }
@@ -189,10 +196,11 @@ export class MetadataSearchStore {
   beginComposition(): void {
     this.composing = true;
     this.clearDebounce();
-    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading;
     ++this.operation;
+    ++this.pathSuggestionOperation;
     if (pending) void this.api.cancelSearch();
-    this.update({ ...this.view, loading: false, pageLoading: false });
+    this.update({ ...this.view, loading: false, pageLoading: false, pathSuggestions: { ...this.view.pathSuggestions, loading: false } });
   }
 
   bindSession(sessionKey: string | null, ready: boolean): void {
@@ -205,10 +213,11 @@ export class MetadataSearchStore {
       ++this.identityIntent;
       ++this.identityOperation.author;
       ++this.identityOperation.committer;
+      ++this.pathSuggestionOperation;
       this.pages = [];
       this.update({ ...this.view, window: null, loading: false, pageLoading: false, error: null,
         selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
-        authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES });
+        authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, pathSuggestions: EMPTY_PATH_SUGGESTIONS });
     }
     if (ready && this.view.active && !this.composing && !this.view.loading && !this.view.window?.coverage.complete && !this.debounceTimer) this.schedule(250);
   }
@@ -253,6 +262,27 @@ export class MetadataSearchStore {
     if (resumeSearch && !this.composing && this.view.active && !this.view.authorIdentities.loading && !this.view.committerIdentities.loading) this.schedule(250);
   }
 
+  async loadPaths(text: string): Promise<void> {
+    const intent = this.identityIntent;
+    const operation = ++this.pathSuggestionOperation;
+    const searchPending = this.view.loading || this.view.pageLoading;
+    const resumeSearch = this.view.active && (searchPending || Boolean(this.view.window && !this.view.window.coverage.complete));
+    if (searchPending) ++this.operation;
+    this.update({ ...this.view, loading: false, pageLoading: false,
+      pathSuggestions: { ...this.view.pathSuggestions, text, loading: true, error: null } });
+    const result = await this.enqueueIdentityRequest(intent, () => operation === this.pathSuggestionOperation
+      ? this.api.listSearchPaths({ text, limit: 100 })
+      : Promise.resolve(null));
+    if (!result || intent !== this.identityIntent || operation !== this.pathSuggestionOperation) return;
+    if (!result.ok) {
+      this.update({ ...this.view, pathSuggestions: { ...this.view.pathSuggestions, loading: false, error: result.error.message } });
+      if (resumeSearch && !this.composing && this.view.active) this.schedule(250);
+      return;
+    }
+    this.update({ ...this.view, pathSuggestions: { text, entries: result.value.entries, loading: false, error: null, truncated: result.value.truncated } });
+    if (resumeSearch && !this.composing && this.view.active) this.schedule(250);
+  }
+
   async loadNext(): Promise<void> {
     const window = this.view.window;
     const cursor = window?.nextCursor;
@@ -269,7 +299,7 @@ export class MetadataSearchStore {
 
   refreshPartial(): Promise<void> {
     if (!this.view.active || this.composing || !this.view.window || this.view.window.coverage.complete || this.view.loading || this.view.pageLoading ||
-      this.view.authorIdentities.loading || this.view.committerIdentities.loading) return Promise.resolve();
+      this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading) return Promise.resolve();
     return this.runSearch({ cursor: null, anchorOid: this.view.anchorOid });
   }
 
@@ -280,16 +310,18 @@ export class MetadataSearchStore {
 
   async cancelPending(): Promise<void> {
     this.clearDebounce();
-    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    const pending = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading;
     const operation = ++this.operation;
     ++this.identityIntent;
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
+    ++this.pathSuggestionOperation;
     if (pending) await this.api.cancelSearch();
     if (operation !== this.operation) return;
     this.update({ ...this.view, loading: false, pageLoading: false,
       authorIdentities: { ...this.view.authorIdentities, loading: false },
-      committerIdentities: { ...this.view.committerIdentities, loading: false } });
+      committerIdentities: { ...this.view.committerIdentities, loading: false },
+      pathSuggestions: { ...this.view.pathSuggestions, loading: false } });
   }
 
   async leave(): Promise<void> {
@@ -298,12 +330,13 @@ export class MetadataSearchStore {
     ++this.identityIntent;
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
-    const hadRequest = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading;
+    ++this.pathSuggestionOperation;
+    const hadRequest = this.view.loading || this.view.pageLoading || this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading;
     this.locationReturn = null;
     this.pages = [];
     this.update({ ...this.view, active: false, query: DEFAULT_SEARCH_QUERY, loading: false, pageLoading: false,
       window: null, selectedOid: undefined, oldSelectedCommit: null, anchorOid: null, anchorOffset: 0,
-      authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, error: null });
+      authorIdentities: EMPTY_IDENTITIES, committerIdentities: EMPTY_IDENTITIES, pathSuggestions: EMPTY_PATH_SUGGESTIONS, error: null });
     if (hadRequest) await this.api.cancelSearch();
     if (operation !== this.operation || this.view.active) return;
   }
@@ -314,6 +347,7 @@ export class MetadataSearchStore {
     ++this.identityIntent;
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
+    ++this.pathSuggestionOperation;
     void this.api.cancelSearch();
     this.listeners.clear();
   }
@@ -333,10 +367,12 @@ export class MetadataSearchStore {
     ++this.identityIntent;
     ++this.identityOperation.author;
     ++this.identityOperation.committer;
+    ++this.pathSuggestionOperation;
     const query = this.view.query;
     const existing = this.view.window;
     this.update({ ...this.view, loading: options.cursor === null, pageLoading: options.cursor !== null, error: null,
-      authorIdentities: { ...this.view.authorIdentities, loading: false }, committerIdentities: { ...this.view.committerIdentities, loading: false } });
+      authorIdentities: { ...this.view.authorIdentities, loading: false }, committerIdentities: { ...this.view.committerIdentities, loading: false },
+      pathSuggestions: { ...this.view.pathSuggestions, loading: false } });
     const params: SearchCommitsParams = { query, cursor: options.cursor, anchorOid: options.cursor === null ? options.anchorOid : null, pageSize: PAGE_SIZE };
     const result = await this.api.searchCommits(params);
     if (operation !== this.operation || !this.view.active || searchQueryKey(this.view.query) !== searchQueryKey(query)) return;
@@ -413,6 +449,7 @@ export class MetadataSearchStore {
     const first = this.pages[0]!;
     const last = this.pages.at(-1)!;
     const commits = this.pages.flatMap(page => page.commits);
+    const pathMatches = Object.fromEntries(this.pages.flatMap(page => page.pathMatches ?? []).map(match => [match.oid, match.parentIndices]));
     const previousWindow = this.view.window;
     const oldSelectedCommit = this.view.selectedOid
       ? previousWindow?.commits.find(commit => commit.oid === this.view.selectedOid) ?? this.view.oldSelectedCommit
@@ -421,7 +458,7 @@ export class MetadataSearchStore {
     const anchorVisible = Boolean(this.view.anchorOid && commits.some(commit => commit.oid === this.view.anchorOid));
     this.update({ ...this.view, pageLoading: false, loading: false, error: null,
       window: { ...toWindow(last), pageOffset: first.pageOffset, previousCursor: first.previousCursor, nextCursor: last.nextCursor, commits,
-        anchorFound },
+        anchorFound, pathMatches },
       anchorOid: anchorVisible ? this.view.anchorOid : first.commits[0]?.oid ?? null,
       oldSelectedCommit: selectedVisible ? null : oldSelectedCommit,
     });
@@ -465,6 +502,7 @@ function toWindow(page: SearchPage): SearchWindow {
     pageOffset: page.pageOffset, matchedCount: page.matchedCount, coverage: page.coverage,
     index: page.index, previousCursor: page.previousCursor, nextCursor: page.nextCursor,
     anchorFound: page.anchorFound, commits: page.commits,
+    pathMatches: Object.fromEntries((page.pathMatches ?? []).map(match => [match.oid, match.parentIndices])),
   };
 }
 

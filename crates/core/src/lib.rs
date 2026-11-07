@@ -121,6 +121,26 @@ impl JsonSchema for NullableTimestampSchema {
     }
 }
 
+struct NullableSearchPathFilterSchema;
+
+impl JsonSchema for NullableSearchPathFilterSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableSearchPathFilter".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let path_filter = generator.subschema_for::<SearchPathFilter>();
+        Schema::try_from(serde_json::json!({
+            "anyOf": [path_filter, {"type":"null"}]
+        }))
+        .expect("valid nullable search path filter schema")
+    }
+}
+
 struct NullableBooleanSchema;
 
 impl JsonSchema for NullableBooleanSchema {
@@ -348,6 +368,7 @@ pub enum RequestParams {
     ReadMergeCommits(ReadMergeCommitsParams),
     BranchesContaining(BranchesContainingParams),
     ReadDiff(ReadDiffParams),
+    ListSearchPaths(ListSearchPathsParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -513,6 +534,50 @@ pub struct SearchQuery {
     pub to_timestamp: Option<i64>,
     #[schemars(length(max = 128))]
     pub time_zone: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSearchPathFilterSchema")]
+    pub path: Option<SearchPathFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPathFilter {
+    #[schemars(length(max = 32768))]
+    pub raw_hex: String,
+    pub kind: SearchPathKind,
+    pub include_descendants: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchPathKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListSearchPathsParams {
+    #[schemars(length(max = 32768))]
+    pub text: String,
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPathEntry {
+    pub path: GitPath,
+    pub kind: SearchPathKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPaths {
+    #[schemars(length(max = 100))]
+    pub entries: Vec<SearchPathEntry>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -562,6 +627,17 @@ pub struct SearchPage {
     #[schemars(with = "NullableBooleanSchema")]
     pub anchor_found: Option<bool>,
     pub index: MetadataIndexStatus,
+    #[schemars(length(max = 500))]
+    pub path_matches: Vec<SearchPathMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPathMatch {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[schemars(length(max = 128))]
+    pub parent_indices: Vec<Option<u16>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -995,6 +1071,8 @@ pub enum ResponseData {
     SearchPage { page: SearchPage },
     #[serde(rename = "searchIdentities")]
     SearchIdentities { result: SearchIdentities },
+    #[serde(rename = "searchPaths")]
+    SearchPaths { paths: SearchPaths },
     #[serde(rename = "commitDetails")]
     CommitDetails { details: CommitDetails },
     #[serde(rename = "changedFiles")]

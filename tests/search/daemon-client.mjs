@@ -28,6 +28,7 @@ export function projectSearchPage(response) {
   assert.equal(response.completion.coverage.complete, true, "search response envelope is complete independently of index coverage");
   const page = chunks[0].data.page;
   const commits = [];
+  const pathMatches = [];
   for (const [index, chunk] of chunks.entries()) {
     assert.equal(chunk.sequence, index, "search response frames start at sequence zero and increase without gaps");
     const next = chunk.data.page;
@@ -37,6 +38,7 @@ export function projectSearchPage(response) {
     assert.deepEqual(next.coverage, page.coverage, "search prefix coverage is stable across frames");
     assert.deepEqual(next.index, page.index, "index state is stable across frames");
     commits.push(...next.commits);
+    pathMatches.push(...next.pathMatches);
     assert.equal(chunk.coverage.processed, commits.length, "each frame envelope counts summaries cumulatively across the page");
     assert.equal(chunk.coverage.complete, chunk.done, "only the terminal response frame is complete");
     if (!chunk.done) assert.equal(chunk.nextCursor, null, "nonterminal envelopes do not publish the page cursor early");
@@ -44,7 +46,7 @@ export function projectSearchPage(response) {
   }
   assert.equal(response.completion.coverage.processed, commits.length, "terminal envelope counts every summary across response frames");
   assert.ok(commits.length <= 500, "merged result page remains within the protocol page-size limit");
-  return { ...page, commits, frameCount: chunks.length, done: response.completion.done, completion: response.completion };
+  return { ...page, commits, pathMatches, frameCount: chunks.length, done: response.completion.done, completion: response.completion };
 }
 
 export function projectSearchIdentities(response) {

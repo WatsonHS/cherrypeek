@@ -33,7 +33,8 @@ export type RequestParams =
   | ListChangedFilesParams
   | ReadMergeCommitsParams
   | BranchesContainingParams
-  | ReadDiffParams;
+  | ReadDiffParams
+  | ListSearchPathsParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -43,6 +44,7 @@ export type RepositoryScope =
       worktree: string;
     };
 export type MetadataIndexAction = "pause" | "resume" | "cancel" | "rebuild";
+export type SearchPathKind = "file" | "directory";
 export type SearchTimeField = "author" | "committer";
 
 export interface EmptyParams {}
@@ -96,6 +98,7 @@ export interface SearchQuery {
   fromTimestamp: number | null;
   message: string;
   oidPrefix: string;
+  path: SearchPathFilter | null;
   timeField: SearchTimeField;
   timeZone: string;
   toTimestamp: number | null;
@@ -103,6 +106,11 @@ export interface SearchQuery {
 export interface SearchIdentity {
   email: string;
   name: string;
+}
+export interface SearchPathFilter {
+  includeDescendants: boolean;
+  kind: SearchPathKind;
+  rawHex: string;
 }
 export interface SearchIdentitiesParams {
   field: SearchTimeField;
@@ -132,4 +140,8 @@ export interface ReadDiffParams {
   oid: string;
   oldPathHex: string | null;
   parentIndex: number | null;
+}
+export interface ListSearchPathsParams {
+  limit: number;
+  text: string;
 }

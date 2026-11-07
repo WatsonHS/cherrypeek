@@ -12,8 +12,9 @@ import type {
   RepositorySessionInfo,
   SearchPage,
   SearchIdentities,
+  SearchPaths,
 } from "../../../../packages/protocol/src/generated/server-message.js";
-import type { MetadataIndexAction, SearchCommitsParams, SearchIdentitiesParams, SearchQuery,
+import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
@@ -41,6 +42,7 @@ type SessionResponse = Extract<ServerResponseMessage["data"], { section: "reposi
 type ViewRecordedResponse = Extract<ServerResponseMessage["data"], { section: "repositoryViewRecorded" }>;
 type ClosedResponse = Extract<ServerResponseMessage["data"], { section: "repositoryClosed" }>;
 type RecentResponse = Extract<ServerResponseMessage["data"], { section: "recentRepositories" }>;
+type SearchPathsResponse = Extract<ServerResponseMessage["data"], { section: "searchPaths" }>;
 type RepositoryResponse = Extract<ServerResponseMessage["data"], { section: "repository" }>;
 type CommitsResponse = Extract<ServerResponseMessage["data"], { section: "commits" }>;
 type HistoryPageResponse = Extract<ServerResponseMessage["data"], { section: "historyPage" }>;
@@ -72,9 +74,9 @@ interface ActiveMetadataIndexRequest {
 }
 
 interface ActiveSearchRequest {
-  kind: "commits" | "identities";
+  kind: "commits" | "identities" | "paths";
   abort: AbortController;
-  done: Promise<SearchPage | SearchIdentities>;
+  done: Promise<SearchPage | SearchIdentities | SearchPaths>;
 }
 
 interface ActiveCommitDetailRequest {
@@ -507,6 +509,15 @@ export class RepositorySessionController {
     return result as SearchIdentities;
   }
 
+  async listSearchPaths(input: unknown): Promise<SearchPaths> {
+    const params = validateSearchPathsParams(input);
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取路径建议", true);
+    const session = this.requireCurrent();
+    this.requireSearchCapability();
+    const result = await this.runSearchRequest("paths", session, signal => this.readSearchPaths(session, params, signal));
+    return result as SearchPaths;
+  }
+
   async cancelSearch(): Promise<{ cancelled: boolean }> {
     ++this.searchIntent;
     const active = this.activeSearchRequest;
@@ -741,8 +752,8 @@ export class RepositorySessionController {
   private async runSearchRequest(
     kind: ActiveSearchRequest["kind"],
     session: RepositorySessionInfo,
-    read: (signal: AbortSignal) => Promise<SearchPage | SearchIdentities>,
-  ): Promise<SearchPage | SearchIdentities> {
+    read: (signal: AbortSignal) => Promise<SearchPage | SearchIdentities | SearchPaths>,
+  ): Promise<SearchPage | SearchIdentities | SearchPaths> {
     const intent = ++this.searchIntent;
     const previous = this.activeSearchRequest;
     if (previous) {
@@ -774,6 +785,7 @@ export class RepositorySessionController {
   private async readSearchPage(session: RepositorySessionInfo, params: SearchCommitsParams, signal: AbortSignal): Promise<SearchPage> {
     let page: SearchPage | undefined;
     const commits: SearchPage["commits"] = [];
+    const pathMatches: SearchPage["pathMatches"] = [];
     const completion = await this.core.request("searchCommits", params, contextOf(session), {
       timeoutMs: SESSION_TIMEOUT_MS,
       signal,
@@ -787,6 +799,7 @@ export class RepositorySessionController {
         if (page && !sameSearchPageMetadata(page, data.page)) throw invalidSessionResponse("搜索结果块版本或页边界不一致");
         if (!page) page = data.page;
         commits.push(...data.page.commits);
+        pathMatches.push(...data.page.pathMatches);
         if (commits.length > params.pageSize || chunk.coverage.processed !== commits.length) throw invalidSessionResponse("搜索结果超过页大小或 envelope coverage 不连续");
       },
     });
@@ -794,7 +807,8 @@ export class RepositorySessionController {
     if (!page || !completion.coverage.complete || completion.coverage.processed !== commits.length ||
       completion.nextCursor !== page.nextCursor ||
       !validSearchPage(page, params, commits)) throw invalidSessionResponse("搜索响应不完整或不一致");
-    return { ...page, commits };
+    if (!validSearchPathMatches(pathMatches, params, commits)) throw invalidSessionResponse("搜索路径命中父提交无效");
+    return { ...page, commits, pathMatches };
   }
 
   private async readSearchIdentities(session: RepositorySessionInfo, params: SearchIdentitiesParams, signal: AbortSignal): Promise<SearchIdentities> {
@@ -815,6 +829,27 @@ export class RepositorySessionController {
       throw invalidSessionResponse("身份建议响应不完整或不一致");
     }
     return result;
+  }
+
+  private async readSearchPaths(session: RepositorySessionInfo, params: ListSearchPathsParams, signal: AbortSignal): Promise<SearchPaths> {
+    let paths: SearchPaths | undefined;
+    const completion = await this.core.request("listSearchPaths", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (paths || chunk.data.section !== "searchPaths" || !chunk.done) throw invalidSessionResponse("路径建议响应无效");
+        paths = chunk.data.paths;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!paths || !Array.isArray(paths.entries) || paths.entries.length > params.limit ||
+      paths.entries.some(entry => !validGitPath(entry.path) || entry.kind !== "file" && entry.kind !== "directory") ||
+      !completion.coverage.complete || completion.coverage.processed !== paths.entries.length || completion.nextCursor !== null) {
+      throw invalidSessionResponse("路径建议响应不完整或不一致");
+    }
+    return paths;
   }
 
   private async readMetadataIndexStatus(session: RepositorySessionInfo, signal: AbortSignal): Promise<MetadataIndexStatus> {
@@ -1312,6 +1347,15 @@ function validateSearchIdentitiesParams(value: unknown): SearchIdentitiesParams 
   return value as unknown as SearchIdentitiesParams;
 }
 
+function validateSearchPathsParams(value: unknown): ListSearchPathsParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["limit", "text"]) || typeof value.text !== "string" ||
+    Buffer.byteLength(value.text, "utf8") > 32 * 1024 || !Number.isInteger(value.limit) ||
+    (value.limit as number) < 1 || (value.limit as number) > 100) {
+    throw new ProtocolClientError("INVALID_REQUEST", "路径建议请求参数无效");
+  }
+  return value as unknown as ListSearchPathsParams;
+}
+
 function validateGetCommitParams(value: unknown): GetCommitParams {
   if (!isRecord(value) || !hasExactKeys(value, ["oid"]) || typeof value.oid !== "string" ||
     !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid)) {
@@ -1371,7 +1415,12 @@ function validateFileParent(parentIndex: number | null, parentCount: number): vo
 }
 
 function isSearchQuery(value: unknown): value is SearchQuery {
-  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "timeField", "timeZone", "toTimestamp"])) return false;
+  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"])) return false;
+  const path = value.path;
+  const validPath = path === null || isRecord(path) && hasExactKeys(path, ["includeDescendants", "kind", "rawHex"]) &&
+    (path.kind === "file" || path.kind === "directory") && typeof path.includeDescendants === "boolean" &&
+    typeof path.rawHex === "string" && path.rawHex.length <= MAX_PATH_BYTES * 2 && path.rawHex.length % 2 === 0 && /^[0-9a-f]*$/i.test(path.rawHex) &&
+    (path.kind === "directory" || path.rawHex.length > 0) && !Buffer.from(path.rawHex, "hex").includes(0);
   const timestamp = (item: unknown) => item === null || Number.isSafeInteger(item);
   const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
     isRecord(identity) && hasExactKeys(identity, ["email", "name"]) && typeof identity.name === "string" &&
@@ -1381,7 +1430,7 @@ function isSearchQuery(value: unknown): value is SearchQuery {
     typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
     (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
     (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
-    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128;
+    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128 && validPath;
 }
 
 function sameSearchPageMetadata(left: SearchPage, right: SearchPage): boolean {
@@ -1414,6 +1463,26 @@ function validSearchPage(page: SearchPage, params: SearchCommitsParams, commits:
     previousOid = commit.oid;
   }
   return true;
+}
+
+function validSearchPathMatches(matches: SearchPage["pathMatches"], params: SearchCommitsParams, commits: SearchPage["commits"]): boolean {
+  if (!Array.isArray(matches)) return false;
+  if (params.query.path === null) return matches.length === 0;
+  if (matches.length !== commits.length) return false;
+  const commitsByOid = new Map(commits.map(commit => [commit.oid, commit]));
+  const seen = new Set<string>();
+  for (const match of matches) {
+    const commit = commitsByOid.get(match.oid);
+    if (!commit || seen.has(match.oid) || !Array.isArray(match.parentIndices) || match.parentIndices.length === 0) return false;
+    seen.add(match.oid);
+    const parents = new Set<number | null>();
+    for (const parentIndex of match.parentIndices) {
+      if (parentIndex === null ? commit.parents.length !== 0 || match.parentIndices.length !== 1 :
+        !Number.isInteger(parentIndex) || parentIndex < 0 || parentIndex >= commit.parents.length || parents.has(parentIndex)) return false;
+      parents.add(parentIndex);
+    }
+  }
+  return seen.size === commits.length;
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {

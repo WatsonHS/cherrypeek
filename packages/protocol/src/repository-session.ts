@@ -4,6 +4,9 @@ import type {
   SearchPage,
   SearchIdentities,
   SearchIdentity,
+  SearchPaths,
+  SearchPathEntry,
+  SearchPathMatch,
   ErrorCode,
   HistoryCommit,
   RecentRepository,
@@ -23,15 +26,16 @@ import type {
 } from "./generated/server-message.js";
 import type { MetadataIndexAction } from "./generated/client-message.js";
 import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField,
-  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
+  ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
 export type { MetadataIndexAction } from "./generated/client-message.js";
 export type { MetadataIndexStatus } from "./generated/server-message.js";
 export type { SearchPage, SearchIdentities, SearchIdentity } from "./generated/server-message.js";
+export type { SearchPaths, SearchPathEntry, SearchPathMatch } from "./generated/server-message.js";
 export type { CommitDetails, ChangedFilesPage, ChangedFile, ChangeOverview, MergeCommitsPage, BranchesContainingResult, FileDiff, GitPath, Trailer } from "./generated/server-message.js";
-export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
+export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField, SearchPathFilter, SearchPathKind, ListSearchPathsParams } from "./generated/client-message.js";
 export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
@@ -97,6 +101,7 @@ export interface RepositorySessionApi {
   controlMetadataIndex(action: MetadataIndexAction): Promise<RepositorySessionResult<MetadataIndexStatus>>;
   searchCommits(params: SearchCommitsParams): Promise<RepositorySessionResult<SearchPage>>;
   listSearchIdentities(params: SearchIdentitiesParams): Promise<RepositorySessionResult<SearchIdentities>>;
+  listSearchPaths(params: ListSearchPathsParams): Promise<RepositorySessionResult<SearchPaths>>;
   cancelSearch(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   getCommit(params: GetCommitParams): Promise<RepositorySessionResult<CommitDetails>>;
   listChangedFiles(params: ListChangedFilesParams): Promise<RepositorySessionResult<ChangedFilesPage>>;

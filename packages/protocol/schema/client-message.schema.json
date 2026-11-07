@@ -85,6 +85,26 @@
       ],
       "type": "object"
     },
+    "ListSearchPathsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "format": "uint16",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 32768,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "limit"
+      ],
+      "type": "object"
+    },
     "LocateCommitParams": {
       "additionalProperties": false,
       "properties": {
@@ -385,6 +405,9 @@
           "$ref": "#/definitions/ReadDiffParams"
         },
         {
+          "$ref": "#/definitions/ListSearchPathsParams"
+        },
+        {
           "$ref": "#/definitions/EmptyParams"
         },
         {
@@ -472,6 +495,34 @@
       ],
       "type": "object"
     },
+    "SearchPathFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "includeDescendants": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/SearchPathKind"
+        },
+        "rawHex": {
+          "maxLength": 32768,
+          "type": "string"
+        }
+      },
+      "required": [
+        "rawHex",
+        "kind",
+        "includeDescendants"
+      ],
+      "type": "object"
+    },
+    "SearchPathKind": {
+      "enum": [
+        "file",
+        "directory"
+      ],
+      "type": "string"
+    },
     "SearchQuery": {
       "additionalProperties": false,
       "properties": {
@@ -510,6 +561,16 @@
           "maxLength": 64,
           "type": "string"
         },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SearchPathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "timeField": {
           "$ref": "#/definitions/SearchTimeField"
         },
@@ -537,7 +598,8 @@
         "timeField",
         "fromTimestamp",
         "toTimestamp",
-        "timeZone"
+        "timeZone",
+        "path"
       ],
       "type": "object"
     },

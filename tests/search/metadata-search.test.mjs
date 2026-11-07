@@ -354,6 +354,7 @@ function query(overrides = {}) {
     authors: [],
     committers: [],
     oidPrefix: "",
+    path: null,
     timeField: "committer",
     fromTimestamp: null,
     toTimestamp: null,

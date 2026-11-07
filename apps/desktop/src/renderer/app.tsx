@@ -179,6 +179,7 @@ export function App(): React.JSX.Element {
   const loadMergeStatus = React.useCallback((names: string[]) => store.loadRefMergeStatus(names), [store]);
   const cancelMergeStatus = React.useCallback(() => store.cancelRefMergeStatus(), [store]);
   const loadSearchIdentities = React.useCallback((field: SearchTimeField, text: string) => { void searchStore.loadIdentities(field, text); }, [searchStore]);
+  const loadSearchPaths = React.useCallback((text: string) => { void searchStore.loadPaths(text); }, [searchStore]);
   const currentSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
   const returnToSearch = React.useCallback(async (queryOverride?: SearchQuery): Promise<boolean> => {
     const location = historyLocation;
@@ -295,7 +296,7 @@ export function App(): React.JSX.Element {
 
   useViewRecording(store, view);
   useLaunchRepository(ready, store);
-  const searchIdentityBusy = searchView.authorIdentities.loading || searchView.committerIdentities.loading;
+  const searchIdentityBusy = searchView.authorIdentities.loading || searchView.committerIdentities.loading || searchView.pathSuggestions.loading;
   const searchRequestBusy = searchView.loading || searchView.pageLoading || searchIdentityBusy;
   const advancingPartialSearch = searchView.active && Boolean(searchView.window && !searchView.window.coverage.complete &&
     !searchView.error && (searchView.window.index.state === "running" || searchView.window.index.state === "queued"));
@@ -347,7 +348,7 @@ export function App(): React.JSX.Element {
         return;
       }
       const current = searchStore.getView();
-      if (current.loading || current.pageLoading || current.authorIdentities.loading || current.committerIdentities.loading) {
+      if (current.loading || current.pageLoading || current.authorIdentities.loading || current.committerIdentities.loading || current.pathSuggestions.loading) {
         schedule(500);
         return;
       }
@@ -522,6 +523,7 @@ export function App(): React.JSX.Element {
     locationReturn.query.committers.length ? "Committer" : null,
     locationReturn.query.fromTimestamp !== null || locationReturn.query.toTimestamp !== null ? "日期" : null,
     locationReturn.query.oidPrefix ? "OID" : null,
+    locationReturn.query.path ? "路径" : null,
   ].filter((label): label is string => Boolean(label)) : [];
   const statusView = searchView.active && searchPartialBusy && searchView.window
     ? { ...view, metadataIndex: searchView.window.index, metadataIndexLoading: false } : view;
@@ -547,7 +549,7 @@ export function App(): React.JSX.Element {
     {view.repository
       ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
-        searchView={searchView} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} />
+        searchView={searchView} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {alerts.map(message => <p key={message} className="m-0">{message}</p>)}

@@ -31,6 +31,7 @@ const IPC_INDEX_STATUS = "commitscope:index:status";
 const IPC_INDEX_CONTROL = "commitscope:index:control";
 const IPC_SEARCH_COMMITS = "commitscope:search:commits";
 const IPC_SEARCH_IDENTITIES = "commitscope:search:identities";
+const IPC_SEARCH_PATHS = "commitscope:search:paths";
 const IPC_SEARCH_CANCEL = "commitscope:search:cancel";
 const IPC_COMMIT_GET = "commitscope:details:get";
 const IPC_CHANGED_FILES = "commitscope:details:files";
@@ -145,6 +146,10 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_SEARCH_IDENTITIES, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.listSearchIdentities(params));
+  });
+  ipcMain.handle(IPC_SEARCH_PATHS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.listSearchPaths(params));
   });
   ipcMain.handle(IPC_SEARCH_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

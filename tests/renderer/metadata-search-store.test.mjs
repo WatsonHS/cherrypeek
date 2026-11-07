@@ -9,8 +9,9 @@ const ok = value => ({ ok: true, value });
 const commit = oid => ({ oid, parents: [], summary: `commit ${oid}`, summaryTruncated: false, textLossy: false,
   author: { name: "A", email: "a@example.invalid", timestamp: "2", offset: "+0000" },
   committer: { name: "C", email: "c@example.invalid", timestamp: "1", offset: "+0000" } });
-const page = ({ version, commits, complete = false, offset = 0, previousCursor = null, nextCursor = null }) => ({
+const page = ({ version, commits, complete = false, offset = 0, previousCursor = null, nextCursor = null, pathMatches = [] }) => ({
   queryKey: "query-key", snapshotKey: "snapshot-key", resultVersion: version, commits,
+  pathMatches,
   pageOffset: offset, previousCursor, nextCursor, matchedCount: commits.length,
   coverage: { processed: 10, complete }, anchorFound: null,
   index: { snapshotKey: "snapshot-key", state: "running", coverage: { processed: 10, complete: false }, diskBytes: 1, quotaBytes: 100, error: null },
@@ -61,13 +62,14 @@ test("history location releases search rows and resumes by the saved query and a
     searchCommits: async params => {
       requests.push(params);
       calls += 1;
-      return ok(page({ version: `v${calls}`, commits: [commit("a"), commit("b")], nextCursor: `next-${calls}` }));
+      return ok(page({ version: `v${calls}`, commits: [commit("a"), commit("b")], nextCursor: `next-${calls}`,
+        pathMatches: params.query.path ? [{ oid: "a", parentIndices: [0] }, { oid: "b", parentIndices: [null] }] : [] }));
     },
     listSearchIdentities: async () => ok({ identities: [], truncated: false, coverage: { processed: 0, complete: true } }),
     cancelSearch: async () => ok({ cancelled: true }),
   });
   store.bindSession("repo:generation", true);
-  const query = { ...DEFAULT_SEARCH_QUERY, message: "fix", oidPrefix: "abc" };
+  const query = { ...DEFAULT_SEARCH_QUERY, message: "fix", oidPrefix: "abc", path: { rawHex: "7372632f612e7473", kind: "file", includeDescendants: false } };
   store.updateQuery(query);
   await new Promise(resolve => setTimeout(resolve, 275));
   store.setSelectedOid("b");
@@ -86,7 +88,42 @@ test("history location releases search rows and resumes by the saved query and a
   assert.equal(store.getView().selectedOid, "b");
   assert.deepEqual([store.getView().anchorOid, store.getView().anchorOffset], ["a", -12]);
   assert.equal(store.getView().window.commits[0].oid, "a");
+  assert.deepEqual(store.getView().window.pathMatches, { a: [0], b: [null] });
   assert.equal(store.getLocationReturn(), null);
+});
+
+test("path suggestions keep pending responses from a replaced repository session", async () => {
+  let resolvePaths;
+  const store = new MetadataSearchStore({
+    searchCommits: async () => new Promise(() => {}),
+    listSearchIdentities: async () => ok({ identities: [], truncated: false, coverage: { processed: 0, complete: true } }),
+    listSearchPaths: async () => new Promise(resolve => { resolvePaths = resolve; }),
+    cancelSearch: async () => ok({ cancelled: true }),
+  });
+  store.bindSession("repo:old", false);
+  const pending = store.loadPaths(" src ");
+  await new Promise(resolve => setImmediate(resolve));
+  store.bindSession("repo:new", false);
+  resolvePaths(ok({ entries: [{ kind: "file", path: { display: " src ", rawHex: "2073726320", textLossy: false } }], truncated: false }));
+  await pending;
+  assert.equal(store.getView().pathSuggestions.loading, false);
+  assert.deepEqual(store.getView().pathSuggestions.entries, []);
+});
+
+test("path suggestions preserve the repository's raw path identity", async () => {
+  const path = { display: "src/名字.ts", rawHex: "7372632fe5908de5ad972e7473", textLossy: false };
+  const store = new MetadataSearchStore({
+    searchCommits: async () => ok(page({ version: "v1", commits: [] })),
+    listSearchIdentities: async () => ok({ identities: [], truncated: false, coverage: { processed: 0, complete: true } }),
+    listSearchPaths: async params => {
+      assert.deepEqual(params, { text: "src/", limit: 100 });
+      return ok({ entries: [{ kind: "file", path }], truncated: false });
+    },
+    cancelSearch: async () => ok({ cancelled: true }),
+  });
+  await store.loadPaths("src/");
+  assert.equal(store.getView().pathSuggestions.entries[0].path.rawHex, path.rawHex);
+  assert.equal(store.getView().pathSuggestions.entries[0].path.display, path.display);
 });
 
 test("search paging slides a bounded 1,800-row window in both directions without losing selection", async () => {

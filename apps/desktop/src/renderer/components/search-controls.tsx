@@ -1,24 +1,26 @@
 import * as React from "react";
 import { ListFilter, Search, X } from "lucide-react";
-import type { SearchIdentity, SearchTimeField } from "../../../../../packages/protocol/src/generated/server-message.js";
-import type { SearchQuery } from "../../../../../packages/protocol/src/generated/client-message.js";
+import type { SearchIdentity, SearchPathEntry, SearchTimeField } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { SearchPathFilter, SearchQuery } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { SearchIdentityState, SearchView } from "../lib/metadata-search-store.js";
 import { inputDateRange, localDateInput, presetDateRange } from "../lib/search-date.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
-export function SearchControls({ view, sessionKey, onQueryChange, onComposition, onLoadIdentities }: {
+export function SearchControls({ view, sessionKey, onQueryChange, onComposition, onLoadIdentities, onLoadPaths }: {
   view: SearchView;
   sessionKey: string;
   onQueryChange(query: SearchQuery, composing?: boolean): void;
   onComposition(composing: boolean): void;
   onLoadIdentities(field: SearchTimeField, text: string): void;
+  onLoadPaths(text: string): void;
 }): React.JSX.Element {
   const [filterOpen, setFilterOpen] = React.useState(false);
   const [authorVisible, setAuthorVisible] = React.useState(view.query.authors.length > 0);
   const [committerVisible, setCommitterVisible] = React.useState(view.query.committers.length > 0);
   const [hashVisible, setHashVisible] = React.useState(Boolean(view.query.oidPrefix));
   const [timeVisible, setTimeVisible] = React.useState(view.query.fromTimestamp !== null || view.query.toTimestamp !== null || view.query.timeField === "author");
+  const [pathVisible, setPathVisible] = React.useState(view.query.path !== null);
   const [condition, setCondition] = React.useState("");
   const [composing, setComposing] = React.useState(false);
   const composingRef = React.useRef(false);
@@ -26,8 +28,8 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
   const update = (patch: Partial<SearchQuery>) => onQueryChange({ ...query, ...patch });
   const removeTime = () => update({ fromTimestamp: null, toTimestamp: null, timeField: "committer" });
   const clear = () => {
-    setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false);
-    onQueryChange({ ...query, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer" });
+    setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false); setPathVisible(false);
+    onQueryChange({ ...query, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
   };
   return <div className="flex min-w-[200px] flex-[0_1_320px] items-center gap-1.5">
     <label className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-lg bg-sunken px-2.5 text-fg3" title="搜索完整提交消息、身份、OID 和日期">
@@ -60,8 +62,10 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
             else if (value === "hash") setHashVisible(true);
             else if (value === "time") setTimeVisible(true);
             else if (value === "author-time") { setTimeVisible(true); update({ timeField: "author" }); }
+            else if (value === "path") setPathVisible(true);
           }} className="h-7 rounded-md border border-line bg-bg px-2 text-xs text-fg">
             <option value="">选择条件…</option><option value="author">Author</option><option value="committer">Committer</option>
+            <option value="path">路径</option>
             <option value="hash">OID 前缀</option><option value="time">日期范围</option><option value="author-time">按 Author 时间</option>
           </select>
         </label>
@@ -78,10 +82,103 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
         </label><RemoveCondition onClick={() => { setHashVisible(false); update({ oidPrefix: "" }); }} /></div> : null}
         {timeVisible || query.fromTimestamp !== null || query.toTimestamp !== null || query.timeField === "author"
           ? <div className="relative"><DateFilter query={query} onChange={update} onRemove={() => { setTimeVisible(false); removeTime(); }} /><RemoveCondition onClick={() => { setTimeVisible(false); removeTime(); }} /></div> : null}
+        {pathVisible || query.path !== null ? <div className="relative"><PathFilter query={query} suggestions={view.pathSuggestions} sessionKey={sessionKey}
+          onLoad={onLoadPaths} onApply={path => update({ path })} onRemove={() => { setPathVisible(false); update({ path: null }); }} /></div> : null}
         {view.active ? <Button variant="ghost" size="sm" className="self-start" onClick={() => { clear(); setFilterOpen(false); }}>清空条件并返回历史</Button> : null}
       </PopoverContent>
     </Popover>
   </div>;
+}
+
+function PathFilter({ query, suggestions, sessionKey, onLoad, onApply, onRemove }: {
+  query: SearchQuery;
+  suggestions: SearchView["pathSuggestions"];
+  sessionKey: string;
+  onLoad(text: string): void;
+  onApply(path: SearchPathFilter): void;
+  onRemove(): void;
+}): React.JSX.Element {
+  const [text, setText] = React.useState(() => pathFilterText(query.path));
+  const [kind, setKind] = React.useState<SearchPathFilter["kind"]>(() => query.path?.kind ?? "file");
+  const [includeDescendants, setIncludeDescendants] = React.useState(() => query.path?.includeDescendants ?? true);
+  const [selectedRawHex, setSelectedRawHex] = React.useState<string | null>(() => query.path?.rawHex ?? null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [composing, setComposing] = React.useState(false);
+
+  React.useEffect(() => {
+    setText(pathFilterText(query.path));
+    setKind(query.path?.kind ?? "file");
+    setIncludeDescendants(query.path?.includeDescendants ?? true);
+    setSelectedRawHex(query.path?.rawHex ?? null);
+  }, [query.path?.rawHex, query.path?.kind, query.path?.includeDescendants]);
+  React.useEffect(() => {
+    if (!text || selectedRawHex !== null || composing) return;
+    const timer = setTimeout(() => onLoad(text), 200);
+    return () => clearTimeout(timer);
+  }, [text, selectedRawHex, composing, sessionKey, onLoad]);
+
+  const apply = (rawHex?: string) => {
+    const path = rawHex === undefined ? encodePath(text, kind, includeDescendants) : { rawHex, kind, includeDescendants };
+    if (typeof path === "string") { setError(path); return; }
+    setError(null);
+    onApply(path);
+  };
+  const choose = (entry: SearchPathEntry) => {
+    setText(entry.kind === "directory" && entry.path.rawHex === "" ? "." : entry.path.display);
+    setKind(entry.kind);
+    setSelectedRawHex(entry.path.rawHex);
+    setError(null);
+    onApply({ rawHex: entry.path.rawHex, kind: entry.kind, includeDescendants: entry.kind === "directory" && includeDescendants });
+  };
+  const entries = suggestions.text === text ? suggestions.entries : [];
+  return <section className="flex flex-col gap-1.5" data-testid="search-filter-path">
+    <div className="flex items-start justify-between gap-2"><div className="flex flex-col gap-0.5"><span className="text-xs text-fg2">路径 · 字面匹配，不跨重命名追溯</span>
+      <span className="text-[10.5px] text-fg3">当前快照路径；已删除路径可手动输入</span></div>
+      {query.path ? <button type="button" className="shrink-0 text-[11px] text-fg3 hover:text-fg" onClick={onRemove}>移除路径</button> : null}</div>
+    <input data-testid="search-path-input" aria-label="仓库相对路径" value={text} onChange={event => { setText(event.currentTarget.value); setSelectedRawHex(null); setError(null); }}
+      onCompositionStart={() => setComposing(true)} onCompositionEnd={event => {
+        setComposing(false); setText(event.currentTarget.value); setSelectedRawHex(null);
+      }}
+      placeholder="仓库相对路径" className="h-8 rounded-md border border-line bg-bg px-2 text-xs text-fg outline-none focus:border-accent" />
+    <div className="flex items-center gap-2 text-xs text-fg2">
+      <select aria-label="路径类型" data-testid="search-path-kind" value={kind} onChange={event => { setKind(event.currentTarget.value as SearchPathFilter["kind"]); }}
+        className="h-7 rounded-md border border-line bg-bg px-1.5 text-xs text-fg"><option value="file">文件</option><option value="directory">目录</option></select>
+      {kind === "directory" ? <label className="flex items-center gap-1.5"><input type="checkbox" checked={includeDescendants} onChange={event => setIncludeDescendants(event.currentTarget.checked)} />包含子目录</label> : null}
+      <Button data-testid="search-path-apply" variant="outline" size="sm" className="ml-auto h-7 px-2 text-[11px]" onClick={() => apply(selectedRawHex ?? undefined)}>应用路径</Button>
+    </div>
+    {suggestions.loading ? <span role="status" className="text-[11px] text-fg3">读取当前快照路径…</span> : null}
+    {suggestions.error ? <span role="alert" className="text-[11px] text-bad">路径建议失败：{suggestions.error}</span> : null}
+    {suggestions.truncated ? <span className="text-[11px] text-fg3">建议项已截断，可继续输入缩小范围。</span> : null}
+    {entries.length ? <div role="listbox" aria-label="路径建议" className="flex max-h-28 flex-col overflow-auto rounded-md border border-line">
+      {entries.map((entry, index) => <button key={`${entry.path.rawHex}:${entry.kind}`} type="button" role="option" aria-selected="false"
+        data-testid={`search-path-suggestion-${index}`} onClick={() => choose(entry)} title={entry.path.display}
+        className="flex min-h-8 items-center gap-2 px-2 text-left text-xs hover:bg-hover">
+        <span className="min-w-0 flex-1 truncate">{entry.path.display || "."}</span><span className="shrink-0 text-fg3">{entry.kind === "directory" ? "目录" : "文件"}</span>
+      </button>)}
+    </div> : text && !suggestions.loading && !suggestions.error ? <span className="text-[11px] text-fg3">没有当前快照建议；仍可手动应用已删除路径。</span> : null}
+    {error ? <span role="alert" data-testid="search-path-error" className="text-[11px] text-bad">{error}</span> : null}
+    {query.path ? <span className="text-[10.5px] text-fg3">当前条件：{decodePathHex(query.path.rawHex) || "."} · {query.path.kind === "directory" ? query.path.includeDescendants ? "包含子目录" : "仅直接文件" : "精确文件"}</span> : null}
+  </section>;
+}
+
+function encodePath(text: string, kind: SearchPathFilter["kind"], includeDescendants: boolean): SearchPathFilter | string {
+  if (text.includes("\0")) return "路径不能包含 NUL 字符。";
+  if (text.startsWith("/") || /^[A-Za-z]:[\\/]/.test(text)) return "请输入仓库相对路径，不能使用绝对路径。";
+  if (kind === "directory" && text === ".") return { rawHex: "", kind, includeDescendants };
+  const value = kind === "directory" && text.endsWith("/") ? text.slice(0, -1) : text;
+  if (!value) return kind === "file" ? "文件路径不能为空。" : "目录路径不能为空；根目录请使用 .。";
+  if (value.split("/").some(segment => segment === "." || segment === "..")) return "路径不能包含 . 或 .. 点段。";
+  const rawHex = Array.from(new TextEncoder().encode(value), byte => byte.toString(16).padStart(2, "0")).join("");
+  return { rawHex, kind, includeDescendants: kind === "directory" && includeDescendants };
+}
+
+function decodePathHex(rawHex: string): string {
+  const bytes = new Uint8Array(rawHex.match(/.{2}/g)?.map(byte => Number.parseInt(byte, 16)) ?? []);
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+}
+
+function pathFilterText(path: SearchPathFilter | null): string {
+  return path ? path.kind === "directory" && path.rawHex === "" ? "." : decodePathHex(path.rawHex) : "";
 }
 
 function IdentityPicker({ field, sessionKey, selected, state, onSearch, onToggle }: {

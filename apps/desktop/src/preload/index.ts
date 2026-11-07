@@ -29,6 +29,7 @@ const api: CommitScopeApi = {
   controlMetadataIndex: action => ipcRenderer.invoke("commitscope:index:control", action),
   searchCommits: params => ipcRenderer.invoke("commitscope:search:commits", params),
   listSearchIdentities: params => ipcRenderer.invoke("commitscope:search:identities", params),
+  listSearchPaths: params => ipcRenderer.invoke("commitscope:search:paths", params),
   cancelSearch: () => ipcRenderer.invoke("commitscope:search:cancel"),
   getCommit: params => ipcRenderer.invoke("commitscope:details:get", params),
   listChangedFiles: params => ipcRenderer.invoke("commitscope:details:files", params),

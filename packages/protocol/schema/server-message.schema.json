@@ -1616,6 +1616,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "paths": {
+              "$ref": "#/definitions/SearchPaths"
+            },
+            "section": {
+              "const": "searchPaths",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "paths"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "details": {
               "$ref": "#/definitions/CommitDetails"
             },
@@ -2038,6 +2055,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "pathMatches": {
+          "items": {
+            "$ref": "#/definitions/SearchPathMatch"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
         "previousCursor": {
           "maxLength": 1024,
           "type": [
@@ -2072,7 +2096,79 @@
         "matchedCount",
         "coverage",
         "anchorFound",
-        "index"
+        "index",
+        "pathMatches"
+      ],
+      "type": "object"
+    },
+    "SearchPathEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/SearchPathKind"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "SearchPathKind": {
+      "enum": [
+        "file",
+        "directory"
+      ],
+      "type": "string"
+    },
+    "SearchPathMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "parentIndices": {
+          "items": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxItems": 128,
+          "type": "array"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndices"
+      ],
+      "type": "object"
+    },
+    "SearchPaths": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/SearchPathEntry"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
       ],
       "type": "object"
     },
