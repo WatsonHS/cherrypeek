@@ -64,6 +64,24 @@ impl JsonSchema for NullableOidSchema {
     }
 }
 
+struct NullableMetadataIndexFailureSchema;
+
+impl JsonSchema for NullableMetadataIndexFailureSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableMetadataIndexFailure".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let failure = generator.subschema_for::<MetadataIndexFailure>();
+        Schema::try_from(serde_json::json!({"anyOf":[failure, {"type":"null"}]}))
+            .expect("valid nullable metadata index failure schema")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename = "GitInfo")]
@@ -100,6 +118,7 @@ pub enum Capability {
     HistoryPagination,
     HistoryNewSinceLastSeen,
     RepositoryScopes,
+    MetadataIndex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -130,6 +149,7 @@ impl CoreReady {
                 Capability::HistoryPagination,
                 Capability::HistoryNewSinceLastSeen,
                 Capability::RepositoryScopes,
+                Capability::MetadataIndex,
             ],
         }
     }
@@ -182,6 +202,8 @@ pub enum RequestParams {
     GetRepositoryNavigation(EmptyParams),
     SelectRepositoryScope(SelectRepositoryScopeParams),
     RefMergeStatus(RefMergeStatusParams),
+    GetMetadataIndexStatus(EmptyParams),
+    ControlMetadataIndex(ControlMetadataIndexParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -237,6 +259,66 @@ pub struct SelectRepositoryScopeParams {
 pub struct RefMergeStatusParams {
     #[schemars(length(min = 1, max = 50))]
     pub ref_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataIndexAction {
+    Pause,
+    Resume,
+    Cancel,
+    Rebuild,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlMetadataIndexParams {
+    pub action: MetadataIndexAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataIndexState {
+    Idle,
+    Queued,
+    Running,
+    Paused,
+    Cancelled,
+    Complete,
+    QuotaLimited,
+    Unavailable,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetadataIndexCoverage {
+    pub processed: u64,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetadataIndexFailure {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetadataIndexStatus {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub snapshot_key: Option<String>,
+    pub state: MetadataIndexState,
+    pub coverage: MetadataIndexCoverage,
+    pub disk_bytes: u64,
+    pub quota_bytes: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableMetadataIndexFailureSchema")]
+    pub error: Option<MetadataIndexFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -308,6 +390,8 @@ pub struct Coverage {
 pub enum ResponseData {
     #[serde(rename = "core")]
     Core { core_version: String, pid: u32 },
+    #[serde(rename = "metadataIndex")]
+    MetadataIndex { status: MetadataIndexStatus },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]
@@ -664,6 +748,9 @@ pub enum ErrorCode {
     InvalidCursor,
     SnapshotChanged,
     ScopeUnavailable,
+    IndexUnavailable,
+    IndexCorrupt,
+    IndexVersionUnsupported,
 }
 
 #[must_use]
@@ -876,6 +963,31 @@ mod tests {
             recent_schema["properties"]["worktreePath"]["type"],
             json!(["string", "null"])
         );
+    }
+
+    #[test]
+    fn metadata_index_status_error_is_required_nullable() {
+        let status: MetadataIndexStatus = serde_json::from_value(json!({
+            "snapshotKey":"abc",
+            "state":"idle",
+            "coverage":{"processed":0,"complete":false},
+            "diskBytes":0,
+            "quotaBytes":1024,
+            "error":null
+        }))
+        .unwrap();
+        assert_eq!(status.error, None);
+        let schema: Value = serde_json::to_value(server_message_schema()).unwrap();
+        let error_schema = &schema["definitions"]["MetadataIndexStatus"]["properties"]["error"];
+        assert!(
+            error_schema["anyOf"]
+                .as_array()
+                .is_some_and(|variants| variants.iter().any(|variant| variant["type"] == "null"))
+        );
+        let missing = json!({
+            "snapshotKey":null,"state":"idle","coverage":{"processed":0,"complete":false},"diskBytes":0,"quotaBytes":1024
+        });
+        assert!(serde_json::from_value::<MetadataIndexStatus>(missing).is_err());
     }
 
     #[test]

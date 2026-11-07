@@ -1,6 +1,6 @@
 # P1-04 分支与 worktree 导航验收记录
 
-日期：2026-11-07。状态：P1-04 本机 macOS 技术验收完成；不是完整 MVP 或发布性能验收。实现基于 `11ae57b` 之后的本地改动，保留 P1-03 / UI-03 工作；没有提交或推送。契约见[代码级计划](../implementation/p1-04-scope-navigation.md)。
+日期：2026-11-07。状态：P1-04 本机 macOS 技术验收完成；不是完整 MVP 或发布性能验收。实现已与 P1-03 / UI-03 一起提交为 `ba4a059`；未推送。契约见[代码级计划](../implementation/p1-04-scope-navigation.md)。
 
 ## 实现范围
 

@@ -80,6 +80,57 @@ test("control and legacy null-context requests bypass the session gate; session 
   }
 });
 
+test("metadata index status and controls use session context and strict parameters", async () => {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const requests = [];
+  const gate = new ViewContextGate();
+  const transport = new ProtocolTransport(stdout, stdin, { contextGate: gate });
+  const ready = {
+    protocolVersion: 1, coreVersion: "0.1.0-test", pid: 8125,
+    git: { available: true, version: "git version fixture", error: null },
+    capabilities: ["metadataIndex"],
+  };
+  stdin.on("data", bytes => {
+    for (const line of bytes.toString("utf8").trim().split("\n")) {
+      const message = JSON.parse(line);
+      if (message.type === "hello") stdout.write(`${JSON.stringify({ type: "hello", core: ready })}\n`);
+      if (message.type === "request") requests.push(message);
+    }
+  });
+  const respond = request => stdout.write(`${JSON.stringify({
+    type: "response", requestId: request.requestId, repoId: request.repoId, generation: request.generation,
+    sequence: 0, done: true,
+    coverage: { complete: true, processed: 1 }, nextCursor: null,
+    data: { section: "metadataIndex", status: { snapshotKey: null, state: "idle",
+      coverage: { processed: 0, complete: false }, diskBytes: 0, quotaBytes: 1000, error: null } },
+  })}\n`);
+
+  try {
+    await transport.handshake(8125);
+    const session = { repoId: "repo-a", generation: "generation-a" };
+    gate.switchCurrent(session);
+    const reading = transport.request("getMetadataIndexStatus", {}, session, { drainAfterAbort: true });
+    const controlling = transport.request("controlMetadataIndex", { action: "pause" }, session);
+    await assert.rejects(transport.request("getMetadataIndexStatus", { unexpected: true }, session), error => error.code === "INVALID_REQUEST");
+    await assert.rejects(transport.request("controlMetadataIndex", { action: "drop" }, session), error => error.code === "INVALID_REQUEST");
+    await assert.rejects(transport.request("controlMetadataIndex", { action: "pause", extra: true }, session), error => error.code === "INVALID_REQUEST");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(requests.map(request => [request.method, request.params, request.repoId, request.generation]), [
+      ["getMetadataIndexStatus", {}, "repo-a", "generation-a"],
+      ["controlMetadataIndex", { action: "pause" }, "repo-a", "generation-a"],
+    ]);
+    respond(requests[0]);
+    respond(requests[1]);
+    assert.equal((await reading).coverage.processed, 1);
+    assert.equal((await controlling).coverage.processed, 1);
+  } finally {
+    transport.close(new ProtocolClientError("CORE_EXITED", "test cleanup", true));
+    stdout.destroy();
+    stdin.destroy();
+  }
+});
+
 test("cancelled open drains its terminal response; uncertain open timeout is fatal", async () => {
   const stdout = new PassThrough();
   const stdin = new PassThrough();

@@ -1,5 +1,6 @@
 import type {
   CommitSummary,
+  MetadataIndexStatus,
   ErrorCode,
   HistoryCommit,
   RecentRepository,
@@ -12,8 +13,11 @@ import type {
   ResponseData,
   StoreStatus,
 } from "./generated/server-message.js";
+import type { MetadataIndexAction } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
+export type { MetadataIndexAction } from "./generated/client-message.js";
+export type { MetadataIndexStatus } from "./generated/server-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -73,4 +77,6 @@ export interface RepositorySessionApi {
   selectRepositoryScope(scope: RepositoryScope, pageSize?: number): Promise<RepositorySessionResult<RefreshedRepository>>;
   getRefMergeStatus(refNames: string[]): Promise<RepositorySessionResult<RefMergeStatusResult>>;
   cancelRefMergeStatus(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  getMetadataIndexStatus(): Promise<RepositorySessionResult<MetadataIndexStatus>>;
+  controlMetadataIndex(action: MetadataIndexAction): Promise<RepositorySessionResult<MetadataIndexStatus>>;
 }

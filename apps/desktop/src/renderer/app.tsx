@@ -72,6 +72,44 @@ function useRecentRepositories(ready: boolean, session: RepositorySessionInfo | 
   return { recent, refresh };
 }
 
+function useMetadataIndexPolling(ready: boolean, supported: boolean, store: RepositorySessionStore, view: RepositoryView) {
+  const sessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  const blocked = view.state !== "ready" || view.opening !== null || view.refreshing || view.scopeSwitching || view.pageLoading ||
+    view.navigationLoading || view.mergeStatusLoading || view.recordLoading || view.metadataIndexAction !== null;
+  React.useEffect(() => {
+    if (!ready || !supported || !sessionKey || blocked) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (delay: number) => {
+      if (active && document.visibilityState === "visible") timer = setTimeout(() => { void poll(); }, delay);
+    };
+    const poll = async () => {
+      if (!active || document.visibilityState !== "visible") return;
+      const result = await store.loadMetadataIndexStatus();
+      if (!active) return;
+      const state = store.getView().metadataIndex?.state;
+      schedule(result === "busy" ? 1_500 : state === "running" || state === "queued" ? 1_000 : 5_000);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        if (timer) clearTimeout(timer);
+        store.invalidateMetadataIndexStatus();
+      } else {
+        if (timer) clearTimeout(timer);
+        schedule(100);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    if (document.visibilityState === "visible") schedule(250);
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      store.invalidateMetadataIndexStatus();
+    };
+  }, [ready, supported, sessionKey, blocked, store]);
+}
+
 /**
  * Marks the shown HEAD as viewed: once when it first appears in a focused window,
  * and again when the window loses focus or is hidden (switching is handled by the store).
@@ -116,6 +154,7 @@ export function App(): React.JSX.Element {
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   const ready = status.state === "ready";
+  const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
   const [path, setPathState] = React.useState("");
   const [actionError, setActionError] = React.useState<string>();
@@ -137,6 +176,7 @@ export function App(): React.JSX.Element {
 
   useViewRecording(store, view);
   useLaunchRepository(ready, store);
+  useMetadataIndexPolling(ready, metadataIndexSupported, store, view);
 
   const navigationAttempt = React.useRef<string | undefined>(undefined);
   React.useEffect(() => {
@@ -275,7 +315,7 @@ export function App(): React.JSX.Element {
         </div>
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
-    <StatusBar status={status} preview={view} />
+    <StatusBar status={status} preview={view} onIndexAction={action => { void store.controlMetadataIndex(action); }} />
   </div>;
 }
 

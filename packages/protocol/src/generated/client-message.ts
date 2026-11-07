@@ -24,7 +24,8 @@ export type RequestParams =
   | ReadHistoryPageParams
   | RefreshRepositoryParams
   | SelectRepositoryScopeParams
-  | RefMergeStatusParams;
+  | RefMergeStatusParams
+  | ControlMetadataIndexParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -33,6 +34,7 @@ export type RepositoryScope =
   | {
       worktree: string;
     };
+export type MetadataIndexAction = "pause" | "resume" | "cancel" | "rebuild";
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -58,4 +60,7 @@ export interface RefMergeStatusParams {
    * @maxItems 50
    */
   refNames: [string, ...string[]];
+}
+export interface ControlMetadataIndexParams {
+  action: MetadataIndexAction;
 }

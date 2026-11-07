@@ -1,9 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ControlMetadataIndexParams": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/MetadataIndexAction"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
     "EmptyParams": {
       "additionalProperties": false,
       "type": "object"
+    },
+    "MetadataIndexAction": {
+      "enum": [
+        "pause",
+        "resume",
+        "cancel",
+        "rebuild"
+      ],
+      "type": "string"
     },
     "OpenRepositoryParams": {
       "additionalProperties": false,
@@ -158,6 +179,12 @@
         },
         {
           "$ref": "#/definitions/RefMergeStatusParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/ControlMetadataIndexParams"
         },
         {
           "$ref": "#/definitions/EmptyParams"

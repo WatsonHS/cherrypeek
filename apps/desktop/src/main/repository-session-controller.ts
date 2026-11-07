@@ -6,6 +6,7 @@ import type {
   RepositoryInfo,
   RepositorySessionInfo,
 } from "../../../../packages/protocol/src/generated/server-message.js";
+import type { MetadataIndexAction } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   RefreshedRepository,
@@ -15,6 +16,7 @@ import type {
   RecentRepositoriesResult,
   RepositoryViewRecorded,
   SessionPreview,
+  MetadataIndexStatus,
 } from "../../../../packages/protocol/src/repository-session.js";
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { RequestContext, ServerResponseMessage } from "../../../../packages/protocol/src/messages.js";
@@ -55,6 +57,12 @@ interface ActiveMergeStatus {
   done: Promise<RefMergeStatusResult>;
 }
 
+interface ActiveMetadataIndexRequest {
+  kind: "status" | "control";
+  abort?: AbortController;
+  done: Promise<MetadataIndexStatus>;
+}
+
 export class RepositorySessionController {
   private current?: RepositorySessionInfo;
   private operation = 0;
@@ -66,6 +74,8 @@ export class RepositorySessionController {
   private activeRefresh?: ActiveRefresh;
   private activeMergeStatus?: ActiveMergeStatus;
   private mergeIntent = 0;
+  private metadataIndexIntent = 0;
+  private activeMetadataIndexRequest?: ActiveMetadataIndexRequest;
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -82,6 +92,8 @@ export class RepositorySessionController {
 
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
     this.activeHistoryRead?.abort.abort(new Error("仓库切换已取消历史读取"));
     const refreshing = this.activeRefresh;
@@ -175,6 +187,7 @@ export class RepositorySessionController {
 
   async recordView(expectedGeneration: unknown): Promise<RepositoryViewRecorded> {
     const session = this.requireCurrent();
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
     if (typeof expectedGeneration !== "string" || expectedGeneration !== session.generation) {
       throw new ProtocolClientError("STALE_CONTEXT", "当前显示的仓库会话已变化", true);
     }
@@ -187,6 +200,7 @@ export class RepositorySessionController {
   async readHistoryPage(cursor: unknown, pageSize = 200): Promise<HistoryPage> {
     const intent = ++this.pageIntent;
     const session = this.requireHistoryCapability();
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
     if (cursor !== null && (typeof cursor !== "string" || cursor.length === 0)) {
       throw new ProtocolClientError("INVALID_REQUEST", "历史页游标无效");
     }
@@ -220,6 +234,8 @@ export class RepositorySessionController {
     if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能刷新", true);
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
     this.activeHistoryRead?.abort.abort(new Error("刷新已取消历史页读取"));
     this.requireHistoryCapability();
@@ -252,6 +268,8 @@ export class RepositorySessionController {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取导航清单", true);
     const session = this.requireCurrent();
     this.requireCapability("repositoryScopes");
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    this.ensureCurrent(session);
     let navigation: RepositoryNavigation | undefined;
     const completion = await this.core.request("getRepositoryNavigation", {}, contextOf(session), {
       timeoutMs: SESSION_TIMEOUT_MS,
@@ -280,6 +298,8 @@ export class RepositorySessionController {
     }
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
     this.activeHistoryRead?.abort.abort(new Error("范围切换已取消历史页读取"));
     const previousRefresh = this.activeRefresh;
@@ -308,6 +328,8 @@ export class RepositorySessionController {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能计算合入状态", true);
     const session = this.requireCurrent();
     this.requireCapability("repositoryScopes");
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    this.ensureCurrent(session);
     if (!Array.isArray(refNames) || refNames.length < 1 || refNames.length > 50 ||
       refNames.some(name => typeof name !== "string" || !name.startsWith("refs/heads/") || Buffer.byteLength(name, "utf8") > 16 * 1024)) {
       throw new ProtocolClientError("INVALID_REQUEST", "本地分支列表必须包含 1 至 50 个完整引用名");
@@ -343,9 +365,104 @@ export class RepositorySessionController {
     return { cancelled: true };
   }
 
+  async getMetadataIndexStatus(): Promise<MetadataIndexStatus> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取索引状态", true);
+    const session = this.requireCurrent();
+    this.requireMetadataIndexCapability();
+    if (this.activeMetadataIndexRequest) throw new ProtocolClientError("BUSY", "索引状态或控制请求正在执行", true);
+    const intent = ++this.metadataIndexIntent;
+    const abort = new AbortController();
+    const active: ActiveMetadataIndexRequest = { kind: "status", abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readMetadataIndexStatus(session, abort.signal);
+    this.activeMetadataIndexRequest = active;
+    try {
+      const status = await active.done;
+      if (intent !== this.metadataIndexIntent) throw new ProtocolClientError("CANCELLED", "索引状态请求已过期", true);
+      this.ensureCurrent(session);
+      return status;
+    } finally {
+      if (this.activeMetadataIndexRequest === active) this.activeMetadataIndexRequest = undefined;
+    }
+  }
+
+  async controlMetadataIndex(action: unknown): Promise<MetadataIndexStatus> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能控制索引", true);
+    if (action !== "pause" && action !== "resume" && action !== "cancel" && action !== "rebuild") {
+      throw new ProtocolClientError("INVALID_REQUEST", "索引操作无效");
+    }
+    const session = this.requireCurrent();
+    this.requireMetadataIndexCapability();
+    const previous = this.activeMetadataIndexRequest;
+    if (previous?.kind === "control") throw new ProtocolClientError("BUSY", "索引控制请求正在执行", true);
+    if (previous?.kind === "status") await this.cancelMetadataIndexStatus();
+    this.ensureCurrent(session);
+    const active: ActiveMetadataIndexRequest = { kind: "control", done: Promise.resolve(undefined as never) };
+    active.done = this.readMetadataIndexControl(session, action);
+    this.activeMetadataIndexRequest = active;
+    try {
+      const status = await active.done;
+      this.ensureCurrent(session);
+      return status;
+    } finally {
+      if (this.activeMetadataIndexRequest === active) this.activeMetadataIndexRequest = undefined;
+    }
+  }
+
+  private async readMetadataIndexStatus(session: RepositorySessionInfo, signal: AbortSignal): Promise<MetadataIndexStatus> {
+    return this.readMetadataIndexRequest(session, "getMetadataIndexStatus", {}, signal);
+  }
+
+  private async readMetadataIndexControl(session: RepositorySessionInfo, action: MetadataIndexAction): Promise<MetadataIndexStatus> {
+    return this.readMetadataIndexRequest(session, "controlMetadataIndex", { action });
+  }
+
+  private async readMetadataIndexRequest(
+    session: RepositorySessionInfo,
+    method: "getMetadataIndexStatus" | "controlMetadataIndex",
+    params: Record<string, never> | { action: MetadataIndexAction },
+    signal?: AbortSignal,
+  ): Promise<MetadataIndexStatus> {
+    let status: MetadataIndexStatus | undefined;
+    const completion = await this.core.request(method, params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: method === "getMetadataIndexStatus",
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (status || chunk.data.section !== "metadataIndex" || !chunk.done) {
+          throw invalidSessionResponse("元数据索引状态响应无效");
+        }
+        status = chunk.data.status;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!status || !completion.coverage.complete || completion.coverage.processed !== 1 ||
+      status.coverage.complete !== (status.state === "complete")) {
+      throw invalidSessionResponse("元数据索引状态响应不完整或不一致");
+    }
+    return status;
+  }
+
+  private async cancelMetadataIndexStatus(): Promise<void> {
+    const active = this.activeMetadataIndexRequest;
+    if (!active || active.kind !== "status") return;
+    ++this.metadataIndexIntent;
+    active.abort?.abort(new Error("索引状态请求已被控制操作取代"));
+    await active.done.catch(() => undefined);
+  }
+
+  private async settleMetadataIndexForTransition(): Promise<void> {
+    const active = this.activeMetadataIndexRequest;
+    if (!active) return;
+    if (active.kind === "status") await this.cancelMetadataIndexStatus();
+    else await active.done.catch(() => undefined);
+  }
+
   async close(): Promise<{ closed: true }> {
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
     this.activeHistoryRead?.abort.abort(new Error("仓库关闭已取消历史读取"));
     const refreshing = this.activeRefresh;
@@ -377,6 +494,7 @@ export class RepositorySessionController {
 
   async listRecent(): Promise<RecentRepositoriesResult> {
     this.requireCapability("repositorySessions");
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
     let response: RecentResponse | undefined;
     const completion = await this.core.request("listRecentRepositories", {}, NULL_CONTEXT, {
       timeoutMs: SESSION_TIMEOUT_MS,
@@ -403,6 +521,8 @@ export class RepositorySessionController {
     this.activeRefresh?.abort.abort(new Error("应用正在关闭"));
     this.activeMergeStatus?.abort.abort(new Error("应用正在关闭"));
     ++this.mergeIntent;
+    ++this.metadataIndexIntent;
+    if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("应用正在关闭"));
     this.activeOpen = undefined;
     this.current = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);
@@ -669,8 +789,13 @@ export class RepositorySessionController {
     const status: CoreStatus = this.core.getStatus();
     if (status.state !== "ready") throw new ProtocolClientError("CORE_EXITED", "核心尚未就绪", true);
     if (!status.core.capabilities.includes(capability as typeof status.core.capabilities[number])) {
-      throw new ProtocolClientError("UNKNOWN_METHOD", "核心不支持只读范围导航，请更新核心版本");
+      throw new ProtocolClientError("UNKNOWN_METHOD", capability === "metadataIndex"
+        ? "核心不支持元数据索引，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
     }
+  }
+
+  private requireMetadataIndexCapability(): void {
+    this.requireCapability("metadataIndex");
   }
 
   private onCoreStatus(status: CoreStatus): void {
@@ -682,6 +807,8 @@ export class RepositorySessionController {
     this.activeHistoryRead?.abort.abort(new Error("核心已退出"));
     this.activeRefresh?.abort.abort(new Error("核心已退出"));
     this.activeMergeStatus?.abort.abort(new Error("核心已退出"));
+    if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("核心已退出"));
+    ++this.metadataIndexIntent;
     this.activeOpen = undefined;
     this.current = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);

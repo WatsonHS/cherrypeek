@@ -1,6 +1,6 @@
 # 技术架构
 
-日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。P1-03 的有界虚拟窗口、新增标记及[滚动测量](benchmarks/p1-03-history-scroll.md)已交付，短时空闲整树 RSS 尚未达到目标。P1-04 的多范围快照、worktree 导航与按需合入状态已通过[验收](validation/p1-04-scope-navigation.md)。下述事件、索引、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
+日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。P1-03 的有界虚拟窗口、新增标记及[滚动测量](benchmarks/p1-03-history-scroll.md)已交付，短时空闲整树 RSS 尚未达到目标。P1-04 的多范围快照、worktree 导航与按需合入状态已通过[验收](validation/p1-04-scope-navigation.md)。P1-05 的可恢复 SQLite 索引及控制已通过[验收](validation/p1-05-metadata-index.md)。下述事件、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
 
 ## 技术路线
 
@@ -102,6 +102,12 @@ Rust 生成每行的 lane、父边与跨页连接信息；React 仅渲染可见�
 
 先流式提供历史，随后低优先级建立 SQLite 元数据索引。M1 在分页稳定后实现索引与元数据搜索，不依赖完整图布局、文件列表或 diff；M3 的路径历史和统计复用同一查询语义。对象元数据与可达性分开：旧 commit 仍可保留缓存，但不应因缓存存在而重新出现在不包含它的新快照查询中。固定 tip 的遍历或按快照缓存的成员集合保证范围正确，避免预先计算所有分支 × 所有提交。
 
+P1-05 的具体契约见[代码级计划](implementation/p1-05-metadata-index.md)，完成证据见[验收记录](validation/p1-05-metadata-index.md)。SQLite schema v1 将完整提交元数据、固定快照、按序成员分成三表；快照键由对象库身份、对象格式、排序后的冻结 tips 和 shallow / grafts 边界派生，与临时 generation 分离。每批最多 64 个提交，元数据、成员和 processed 检查点在同一事务提交；恢复时重放并核对持久前缀，不宣称常数时间恢复。最多保留 8 个快照成员集合，只有正常遍历结束才标记 complete。
+
+每个 daemon 只有一个后台索引任务，与两条交互请求额度分开；首屏之后启动，交互忙时让出下一批。数据库打开、恢复及完整性检查在后台执行；`getMetadataIndexStatus` 只读内存和少量文件状态，`controlMetadataIndex` 提供 pause / resume / cancel / rebuild。暂停和取消等待 Git 子进程回收并保留检查点，重建仅清除当前对象库的派生缓存。renderer 可见且会话请求空闲时轮询，终态降低频率；索引错误保留历史视图。查询接口仍属于 P1-06。
+
+每库默认配额 2 GiB，包含 SQLite 侧文件；主 DB 页预算最多占三分之一，给事务日志留空间，达到上限保留已提交批次并报告 quotaLimited。缓存文件拒绝 symlink、异常类型和 Unix 多硬链接；损坏或未知 schema 不静默替换，需显式重建。磁盘索引覆盖与历史页 coverage、单条状态响应 coverage 分开表达。
+
 FTS5 是加速候选，不能改变产品约定的字面子串语义。M1 先建立正确且可取消的搜索基线，按测量需要比较普通索引、trigram 与扫描，后续继续优化；中文短词、标点和大小写分别验收。trigram 的全文查询对少于三个 Unicode 字符的子串有限制，短词需走等价后备路径。[SQLite FTS5 文档](https://www.sqlite.org/fts5.html#the_trigram_tokenizer)。用户输入不直接拼进 SQL 或 `MATCH` 表达式。
 
 索引未完整时立即返回已覆盖结果，明确标记 partial，同时继续补齐所选快照范围。新命中按完整 OID 去重，按选定时间降序、完整 OID 作为稳定次序自动合并；完成前没有命中不等于最终空结果。只有覆盖完整的快照才能显示“该快照全部结果”或精确统计；后台扫描可取消。磁盘配额淘汰数据时必须同步回退 coverage。
@@ -122,7 +128,7 @@ FTS5 是加速候选，不能改变产品约定的字面子串语义。M1 先建
 
 固定 tip 不保证对象免于外部 GC。读取当前快照时遇到缺失对象，返回缺失 / 不完整状态并保留已读内容，不自动网络补拉，也不把中断查询标为完整；允许用户重试或刷新。M1 提供手动刷新与固定快照语义，M3 再增加文件事件、聚焦与定时复核的通知。
 
-磁盘缓存放 Electron 应用数据目录；后续 SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。MVP 预算上限为 renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；当前 P1-03 renderer 上限为 2000 条，Rust 沿用 P1-02 的 8 页 / 16 MiB 内存缓存，尚无磁盘索引。缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
+磁盘缓存放 Electron 应用数据目录；P1-05 SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。MVP 预算上限为 renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；当前 P1-03 renderer 上限为 2000 条，Rust 沿用 P1-02 的 8 页 / 16 MiB 历史内存缓存，SQLite 单库默认配额为 2 GiB（含侧文件）。缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
 
 ## 只读边界
 

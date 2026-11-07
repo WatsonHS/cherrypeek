@@ -76,8 +76,8 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "cancelHistoryRead", "cancelRefMergeStatus", "chooseRepository", "closeRepositorySession", "copyText", "getCoreStatus", "getLaunchRepository",
-    "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listRecentRepositories", "onCoreStatusChanged", "openRepositorySession",
+    "cancelHistoryRead", "cancelRefMergeStatus", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "getCoreStatus", "getLaunchRepository",
+    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listRecentRepositories", "onCoreStatusChanged", "openRepositorySession",
     "readHistoryPage", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");

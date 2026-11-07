@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { RepositorySessionStore } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "repository-session-store.mjs")));
 
-const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus"];
+const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"];
 
 /** Session API whose every call waits until the test answers it. */
 function fakeApi() {
@@ -817,6 +817,23 @@ test("scope response retains the latest user selection made while it was pending
   await fake.answer("selectRepositoryScope", ok({ session: next, page: makeHistoryPage(next, { commits: [other] }) }));
   assert.deepEqual(await switching, { selectedOid: oidB, anchor: undefined });
   assert.equal(store.getView().oldSelectedCommit.oid, oidB);
+});
+
+test("status polling invalidation cannot discard an in-flight index control response", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const control = store.controlMetadataIndex("pause");
+  await settled();
+  assert.equal(store.getView().metadataIndexAction, "pause");
+
+  store.invalidateMetadataIndexStatus();
+  assert.equal(store.getView().metadataIndexAction, "pause");
+  const paused = { snapshotKey: "snapshot-a", state: "paused", coverage: { processed: 7, complete: false }, diskBytes: 100, quotaBytes: 1000, error: null };
+  await fake.answer("controlMetadataIndex", ok(paused));
+  assert.equal(await control, true);
+  assert.deepEqual(store.getView().metadataIndex, paused);
+  assert.equal(store.getView().metadataIndexAction, null);
 });
 
 test("cancel closes and drains a pending scope transaction", async () => {

@@ -49,6 +49,12 @@ pub struct DiscoveredRepository {
         Result<commitscope_core::RepositoryNavigation, crate::navigation::NavigationError>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParsedCommitMetadata {
+    pub summary: CommitSummary,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphBoundaryFingerprint {
     shallow: Option<String>,
@@ -314,14 +320,17 @@ pub fn read_discovered_preview(
         cancelled,
         deadline,
     )?;
-    let commits = read_commits(
+    let commits: Vec<CommitSummary> = read_commits(
         &git,
         path,
         &oids,
         discovered.oid_length,
         cancelled,
         deadline,
-    )?;
+    )?
+    .into_iter()
+    .map(|parsed| parsed.summary)
+    .collect();
     Ok(PreviewTail { commits, has_more })
 }
 
@@ -854,6 +863,27 @@ pub fn read_commit_summaries(
     deadline: Instant,
 ) -> Result<Vec<CommitSummary>, PreviewError> {
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+    Ok(read_commits(
+        &git,
+        Path::new(&discovered.info.path),
+        oids,
+        discovered.oid_length,
+        cancelled,
+        deadline,
+    )?
+    .into_iter()
+    .map(|parsed| parsed.summary)
+    .collect())
+}
+
+pub fn read_commit_metadata(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    oids: &[String],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Vec<ParsedCommitMetadata>, PreviewError> {
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
     read_commits(
         &git,
         Path::new(&discovered.info.path),
@@ -871,7 +901,7 @@ fn read_commits(
     oid_length: usize,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<Vec<CommitSummary>, PreviewError> {
+) -> Result<Vec<ParsedCommitMetadata>, PreviewError> {
     if oids.is_empty() {
         return Ok(Vec::new());
     }
@@ -997,7 +1027,7 @@ fn parse_commit(
     oid_length: usize,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<CommitSummary, PreviewError> {
+) -> Result<ParsedCommitMetadata, PreviewError> {
     let separator = bytes
         .windows(2)
         .position(|window| window == b"\n\n")
@@ -1076,7 +1106,7 @@ fn parse_commit(
         }
         summary.truncate(boundary);
     }
-    Ok(CommitSummary {
+    let summary = CommitSummary {
         oid: oid.to_owned(),
         parents,
         summary,
@@ -1084,6 +1114,10 @@ fn parse_commit(
         author,
         committer,
         text_lossy,
+    };
+    Ok(ParsedCommitMetadata {
+        summary,
+        message: String::from_utf8_lossy(message).into_owned(),
     })
 }
 

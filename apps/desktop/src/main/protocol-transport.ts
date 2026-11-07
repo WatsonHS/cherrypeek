@@ -196,8 +196,8 @@ export class ProtocolTransport {
     if (options.retainResultAfterAbort && method !== "openRepository" && method !== "refreshRepository" && method !== "selectRepositoryScope") {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开、刷新和范围切换可保留迟到的成功终态"));
     }
-    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus") {
-      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅历史页和合入状态请求可取消并排空终态"));
+    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅历史页、合入状态和索引状态请求可取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "refreshRepository", "selectRepositoryScope"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅会话变更请求可因超时关闭连接"));
@@ -541,7 +541,7 @@ function abortMessage(signal: AbortSignal): string {
 }
 
 function validRequestParams(method: string, params: unknown): boolean {
-  if (["getRuntimeInfo", "getRepositoryNavigation"].includes(method)) {
+  if (["getRuntimeInfo", "getRepositoryNavigation", "getMetadataIndexStatus"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   if (method === "readRepositoryPreview" && isRecord(params) && typeof params.path === "string") {
@@ -572,6 +572,8 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "refMergeStatus" && isRecord(params) && Array.isArray(params.refNames) &&
     params.refNames.length >= 1 && params.refNames.length <= 50 &&
     params.refNames.every(name => typeof name === "string" && name.length > 0 && Buffer.byteLength(name, "utf8") <= 16 * 1024)) return true;
+  if (method === "controlMetadataIndex" && isRecord(params) && Object.keys(params).length === 1 &&
+    ["pause", "resume", "cancel", "rebuild"].includes(params.action as string)) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
@@ -583,7 +585,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"].includes(method)) return "session";
   return undefined;
 }
 

@@ -1,6 +1,7 @@
 import type {
   HistoryCommit,
   MergeStatus,
+  MetadataIndexStatus,
   RepositoryScope,
   NewSinceLastSeenStatus,
   RefInfo,
@@ -9,6 +10,7 @@ import type {
   StoreStatus,
 } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { HistoryPage, RepositoryNavigation, RefMergeStatusResult, RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
+import type { MetadataIndexAction } from "../../../../../packages/protocol/src/generated/client-message.js";
 
 export type RepositoryViewState = "idle" | "loading" | "ready" | "error" | "cancelled";
 
@@ -81,6 +83,11 @@ export interface RepositoryView {
   mergeStatuses: Record<string, MergeStatus>;
   mergeStatusLoading: boolean;
   mergeStatusError: ViewError | null;
+  recordLoading: boolean;
+  metadataIndex: MetadataIndexStatus | null;
+  metadataIndexLoading: boolean;
+  metadataIndexAction: MetadataIndexAction | null;
+  metadataIndexError: ViewError | null;
 }
 
 export interface ScopeSwitchResult {
@@ -91,7 +98,8 @@ export interface ScopeSwitchResult {
 export type SessionApi = Pick<RepositorySessionApi,
   "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "cancelHistoryRead" |
   "refreshRepositorySession" | "recordRepositoryView" | "closeRepositorySession" |
-  "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus">;
+  "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus" |
+  "getMetadataIndexStatus" | "controlMetadataIndex">;
 
 function emptyView(revision: number, state: RepositoryViewState = "idle"): RepositoryView {
   return {
@@ -107,6 +115,7 @@ function emptyView(revision: number, state: RepositoryViewState = "idle"): Repos
     error: null, opening: null, notice: null, record: null,
     navigation: null, navigationLoading: false, navigationError: null,
     scopeSwitching: false, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null, mergeStatuses: {}, mergeStatusLoading: false, mergeStatusError: null,
+    recordLoading: false, metadataIndex: null, metadataIndexLoading: false, metadataIndexAction: null, metadataIndexError: null,
   };
 }
 
@@ -121,6 +130,8 @@ export class RepositorySessionStore {
   private openIntent = 0;
   private navigationOperation = 0;
   private mergeStatusOperation = 0;
+  private metadataIndexStatusOperation = 0;
+  private metadataIndexControlOperation = 0;
   private scopePending?: Promise<ScopeSwitchResult | undefined>;
   private pageOperation = 0;
   private refreshIntent = 0;
@@ -153,6 +164,7 @@ export class RepositorySessionStore {
     const operation = ++this.operation;
     ++this.navigationOperation;
     ++this.mergeStatusOperation;
+    this.invalidateMetadataIndexSession();
     const pendingPage = this.pageRequest;
     ++this.pageOperation;
     ++this.refreshIntent;
@@ -234,6 +246,50 @@ export class RepositorySessionStore {
     if (session && sameSession(this.view.session, session)) this.update({ ...this.view, mergeStatusLoading: false });
   }
 
+  async loadMetadataIndexStatus(): Promise<"loaded" | "busy" | "failed" | "skipped"> {
+    const session = this.view.session;
+    if (!session || !isMetadataIndexRequestIdle(this.view) || this.view.metadataIndexLoading || this.view.metadataIndexAction) return "skipped";
+    const operation = ++this.metadataIndexStatusOperation;
+    this.update({ ...this.view, metadataIndexLoading: true, metadataIndexError: null });
+    const result = await settle(this.api.getMetadataIndexStatus());
+    if (operation !== this.metadataIndexStatusOperation || !sameSession(this.view.session, session)) return "skipped";
+    if (!result.ok) {
+      const busy = result.error.code === "BUSY";
+      this.update({ ...this.view, metadataIndexLoading: false, metadataIndexError: busy ? this.view.metadataIndexError : result.error });
+      return busy ? "busy" : "failed";
+    }
+    this.update({ ...this.view, metadataIndex: result.value, metadataIndexLoading: false, metadataIndexError: null });
+    return "loaded";
+  }
+
+  async controlMetadataIndex(action: MetadataIndexAction): Promise<boolean> {
+    const session = this.view.session;
+    if (!session || !isMetadataIndexRequestIdle(this.view) || this.view.metadataIndexLoading || this.view.metadataIndexAction) return false;
+    const operation = ++this.metadataIndexControlOperation;
+    this.update({ ...this.view, metadataIndexLoading: false, metadataIndexAction: action, metadataIndexError: null });
+    const result = await settle(this.api.controlMetadataIndex(action));
+    if (operation !== this.metadataIndexControlOperation || !sameSession(this.view.session, session)) return false;
+    if (!result.ok) {
+      this.update({ ...this.view, metadataIndexAction: null, metadataIndexError: result.error });
+      return false;
+    }
+    this.update({ ...this.view, metadataIndex: result.value, metadataIndexAction: null, metadataIndexError: null });
+    return true;
+  }
+
+  invalidateMetadataIndexStatus(): void {
+    ++this.metadataIndexStatusOperation;
+    if (this.view.metadataIndexLoading) this.update({ ...this.view, metadataIndexLoading: false });
+  }
+
+  private invalidateMetadataIndexSession(): void {
+    ++this.metadataIndexStatusOperation;
+    ++this.metadataIndexControlOperation;
+    if (this.view.metadataIndexLoading || this.view.metadataIndexAction !== null) {
+      this.update({ ...this.view, metadataIndexLoading: false, metadataIndexAction: null });
+    }
+  }
+
   switchScope(scope: RepositoryScope, selectedOid?: string, anchor?: { oid: string; offset: number }): Promise<ScopeSwitchResult | undefined> {
     const session = this.view.session;
     if (!session || this.view.state !== "ready" || this.view.scopeSwitching || this.view.refreshing || sameScope(session.scope, scope)) {
@@ -254,6 +310,7 @@ export class RepositorySessionStore {
     ++this.refreshIntent;
     ++this.navigationOperation;
     ++this.mergeStatusOperation;
+    this.invalidateMetadataIndexSession();
     if (this.refreshingSession && sameSession(previous.session, this.refreshingSession)) {
       this.refreshingSession = undefined;
       this.refreshRpcStarted = false;
@@ -317,7 +374,8 @@ export class RepositorySessionStore {
       pageRevision: previous.pageRevision + 1, windowRevision: previous.windowRevision + 1, windowPageCount: 1,
       navigation: null, navigationLoading: false, navigationError: null, mergeStatuses: {},
       mergeStatusLoading: false, mergeStatusError: null, scopeSwitching: false, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null,
-      record: null, error: null, notice: null,
+      record: null, recordLoading: false, metadataIndex: null, metadataIndexLoading: false, metadataIndexAction: null, metadataIndexError: null,
+      error: null, notice: null,
     });
     return { selectedOid: selection?.oid, anchor: anchorStillLoaded ? anchor : undefined };
   }
@@ -373,6 +431,7 @@ export class RepositorySessionStore {
   async readPageAndReturn(cursor: string, kind: "prefetch" | "navigation" = "navigation"): Promise<HistoryPage | undefined> {
     const { session, state } = this.view;
     if (!session || state !== "ready" || this.view.refreshing || this.view.scopeSwitching) return undefined;
+    this.invalidateMetadataIndexStatus();
     const direction = cursor === this.view.windowPreviousCursor ? "before" : "after";
     if ((direction === "before" ? this.pages[0]?.previousCursor : this.pages.at(-1)?.nextCursor) !== cursor) return undefined;
     const token = ++this.pageOperation;
@@ -417,6 +476,7 @@ export class RepositorySessionStore {
     const intent = ++this.refreshIntent;
     ++this.navigationOperation;
     ++this.mergeStatusOperation;
+    this.invalidateMetadataIndexSession();
     const selected = this.view.commits.find(commit => commit.oid === selectedOid) ?? this.view.oldSelectedCommit;
     const oldSelectedObservedAtUnixMs = this.view.oldSelectedCommit && selected === this.view.oldSelectedCommit
       ? this.view.oldSelectedObservedAtUnixMs : session.observedAtUnixMs;
@@ -503,6 +563,7 @@ export class RepositorySessionStore {
       windowPageCount: 1,
       navigation: null, navigationLoading: false, navigationError: null, mergeStatuses: {},
       mergeStatusLoading: false, mergeStatusError: null, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null,
+      metadataIndex: null, metadataIndexLoading: false, metadataIndexAction: null, metadataIndexError: null, recordLoading: false,
       opening: current.opening,
       error: null,
     });
@@ -544,11 +605,13 @@ export class RepositorySessionStore {
     const { session, state } = this.view;
     if (!session || state !== "ready") return;
     if (this.recording?.session === session) return this.recording.done;
+    this.update({ ...this.view, recordLoading: true });
     const done = (async () => {
       const result = await settle(this.api.recordRepositoryView(session.generation));
       if (this.view.session !== session) return;
       this.update({
         ...this.view,
+        recordLoading: false,
         record: result.ok
           ? { saved: result.value.saved, status: result.value.status, error: null }
           : { saved: false, status: null, error: result.error },
@@ -570,6 +633,7 @@ export class RepositorySessionStore {
     this.viewportAnchorOid = undefined;
     this.refreshingSession = undefined;
     this.refreshRpcStarted = false;
+    this.invalidateMetadataIndexSession();
     if (view.state === "ready") {
       this.update({ ...view, session: null, opening: null, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, refreshing: false });
       return;
@@ -773,6 +837,11 @@ function sameScope(left: RepositoryScope, right: RepositoryScope): boolean {
 
 function sameRepository(left: RepositorySessionInfo, right: RepositorySessionInfo): boolean {
   return left.repositoryKey === right.repositoryKey && left.worktreeId === right.worktreeId;
+}
+
+export function isMetadataIndexRequestIdle(view: RepositoryView): boolean {
+  return view.state === "ready" && view.opening === null && !view.refreshing && !view.scopeSwitching &&
+    !view.pageLoading && !view.navigationLoading && !view.mergeStatusLoading && !view.recordLoading;
 }
 
 function validHistoryPage(page: HistoryPage, requestedPageSize: number): boolean {

@@ -24,6 +24,8 @@ const api: CommitScopeApi = {
   selectRepositoryScope: (scope, pageSize) => ipcRenderer.invoke("commitscope:session:select-scope", scope, pageSize),
   getRefMergeStatus: refNames => ipcRenderer.invoke("commitscope:refs:merge-status", refNames),
   cancelRefMergeStatus: () => ipcRenderer.invoke("commitscope:refs:merge-status:cancel"),
+  getMetadataIndexStatus: () => ipcRenderer.invoke("commitscope:index:status"),
+  controlMetadataIndex: action => ipcRenderer.invoke("commitscope:index:control", action),
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

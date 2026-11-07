@@ -9,7 +9,8 @@
         "repositorySessions",
         "historyPagination",
         "historyNewSinceLastSeen",
-        "repositoryScopes"
+        "repositoryScopes",
+        "metadataIndex"
       ],
       "type": "string"
     },

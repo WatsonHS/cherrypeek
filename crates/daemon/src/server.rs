@@ -1,9 +1,9 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
-    ClientMessage, CoreReady, Coverage, EmptyParams, ErrorCode, OpenRepositoryParams,
-    PROTOCOL_VERSION, ReadHistoryPageParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
-    RefreshRepositoryParams, RepositoryScope, ResponseData, SelectRepositoryScopeParams,
-    ServerMessage,
+    ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage, EmptyParams, ErrorCode,
+    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadHistoryPageParams,
+    ReadRepositoryPreviewParams, RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope,
+    ResponseData, SelectRepositoryScopeParams, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -26,11 +26,12 @@ const PREVIEW_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMIT_CHUNK_SIZE: usize = 25;
 const RESPONSE_TARGET_BYTES: usize = 512 * 1024;
 
-type ActiveRequests = Arc<Mutex<HashMap<String, ActiveRequest>>>;
+pub(crate) type ActiveRequests = Arc<Mutex<HashMap<String, ActiveRequest>>>;
 
-struct ActiveRequest {
+pub(crate) struct ActiveRequest {
     cancelled: Arc<AtomicBool>,
     repo_id: Option<String>,
+    pub(crate) blocks_background: bool,
 }
 
 #[derive(Debug)]
@@ -45,6 +46,8 @@ enum RequestOperation {
     GetRepositoryNavigation,
     SelectRepositoryScope(SelectRepositoryScopeParams),
     RefMergeStatus(RefMergeStatusParams),
+    GetMetadataIndexStatus,
+    ControlMetadataIndex(MetadataIndexAction),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -217,6 +220,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let requests: ActiveRequests = Arc::default();
     let mut sessions = session::SessionManager::new(session_store::SessionStore::from_env());
+    let metadata_tasks = Arc::new(crate::metadata_index::TaskManager::default());
     let (open_done_tx, open_done_rx) = mpsc::sync_channel::<OpenCompletion>(4);
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     let mut handshaken = true;
@@ -243,7 +247,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_open_completions(&open_done_rx, &mut sessions, &requests, &out_tx, &shutdown);
+                drain_open_completions(
+                    &open_done_rx,
+                    &mut sessions,
+                    &requests,
+                    &out_tx,
+                    &shutdown,
+                    &metadata_tasks,
+                    git_path.as_deref(),
+                    &mut workers,
+                );
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -292,6 +305,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &requests,
                         &out_tx,
                         &shutdown,
+                        &metadata_tasks,
+                        git_path.as_deref(),
+                        &mut workers,
                     );
                     continue;
                 }
@@ -358,6 +374,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 &requests,
                                 &out_tx,
                                 &shutdown,
+                                &metadata_tasks,
+                                git_path.as_deref(),
+                                &mut workers,
                             );
                             continue;
                         }
@@ -367,6 +386,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             ActiveRequest {
                                 cancelled: Arc::clone(&cancelled),
                                 repo_id: repo_id.clone(),
+                                blocks_background: !matches!(
+                                    operation,
+                                    RequestOperation::GetMetadataIndexStatus
+                                ),
                             },
                         );
                         drop(active);
@@ -384,6 +407,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             &mut sessions,
                             &mut workers,
                             git_path.as_deref(),
+                            &metadata_tasks,
                         );
                     }
                 }
@@ -425,11 +449,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 handshaken = false;
             }
         }
-        drain_open_completions(&open_done_rx, &mut sessions, &requests, &out_tx, &shutdown);
+        drain_open_completions(
+            &open_done_rx,
+            &mut sessions,
+            &requests,
+            &out_tx,
+            &shutdown,
+            &metadata_tasks,
+            git_path.as_deref(),
+            &mut workers,
+        );
     }
 
     shutdown.store(true, Ordering::Release);
     sessions.cancel_pending_opens();
+    metadata_tasks.shutdown();
     for request in requests.lock().expect("request map poisoned").values() {
         request.cancelled.store(true, Ordering::Release);
     }
@@ -449,6 +483,8 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::GetRepositoryNavigation
             | RequestOperation::SelectRepositoryScope(_)
             | RequestOperation::RefMergeStatus(_)
+            | RequestOperation::GetMetadataIndexStatus
+            | RequestOperation::ControlMetadataIndex(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
@@ -469,6 +505,7 @@ fn dispatch_request(
     sessions: &mut session::SessionManager,
     workers: &mut Vec<JoinHandle<()>>,
     git_path: Option<&std::path::Path>,
+    metadata_tasks: &Arc<crate::metadata_index::TaskManager>,
 ) {
     match operation {
         RequestOperation::RuntimeInfo => {
@@ -585,6 +622,7 @@ fn dispatch_request(
             let stopping = Arc::clone(shutdown);
             let cancelled_for_worker = Arc::clone(&cancelled);
             let git_path = git_path.map(std::path::Path::to_path_buf);
+            let metadata_tasks_worker = Arc::clone(metadata_tasks);
             workers.push(thread::spawn(move || {
                 execute_history_page(
                     &sender,
@@ -597,6 +635,7 @@ fn dispatch_request(
                     session,
                     params,
                     cancelled_for_worker,
+                    metadata_tasks_worker,
                 )
             }));
         }
@@ -750,6 +789,78 @@ fn dispatch_request(
                 );
             }));
         }
+        RequestOperation::GetMetadataIndexStatus => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let quota = match crate::metadata_index::configured_quota() {
+                Ok(quota) => quota,
+                Err(error) => {
+                    let status = crate::metadata_index::idle_status(0, Some(error));
+                    send_main_message(
+                        sender,
+                        shutdown,
+                        &session_response(
+                            &request_id,
+                            repo_id,
+                            generation,
+                            ResponseData::MetadataIndex { status },
+                            1,
+                        ),
+                    );
+                    remove_request(requests, &request_id, &cancelled);
+                    return;
+                }
+            };
+            let store = session_store::SessionStore::from_env();
+            let status = metadata_tasks.status(&store, &session, quota);
+            send_main_message(
+                sender,
+                shutdown,
+                &session_response(
+                    &request_id,
+                    repo_id,
+                    generation,
+                    ResponseData::MetadataIndex { status },
+                    1,
+                ),
+            );
+            remove_request(requests, &request_id, &cancelled);
+        }
+        RequestOperation::ControlMetadataIndex(action) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let quota = crate::metadata_index::configured_quota();
+            let task_manager = Arc::clone(metadata_tasks);
+            let store = session_store::SessionStore::from_env();
+            let executable = git_path.map(std::path::Path::to_path_buf);
+            let requests = Arc::clone(requests);
+            let sender = sender.clone();
+            let shutdown = Arc::clone(shutdown);
+            let request_id_worker = request_id.clone();
+            let repo_id_worker = repo_id.clone();
+            let generation_worker = generation.clone();
+            let cancelled_worker = Arc::clone(&cancelled);
+            workers.push(thread::spawn(move || {
+                let status = match quota {
+                    Ok(quota) => task_manager.control(
+                        action,
+                        store,
+                        Arc::clone(&session),
+                        executable,
+                        quota,
+                        Arc::clone(&requests),
+                    ),
+                    Err(error) => crate::metadata_index::idle_status(0, Some(error)),
+                };
+                let message = session_response(
+                    &request_id_worker,
+                    repo_id_worker,
+                    generation_worker,
+                    ResponseData::MetadataIndex { status },
+                    1,
+                );
+                send_task_message(&sender, &shutdown, &cancelled_worker, &message);
+                remove_request(&requests, &request_id_worker, &cancelled_worker);
+            }));
+        }
         RequestOperation::RecordRepositoryView => {
             let result = sessions.record_view(
                 repo_id.as_deref().expect("session context checked"),
@@ -786,6 +897,11 @@ fn dispatch_request(
             );
             match result {
                 Ok(closed_repo_id) => {
+                    if let (Some(repo_id), Some(generation)) =
+                        (repo_id.as_deref(), generation.as_deref())
+                    {
+                        metadata_tasks.deactivate(repo_id, generation);
+                    }
                     cancel_repository_requests(requests, &closed_repo_id);
                     let message = session_response(
                         &request_id,
@@ -965,12 +1081,16 @@ fn cancel_repository_requests(requests: &ActiveRequests, repo_id: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain_open_completions(
     receiver: &Receiver<OpenCompletion>,
     sessions: &mut session::SessionManager,
     requests: &ActiveRequests,
     sender: &SyncSender<OutFrame>,
     shutdown: &AtomicBool,
+    metadata_tasks: &Arc<crate::metadata_index::TaskManager>,
+    git_path: Option<&std::path::Path>,
+    workers: &mut Vec<JoinHandle<()>>,
 ) {
     while let Ok(completion) = receiver.try_recv() {
         let OpenCompletion {
@@ -983,6 +1103,7 @@ fn drain_open_completions(
             OpenCompletionPayload::Open(Ok(discovered)) => {
                 match sessions.commit_open(intent, &cancelled, Arc::new(discovered)) {
                     Ok(commit) => {
+                        metadata_tasks.activate(&commit.session);
                         if let Some(old_repo_id) = commit.replaced_repo_id.as_deref() {
                             cancel_repository_requests(requests, old_repo_id);
                         }
@@ -1053,6 +1174,7 @@ fn drain_open_completions(
                 );
                 match commit {
                     Ok(commit) => {
+                        metadata_tasks.activate(&commit.session);
                         if let Some(old_repo_id) = commit.replaced_repo_id.as_deref() {
                             cancel_repository_requests(requests, old_repo_id);
                         }
@@ -1065,6 +1187,15 @@ fn drain_open_completions(
                             &commit.session,
                             prepared.page,
                         );
+                        if let Some(git_path) = git_path {
+                            let manager = Arc::clone(metadata_tasks);
+                            let session = Arc::clone(&commit.session);
+                            let git_path = git_path.to_path_buf();
+                            let requests = Arc::clone(requests);
+                            workers.push(thread::spawn(move || {
+                                ensure_metadata_index(&manager, session, &git_path, &requests)
+                            }));
+                        }
                     }
                     Err(error) => send_open_completion_error(
                         request_id.as_str(),
@@ -1344,6 +1475,8 @@ fn validate_request(
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
         | "refMergeStatus"
+        | "getMetadataIndexStatus"
+        | "controlMetadataIndex"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -1387,9 +1520,20 @@ fn validate_request(
                             "refMergeStatus params 无效".into(),
                         )
                     }),
+                "controlMetadataIndex" => {
+                    serde_json::from_value::<ControlMetadataIndexParams>(params.clone())
+                        .map(|params| RequestOperation::ControlMetadataIndex(params.action))
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "controlMetadataIndex params 无效".into(),
+                            )
+                        })
+                }
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
+                        "getMetadataIndexStatus" => RequestOperation::GetMetadataIndexStatus,
                         "getRepositoryNavigation" => RequestOperation::GetRepositoryNavigation,
                         "readSessionPreview" => RequestOperation::ReadSessionPreview,
                         "recordRepositoryView" => RequestOperation::RecordRepositoryView,
@@ -1410,6 +1554,8 @@ fn validate_request(
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
         | "refMergeStatus"
+        | "getMetadataIndexStatus"
+        | "controlMetadataIndex"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"
@@ -1858,6 +2004,7 @@ fn execute_history_page(
     session: Arc<session::RepositorySession>,
     params: ReadHistoryPageParams,
     cancelled: Arc<AtomicBool>,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
 ) {
     let Some(git_path) = git_path else {
         send_terminal_error(
@@ -1973,6 +2120,25 @@ fn execute_history_page(
         }
     }
     remove_request(requests, request_id, &cancelled);
+    ensure_metadata_index(&metadata_tasks, session, git_path, requests);
+}
+
+fn ensure_metadata_index(
+    manager: &crate::metadata_index::TaskManager,
+    session: Arc<session::RepositorySession>,
+    git_path: &std::path::Path,
+    requests: &ActiveRequests,
+) {
+    let Ok(quota) = crate::metadata_index::configured_quota() else {
+        return;
+    };
+    manager.ensure(
+        session_store::SessionStore::from_env(),
+        session,
+        git_path.to_path_buf(),
+        quota,
+        Arc::clone(requests),
+    );
 }
 
 fn pack_history_chunks(

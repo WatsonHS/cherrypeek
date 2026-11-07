@@ -38,6 +38,7 @@ pub struct RecordViewStoreResult {
     pub status: StoreStatus,
 }
 
+#[derive(Clone)]
 pub struct SessionStore {
     data_dir: Option<PathBuf>,
     initial_status: StoreStatus,
@@ -67,6 +68,17 @@ struct LastViewedDocument {
 }
 
 impl SessionStore {
+    pub fn metadata_cache_root(&self, repository: &RepositoryInfo) -> Result<PathBuf, ()> {
+        let data_dir = self.data_dir.as_deref().ok_or(())?;
+        let checked = safe_data_dir(data_dir, repository)?;
+        let root = checked.join("metadata-index");
+        let root = ensure_safe_directory(&root)?;
+        if safe_data_dir(&root, repository)? != root {
+            return Err(());
+        }
+        Ok(root)
+    }
+
     pub fn from_env() -> Self {
         match env::var_os(DATA_DIR_ENV) {
             None => Self {

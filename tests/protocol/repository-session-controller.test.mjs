@@ -53,7 +53,7 @@ function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "metadataIndex"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -295,11 +295,52 @@ test("the real controller accepts daemon navigation and merge-status coverage", 
     assert.deepEqual(selected.session.tips, [selected.page.commits[0]?.oid].filter(Boolean));
     const current = await controller.get();
     assert.equal(current.scope.ref, "refs/heads/feature/merged", "the committed scope is now the context for later session reads");
+
+    const indexStatus = await controller.getMetadataIndexStatus();
+    assert.ok(["idle", "queued", "running", "paused", "cancelled", "complete", "quotaLimited", "unavailable", "failed"].includes(indexStatus.state));
+    assert.equal(indexStatus.coverage.complete, indexStatus.state === "complete");
+    assert.equal(typeof indexStatus.coverage.processed, "number");
+    assert.ok(indexStatus.snapshotKey === null || typeof indexStatus.snapshotKey === "string");
+
+    const controlledIndexStatus = await controller.controlMetadataIndex("pause");
+    assert.ok(["idle", "queued", "running", "paused", "cancelled", "complete", "quotaLimited", "unavailable", "failed"].includes(controlledIndexStatus.state));
+    assert.equal(controlledIndexStatus.coverage.complete, controlledIndexStatus.state === "complete");
+    await assert.rejects(controller.controlMetadataIndex("invalid"), error => error.code === "INVALID_REQUEST");
   } finally {
     controller.dispose();
     await core.stop().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("metadata index status and control stay bound to the open session", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const reading = controller.getMetadataIndexStatus();
+  const statusRequest = await waitFor(() => core.requests[1]);
+  assert.equal(statusRequest.method, "getMetadataIndexStatus");
+  assert.deepEqual(statusRequest.params, {});
+  assert.deepEqual(statusRequest.context, { repoId: opened.repoId, generation: opened.generation });
+  const status = { snapshotKey: "snapshot-a", state: "running", coverage: { processed: 3, complete: false }, diskBytes: 120, quotaBytes: 1000, error: null };
+  send(statusRequest, { section: "metadataIndex", status });
+  assert.deepEqual(await reading, status);
+
+  const controlling = controller.controlMetadataIndex("pause");
+  const controlRequest = await waitFor(() => core.requests[2]);
+  assert.equal(controlRequest.method, "controlMetadataIndex");
+  assert.deepEqual(controlRequest.params, { action: "pause" });
+  assert.deepEqual(controlRequest.context, { repoId: opened.repoId, generation: opened.generation });
+  const paused = { ...status, state: "paused" };
+  send(controlRequest, { section: "metadataIndex", status: paused });
+  assert.deepEqual(await controlling, paused);
+  await assert.rejects(controller.controlMetadataIndex("invalid"), error => error.code === "INVALID_REQUEST");
+  controller.dispose();
 });
 
 test("a core without repositoryScopes is rejected before opening a session", async () => {

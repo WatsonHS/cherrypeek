@@ -31,12 +31,17 @@ export type Capability =
   | "repositorySessions"
   | "historyPagination"
   | "historyNewSinceLastSeen"
-  | "repositoryScopes";
+  | "repositoryScopes"
+  | "metadataIndex";
 export type ResponseData =
   | {
       coreVersion: string;
       pid: number;
       section: "core";
+    }
+  | {
+      section: "metadataIndex";
+      status: MetadataIndexStatus;
     }
   | {
       git: GitInfo;
@@ -93,18 +98,6 @@ export type ResponseData =
       result: RefMergeStatusResult;
       section: "refMergeStatus";
     };
-export type RefKind = "localBranch" | "remoteBranch" | "tag";
-export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
-export type RepositoryScope =
-  | ("head" | "allBranches")
-  | {
-      ref: string;
-    }
-  | {
-      worktree: string;
-    };
-export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
-export type MergeStatus = "merged" | "notMerged" | "unavailable";
 export type ErrorCode =
   | "PROTOCOL_MISMATCH"
   | "PROTOCOL_ERROR"
@@ -125,7 +118,24 @@ export type ErrorCode =
   | "PERMISSION_DENIED"
   | "INVALID_CURSOR"
   | "SNAPSHOT_CHANGED"
-  | "SCOPE_UNAVAILABLE";
+  | "SCOPE_UNAVAILABLE"
+  | "INDEX_UNAVAILABLE"
+  | "INDEX_CORRUPT"
+  | "INDEX_VERSION_UNSUPPORTED";
+export type MetadataIndexState =
+  "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
+export type RefKind = "localBranch" | "remoteBranch" | "tag";
+export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
+export type RepositoryScope =
+  | ("head" | "allBranches")
+  | {
+      ref: string;
+    }
+  | {
+      worktree: string;
+    };
+export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
+export type MergeStatus = "merged" | "notMerged" | "unavailable";
 
 export interface CoreReady {
   capabilities: Capability[];
@@ -142,6 +152,22 @@ export interface GitInfo {
 export interface Coverage {
   complete: boolean;
   processed: number;
+}
+export interface MetadataIndexStatus {
+  coverage: MetadataIndexCoverage;
+  diskBytes: number;
+  error: MetadataIndexFailure | null;
+  quotaBytes: number;
+  snapshotKey: string | null;
+  state: MetadataIndexState;
+}
+export interface MetadataIndexCoverage {
+  complete: boolean;
+  processed: number;
+}
+export interface MetadataIndexFailure {
+  code: ErrorCode;
+  message: string;
 }
 export interface RefInfo {
   kind: RefKind;

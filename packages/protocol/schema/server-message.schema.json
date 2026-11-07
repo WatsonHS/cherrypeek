@@ -8,7 +8,8 @@
         "repositorySessions",
         "historyPagination",
         "historyNewSinceLastSeen",
-        "repositoryScopes"
+        "repositoryScopes",
+        "metadataIndex"
       ],
       "type": "string"
     },
@@ -166,7 +167,10 @@
         "PERMISSION_DENIED",
         "INVALID_CURSOR",
         "SNAPSHOT_CHANGED",
-        "SCOPE_UNAVAILABLE"
+        "SCOPE_UNAVAILABLE",
+        "INDEX_UNAVAILABLE",
+        "INDEX_CORRUPT",
+        "INDEX_VERSION_UNSUPPORTED"
       ],
       "type": "string"
     },
@@ -270,6 +274,100 @@
         "unavailable"
       ],
       "type": "string"
+    },
+    "MetadataIndexCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "processed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "processed",
+        "complete"
+      ],
+      "type": "object"
+    },
+    "MetadataIndexFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "MetadataIndexState": {
+      "enum": [
+        "idle",
+        "queued",
+        "running",
+        "paused",
+        "cancelled",
+        "complete",
+        "quotaLimited",
+        "unavailable",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "MetadataIndexStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/definitions/MetadataIndexCoverage"
+        },
+        "diskBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MetadataIndexFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quotaBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshotKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/MetadataIndexState"
+        }
+      },
+      "required": [
+        "snapshotKey",
+        "state",
+        "coverage",
+        "diskBytes",
+        "quotaBytes",
+        "error"
+      ],
+      "type": "object"
     },
     "NewSinceLastSeenStatus": {
       "enum": [
@@ -659,6 +757,23 @@
             "section",
             "coreVersion",
             "pid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "section": {
+              "const": "metadataIndex",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/MetadataIndexStatus"
+            }
+          },
+          "required": [
+            "section",
+            "status"
           ],
           "type": "object"
         },
