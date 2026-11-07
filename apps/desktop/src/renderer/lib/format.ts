@@ -68,10 +68,20 @@ export function homeAbbreviated(path: string): string {
   return path.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, "~");
 }
 
-/** Local time plus the raw Git offset, which is kept verbatim. */
+/** Device-local absolute time; the original Git offset is available in identityTimeTitle. */
 export function identityTime(identity: CommitIdentity): string {
   const date = parseGitTime(identity.timestamp);
-  return `${date ? fullTime(date) : identity.timestamp} · Git 原始偏移 ${identity.offset}`;
+  if (!date) return "时间未知";
+  return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}（${zoneLabel(date)}）`;
+}
+
+/** The Git-recorded timezone offset, kept distinct from the device-local display timezone. */
+export function identityTimeTitle(identity: CommitIdentity): string {
+  const date = parseGitTime(identity.timestamp);
+  if (!date) return "时间未知";
+  const match = /^([+-])(\d{2}):?(\d{2})$/u.exec(identity.offset);
+  const offset = match ? `UTC${match[1]}${match[2]}:${match[3]}` : `Git 原始偏移 ${identity.offset}`;
+  return `提交记录的时区：${offset}`;
 }
 
 export function zoneLabel(now = new Date()): string {

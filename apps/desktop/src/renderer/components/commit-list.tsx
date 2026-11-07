@@ -1,14 +1,14 @@
 import * as React from "react";
 import type { CommitSummary, HistoryCommit, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
-import { TriangleAlert } from "lucide-react";
-import { clock, dayKey, dayLabel, parseGitTime, refTarget, repositoryName, shortRefName } from "../lib/format.js";
+import { LoaderCircle, TriangleAlert } from "lucide-react";
+import { clock, dayKey, dayLabel, parseGitTime, refTarget } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
-import { graphPaths, graphWidth as measureGraphWidth, laneX, lanesInMask, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
+import { graphAboveLanes, graphPaths, graphWidth as measureGraphWidth, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
+import { refLabels, type OtherWorktreeHead } from "../lib/ref-labels.js";
 import { cn } from "../lib/utils.js";
 import { IdentityAvatar } from "./identity-avatar.js";
-import { ActivityPlaceholder } from "./placeholder-widgets.js";
-import { Badge } from "./ui/badge.js";
+import { RefChips } from "./ref-label.js";
 import { Button } from "./ui/button.js";
 import { Skeleton } from "./ui/skeleton.js";
 import { createVirtualLayout, type VirtualRange } from "../lib/virtual-window.js";
@@ -18,8 +18,8 @@ const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
 
 type ListEntry =
-  | { kind: "day"; key: string; dayKey: string; label: string; count: number; lanes: number[]; height: number }
-  | { kind: "divider"; key: string; lanes: number[]; height: number }
+  | { kind: "day"; key: string; dayKey: string; label: string; graph: HistoryCommit["graph"]; height: number }
+  | { kind: "divider"; key: string; graph: HistoryCommit["graph"]; height: number }
   | { kind: "commit"; key: string; commit: HistoryCommit; height: number };
 
 function buildEntries(commits: HistoryCommit[], dividerOid: string | null): ListEntry[] {
@@ -31,15 +31,13 @@ function buildEntries(commits: HistoryCommit[], dividerOid: string | null): List
   const now = new Date();
   let current: Extract<ListEntry, { kind: "day" }> | undefined;
   for (const commit of commits) {
-    const lanesAbove = lanesInMask(commit.graph.above);
     const date = parseGitTime(commit.committer.timestamp);
     const key = date ? dayKey(date) : "unknown";
     if (!current || current.dayKey !== key) {
-      current = { kind: "day", key: `day-${commit.oid}`, dayKey: key, label: date ? dayLabel(date, now) : "时间未知", count: 0, lanes: lanesAbove, height: DAY_ROW_HEIGHT };
+      current = { kind: "day", key: `day-${commit.oid}`, dayKey: key, label: date ? dayLabel(date, now) : "时间未知", graph: commit.graph, height: DAY_ROW_HEIGHT };
       entries.push(current);
     }
-    current.count += 1;
-    if (commit.oid === visibleDividerOid) entries.push({ kind: "divider", key: `last-seen-${commit.oid}`, lanes: lanesAbove, height: DAY_ROW_HEIGHT });
+    if (commit.oid === visibleDividerOid) entries.push({ kind: "divider", key: `last-seen-${commit.oid}`, graph: commit.graph, height: DAY_ROW_HEIGHT });
     entries.push({ kind: "commit", key: commit.oid, commit, height: ROW.rowHeight });
   }
   return entries;
@@ -54,7 +52,7 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onPreviousPage, onNextPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace }: {
+export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
@@ -64,8 +62,6 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   onRetry(): Promise<void>;
   onRetryPage(): Promise<void>;
   onCancelPage(): Promise<void>;
-  onPreviousPage(): Promise<string | undefined>;
-  onNextPage(): Promise<string | undefined>;
   onLoadWindowEdge(direction: "before" | "after"): Promise<string | undefined>;
   onPrefetchPreviousPage(): void;
   onPrefetchNextPage(): void;
@@ -87,23 +83,26 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const latestScrollModel = React.useRef({ preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor });
   latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
+  const [graphExpanded, setGraphExpanded] = React.useState(false);
   const lastRestoredPageRevision = React.useRef(0);
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
-  const graphColumnWidthWithOverflow = measureGraphWidth(ROW);
+  const maxLaneInWindow = preview.commits.reduce((maxLane, commit) => Math.max(maxLane, maxGraphLane(commit.graph)), -1);
+  const visibleLaneCount = graphExpanded ? Math.max(MAX_VISIBLE_LANES, maxLaneInWindow + 1) : MAX_VISIBLE_LANES;
+  const graphColumnWidth = graphExpanded
+    ? graphWidthForMaxLane(ROW, visibleLaneCount - 1)
+    : measureGraphWidth(ROW);
+  const expandedContentMinWidth = graphExpanded ? graphColumnWidth + 280 : undefined;
   const headReference = preview.repository?.headReference ?? null;
   const headOid = preview.repository?.headOid ?? null;
   const otherWorktreesByHead = React.useMemo(() => {
-    const index = new Map<string, { path: string; isMain: boolean }[]>();
+    const index = new Map<string, OtherWorktreeHead[]>();
     for (const worktree of preview.navigation?.worktrees ?? []) {
       if (!worktree.headOid || worktree.isCurrent) continue;
-      index.set(worktree.headOid, [...(index.get(worktree.headOid) ?? []), { path: worktree.path, isMain: worktree.isMain }]);
+      index.set(worktree.headOid, [...(index.get(worktree.headOid) ?? []),
+        { path: worktree.path, isMain: worktree.isMain, headReference: worktree.isDetached ? null : worktree.headReference }]);
     }
     return index;
   }, [preview.navigation]);
-  const scope = preview.session?.scope;
-  const scopeDescription = scope === "allBranches" ? "全部分支" : scope && typeof scope === "object"
-    ? "ref" in scope ? shortRefName(scope.ref) : "worktree 历史"
-    : "HEAD 可达";
   const visibleEntries = entries.slice(range.start, range.end);
   const activeDescendant = selectedOid && visibleEntries.some(entry => entry.kind === "commit" && entry.commit.oid === selectedOid)
     ? rowId(selectedOid) : undefined;
@@ -280,15 +279,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const loadingEmpty = preview.state === "loading" && preview.commits.length === 0;
   const finishedEmpty = preview.state === "ready" && preview.commits.length === 0;
   const interrupted = (preview.state === "error" || preview.state === "cancelled") && preview.commits.length > 0;
+  const reachedEnd = preview.commits.length > 0 && preview.windowNextCursor === null && preview.state === "ready"
+    && preview.opening === null && !preview.pageLoading && !preview.refreshing && !preview.scopeSwitching
+    && !preview.pageError;
 
-  return <nav aria-label="提交列表" className="flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col border-r border-line">
-    <div className="flex h-[46px] shrink-0 items-center justify-between gap-2 pr-3.5 pl-1.5 text-xs text-fg3">
-      <ActivityPlaceholder />
-      <span className="flex items-center gap-2">
-      <span>{preview.scopeSwitching ? "正在准备范围…" : preview.pageLoading ? "正在读取历史页…" : preview.refreshing ? "正在刷新快照…" : `${scopeDescription} · 固定快照 · 已载入 ${preview.commits.length} 条`}</span>
-      </span>
-    </div>
-
+  return <nav aria-label="提交列表" className="relative flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col overflow-hidden border-r border-line">
     {preview.error && preview.repository ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>
@@ -301,11 +296,18 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetryPage(); }}>{preview.pageErrorKind === "location" ? "重试定位" : "重试"}</Button> : null}
     </div> : null}
 
+    {preview.pageLoading && preview.commits.length > 0 ? <div role="status" className="absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg3 shadow-pop">
+      <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+      <span className="flex-1">正在加载更多提交…</span>
+      <Button variant="outline" size="sm" onClick={() => { void onCancelPage(); }}>取消</Button>
+    </div> : null}
+
+    <div className="relative flex min-h-0 flex-1">
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
-      data-visible-graph-lanes={MAX_VISIBLE_LANES}
+      data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}
       data-loaded-count={preview.commits.length} data-window-pages={preview.windowPageCount}
-      className="min-h-0 flex-1 overflow-auto px-2 pb-6 outline-none" style={{ overflowAnchor: "none" }} onScroll={handleScroll}
+      className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none" style={{ overflowAnchor: "none" }} onScroll={handleScroll}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
         const keys: Record<string, number | "first" | "last"> = { ArrowDown: 1, ArrowUp: -1, PageDown: 8, PageUp: -8, Home: "first", End: "last" };
@@ -314,13 +316,15 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
         event.preventDefault();
         move(delta);
       }}>
+      <div style={expandedContentMinWidth === undefined ? undefined : { minWidth: expandedContentMinWidth }}>
       {loadingEmpty ? <LoadingRows onCancel={onCancel} /> : null}
       {finishedEmpty ? <p className="m-0 px-3 py-10 text-center text-[13px] text-fg3">当前 HEAD 尚无提交。</p> : null}
       <div aria-hidden="true" style={{ height: range.top }} />
       {visibleEntries.map(entry => entry.kind === "day"
-        ? <DayRow key={entry.key} entry={entry} width={graphColumnWidthWithOverflow} />
-        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} lanes={entry.lanes} width={graphColumnWidthWithOverflow} />
-        : <CommitRow key={entry.commit.oid} commit={entry.commit} graphWidth={graphColumnWidthWithOverflow}
+        ? <DayRow key={entry.key} entry={entry} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth} />
+        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} graph={entry.graph} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth} />
+        : <CommitRow key={entry.commit.oid} commit={entry.commit} graphWidth={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount}
+          contentMinWidth={expandedContentMinWidth} onExpandGraph={() => setGraphExpanded(true)}
           refs={refIndex.get(entry.commit.oid) ?? []} headReference={headReference} headOid={headOid}
           otherWorktrees={otherWorktreesByHead.get(entry.commit.oid) ?? []}
           selected={entry.commit.oid === selectedOid} onSelect={() => { onSelect(entry.commit.oid); listRef.current?.focus(); }} />)}
@@ -328,20 +332,21 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {preview.newSinceLastSeenStatus === "unavailable" ? <p role="status" className="m-0 px-3 pt-3 text-center text-xs text-fg3">无法比较上次查看记录，未显示新增标记。</p> : null}
       {preview.selectionMissingOnPage && !preview.oldSelectedCommit ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">当前窗口未载入所选提交；这不表示它已不可达。</p> : null}
       {preview.anchorMissing ? <p className="m-0 px-3 pt-2 text-center text-xs text-fg3">刷新后，原列表位置不在当前窗口。</p> : null}
-      {preview.hasMore ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">还有更早的提交，可继续翻页。</p> : null}
+      {reachedEnd ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">没有更多提交了。</p> : null}
       {interrupted ? <p className="m-0 px-3 pt-4 text-center text-xs text-warn">读取没有完成，以上结果不完整。</p> : null}
       {preview.anchorRestorationSpace > 0 ? <div aria-hidden="true" style={{ height: preview.anchorRestorationSpace }} /> : null}
+      </div>
     </div>
-    {preview.pageOffset !== null ? <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line px-3 py-2 text-xs text-fg3">
-      <Button variant="outline" size="sm" disabled={!preview.canNavigatePrevious || preview.pageLoading || preview.refreshing}
-        onClick={() => { if (preview.session && listRef.current) pendingAnchor.current = captureWindowAnchor(listRef.current, preview.session, entries, virtual); const intent = captureSelectionIntent(); void onPreviousPage().then(oid => { if (oid) selectIfCurrent(oid, intent); }); }}>上一页</Button>
-      <span>{preview.commits.length ? `${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条` : "当前页 0 条"}</span>
-      <span className="flex items-center gap-2">
-        {preview.pageLoading && !preview.refreshing ? <Button variant="outline" size="sm" onClick={() => { void onCancelPage(); }}>取消</Button> : null}
-        <Button variant="outline" size="sm" disabled={!preview.canNavigateNext || preview.pageLoading || preview.refreshing}
-          onClick={() => { if (preview.session && listRef.current) pendingAnchor.current = captureWindowAnchor(listRef.current, preview.session, entries, virtual); const intent = captureSelectionIntent(); void onNextPage().then(oid => { if (oid) selectIfCurrent(oid, intent); }); }}>下一页</Button>
-      </span>
-    </div> : null}
+    {graphExpanded ? <Button data-testid="graph-collapse" variant="outline" size="sm" className="absolute right-3 top-2 z-10 shadow-pop"
+      aria-label="收起完整提交图" title="收起完整提交图" onClick={event => {
+        event.stopPropagation();
+        if (listRef.current) {
+          listRef.current.scrollLeft = 0;
+          listRef.current.focus({ preventScroll: true });
+        }
+        setGraphExpanded(false);
+      }}>收起图线</Button> : null}
+    </div>
   </nav>;
 }
 
@@ -372,111 +377,137 @@ function captureWindowAnchor(
   return { oid: lastCommit.commit.oid, offset: offset - scrollTop, repoId: session.repoId, generation: session.generation };
 }
 
-function GraphLanes({ graph, width, height, lanes, testId = "commit-graph" }: {
+function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, onExpand, isHead = false, testId = "commit-graph" }: {
   graph?: HistoryCommit["graph"];
   width: number;
   height: number;
   lanes?: number[];
+  expanded: boolean;
+  visibleLaneCount: number;
+  onExpand?: () => void;
+  /** Rings the node when the window's HEAD points at this commit. */
+  isHead?: boolean;
   testId?: string;
 }): React.JSX.Element {
-  const paths = React.useMemo(() => graph ? graphPaths(graph, ROW) : [], [graph]);
-  const hiddenNode = graph ? graph.lane >= MAX_VISIBLE_LANES : false;
-  const hiddenCount = graph?.hiddenLaneCount ?? 0;
+  const paths = React.useMemo(() => graph ? graphPaths(graph, ROW, expanded ? undefined : MAX_VISIBLE_LANES - 1) : [], [graph, expanded]);
+  const hiddenPaths = React.useMemo(() => graph && expanded ? hiddenThroughPaths(graph, ROW) : [], [graph, expanded]);
+  const hiddenNode = graph ? graph.lane >= visibleLaneCount : false;
+  const hiddenCount = expanded ? 0 : graph?.hiddenLaneCount ?? 0;
   const overflowX = graphColumnX();
-  const aboveMask = graph?.above ?? (lanes ?? []).reduce((mask, lane) => mask | (1 << lane), 0);
+  const aboveMask = graph?.above ?? (lanes ?? []).filter(lane => lane < MAX_VISIBLE_LANES).reduce((mask, lane) => mask | (1 << lane), 0);
   const belowMask = graph?.below ?? 0;
+  const aboveLanes = lanes ?? (graph ? (expanded ? graphAboveLanes(graph) : lanesInMask(graph.above)) : []);
+  const hiddenRanges = graph?.hiddenThroughRanges ?? [];
+  const drawnWidth = expanded ? width : overflowX;
   const signature = graph
-    ? `${graph.lane}/${graph.color}/${graph.above}/${graph.below}/${graph.hiddenLaneCount}/${graph.boundary ? 1 : 0}/${graph.segments.map(segment => `${segment.kind}:${segment.fromLane}-${segment.toLane}:${segment.color}`).join(",")}`
+    ? `${graph.lane}/${graph.color}/${graph.above}/${graph.below}/${graph.hiddenLaneCount}/${graph.boundary ? 1 : 0}/${graph.segments.map(segment => `${segment.kind}:${segment.fromLane}-${segment.toLane}:${segment.color}`).join(",")}/${hiddenRanges.map(range => `${range.startLane}-${range.endLane}`).join(",")}`
     : `above:${aboveMask}`;
-  return <svg width={width} height={height} aria-hidden="true" className="shrink-0"
-    data-testid={testId} data-graph-signature={signature} data-graph-lane={graph?.lane}
-    data-graph-visible-lanes={MAX_VISIBLE_LANES} data-graph-hidden-count={hiddenCount}
-    data-graph-boundary={graph?.boundary ? "true" : "false"} data-graph-above-mask={aboveMask} data-graph-below-mask={belowMask}>
-    <svg x={0} y={0} width={overflowX} height={height} viewBox={`0 0 ${overflowX} ${height}`} className="overflow-hidden">
-      {lanes?.map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
-      {paths.map((path, index) => <path key={index} d={path.d} style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
-      {graph && !hiddenNode ? <circle cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={3.5}
-        style={graph.boundary
-          ? { fill: "var(--bg)", stroke: "var(--warn)", strokeWidth: 1.8 }
-          : graph.parents.length > 1
-            ? { fill: "var(--bg)", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }
-            : { fill: `var(--l${graph.color})` }} /> : null}
+  return <span className="relative block shrink-0" style={{ width, height }}>
+    <svg width={width} height={height} aria-hidden="true" className="shrink-0"
+      data-testid={testId} data-graph-signature={signature} data-graph-lane={graph?.lane}
+      data-graph-expanded={expanded ? "true" : "false"} data-graph-width={width} data-graph-visible-lanes={visibleLaneCount} data-graph-hidden-count={hiddenCount}
+      data-graph-boundary={graph?.boundary ? "true" : "false"} data-graph-above-mask={aboveMask} data-graph-below-mask={belowMask}
+      data-graph-above-lanes={aboveLanes.join(",")} data-graph-hidden-through-ranges={hiddenRanges.map(item => `${item.startLane}-${item.endLane}`).join(",")}>
+      <svg x={0} y={0} width={drawnWidth} height={height} viewBox={`0 0 ${drawnWidth} ${height}`} className="overflow-hidden">
+        {lanes?.filter(lane => expanded || lane < MAX_VISIBLE_LANES).map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
+        {paths.map((path, index) => <path key={index} d={path.d} style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
+        {hiddenPaths.map(path => <path key={path.color} data-testid="graph-hidden-through" data-graph-color={path.color} d={path.d}
+          style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none" }} />)}
+        {graph && isHead && (!hiddenNode || expanded) ? <circle data-testid="graph-head-ring" cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={6.5}
+          style={{ fill: "none", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }} /> : null}
+        {graph && (!hiddenNode || expanded) ? <circle cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={3.5}
+          style={graph.boundary
+            ? { fill: "var(--bg)", stroke: "var(--warn)", strokeWidth: 1.8 }
+            : graph.parents.length > 1
+              ? { fill: "var(--bg)", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }
+              : { fill: `var(--l${graph.color})` }} /> : null}
+      </svg>
+      {hiddenCount > 0 && hiddenNode ? <circle cx={overflowX + 3} cy={ROW.mid} r={2.5} className="fill-fg3" /> : null}
     </svg>
-    {hiddenCount > 0 ? <>
-      {hiddenNode ? <circle cx={overflowX + 3} cy={ROW.mid} r={2.5} className="fill-fg3" /> : null}
-      <text x={overflowX + (hiddenNode ? 8 : 2)} y={ROW.mid + 3} className="fill-fg3 font-mono text-[9px]">+{hiddenCount}</text>
-    </> : null}
-  </svg>;
+    {hiddenCount > 0 ? <button type="button" data-testid="graph-expand" aria-label={`展开完整提交图，显示另外 ${hiddenCount} 条隐藏图线`}
+      title={`展开完整提交图；另有 ${hiddenCount} 条隐藏图线`} className="absolute z-[1] rounded px-0.5 font-mono text-[9px] leading-3 text-fg3 hover:bg-hover hover:text-fg"
+      style={{ left: overflowX + (hiddenNode ? 8 : 2), top: ROW.mid - 7 }} onClick={event => {
+        event.stopPropagation();
+        onExpand?.();
+      }}>+{hiddenCount}</button> : null}
+  </span>;
 }
 
 function graphColumnX(): number {
   return laneX(MAX_VISIBLE_LANES - 1, ROW) + ROW.x0;
 }
 
-function DayRow({ entry, width }: { entry: Extract<ListEntry, { kind: "day" }>; width: number }): React.JSX.Element {
-  return <div role="presentation" className="flex items-stretch gap-2 pr-3 pl-2" style={{ height: DAY_ROW_HEIGHT }}>
-    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={entry.lanes} testId="graph-day-bridge" />
+function DayRow({ entry, width, expanded, visibleLaneCount, contentMinWidth }: { entry: Extract<ListEntry, { kind: "day" }>; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number }): React.JSX.Element {
+  const lanes = expanded ? graphAboveLanes(entry.graph) : lanesInMask(entry.graph.above);
+  return <div role="presentation" className="flex items-stretch gap-2 pr-3 pl-2" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
+    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-day-bridge" />
     <span className="flex flex-1 items-end justify-between pb-1.5 text-xs">
       <span className="font-semibold text-fg2">{entry.label}</span>
-      <span className="text-fg3">窗口内本组 {entry.count} 条</span>
     </span>
   </div>;
 }
 
-function LastSeenDivider({ lanes, width }: { lanes: number[]; width: number }): React.JSX.Element {
+function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinWidth }: { graph: HistoryCommit["graph"]; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number }): React.JSX.Element {
+  const lanes = expanded ? graphAboveLanes(graph) : lanesInMask(graph.above);
   return <div role="separator" aria-label="上次看到这里" data-testid="history-divider" data-marker-kind="last-seen"
-    className="flex items-center gap-2 pr-3 pl-2 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT }}>
-    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} testId="graph-last-seen-bridge" />
+    className="flex items-center gap-2 pr-3 pl-2 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
+    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-last-seen-bridge" />
     <span className="h-px flex-1 bg-line" />
     <span>上次看到这里</span>
     <span className="h-px flex-1 bg-line" />
   </div>;
 }
 
-function CommitRow({ commit, graphWidth, refs, headReference, headOid, otherWorktrees, selected, onSelect }: {
+function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinWidth, onExpandGraph, refs, headReference, headOid, otherWorktrees, selected, onSelect }: {
   commit: HistoryCommit;
   graphWidth: number;
+  expanded: boolean;
+  visibleLaneCount: number;
+  contentMinWidth?: number;
+  onExpandGraph(): void;
   refs: RefInfo[];
   headReference: string | null;
   headOid: string | null;
-  otherWorktrees: { path: string; isMain: boolean }[];
+  otherWorktrees: OtherWorktreeHead[];
   selected: boolean;
   onSelect(): void;
 }): React.JSX.Element {
   const isMerge = commit.parents.length > 1;
   const date = parseGitTime(commit.committer.timestamp);
+  const isHead = headOid === commit.oid;
+  const labels = refLabels({ refs, headReference, isHeadCommit: isHead, otherWorktrees, foldRemotes: true });
   return <div id={rowId(commit.oid)} role="option" aria-selected={selected} tabIndex={-1}
     data-testid="commit-row" data-oid={commit.oid}
     title={[
       commit.graph.boundary ? "历史边界（浅克隆或父关系调整）" : undefined,
-      commit.graph.lane >= MAX_VISIBLE_LANES ? "此提交位于未显示的图线中" : undefined,
-      commit.graph.hiddenLaneCount > 0 ? `另有 ${commit.graph.hiddenLaneCount} 条图线未显示` : undefined,
+      !expanded && commit.graph.lane >= MAX_VISIBLE_LANES ? "此提交位于未显示的图线中" : undefined,
+      !expanded && commit.graph.hiddenLaneCount > 0 ? `另有 ${commit.graph.hiddenLaneCount} 条图线未显示` : undefined,
     ].filter(Boolean).join("；") || undefined}
     onClick={onSelect}
+    style={{ minWidth: contentMinWidth }}
     className={cn(
       "flex h-[60px] cursor-default items-stretch gap-2 rounded-[10px] pr-3 pl-2 outline-none",
       "hover:bg-hover focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]",
       selected && "bg-panel shadow-selected hover:bg-panel",
     )}>
-    <GraphLanes graph={commit.graph} width={graphWidth} height={ROW.rowHeight} />
+    <GraphLanes graph={commit.graph} width={graphWidth} height={ROW.rowHeight} expanded={expanded} visibleLaneCount={visibleLaneCount} onExpand={onExpandGraph} isHead={isHead} />
     <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
       <span className="flex min-w-0 items-center gap-1.5">
         {commit.isNewSinceLastSeen ? <span aria-label="上次查看后新增" data-testid="history-marker" data-marker-kind="new"
           title="上次查看后新增" className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
         {commit.graph.boundary ? <span title="历史边界（浅克隆或父关系调整）" className="shrink-0 rounded bg-sunken px-1 text-[10px] text-warn">边界</span> : null}
         {commit.graph.boundary ? <span className="sr-only">历史边界（浅克隆或父关系调整）。</span> : null}
-        {commit.graph.lane >= MAX_VISIBLE_LANES ? <span className="sr-only">此提交位于未显示的图线中。</span> : null}
-        {commit.graph.hiddenLaneCount > 0 ? <span className="sr-only">另有 {commit.graph.hiddenLaneCount} 条图线未显示。</span> : null}
-        <span className={cn("truncate text-sm", isMerge ? "font-normal text-fg3" : "font-medium text-fg")}>{commit.summary}</span>
+        {!expanded && commit.graph.lane >= MAX_VISIBLE_LANES ? <span className="sr-only">此提交位于未显示的图线中。</span> : null}
+        {!expanded && commit.graph.hiddenLaneCount > 0 ? <span className="sr-only">另有 {commit.graph.hiddenLaneCount} 条图线未显示。</span> : null}
+        <span className={cn("min-w-0 flex-1 truncate text-sm", isMerge ? "font-normal text-fg3" : "font-medium text-fg")}>{commit.summary}</span>
+        <span className="shrink-0 text-xs whitespace-nowrap text-fg3 tabular-nums">{date ? clock(date) : commit.committer.timestamp}</span>
       </span>
-      <span className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-fg3">
+      <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg3">
         <IdentityAvatar identity={commit.author} />
-        <span className="shrink-0 whitespace-nowrap">{commit.author.name} · {date ? clock(date) : commit.committer.timestamp}</span>
-        <RefTags refs={refs} headReference={headReference} isHeadCommit={headReference === null && headOid === commit.oid} limit={2} />
-        {otherWorktrees.slice(0, 2).map(worktree => <Badge key={worktree.path} variant="outline" size="sm" title={worktree.path}>
-          worktree HEAD · {repositoryName(worktree.path)}{worktree.isMain ? " · 主" : " · linked"}
-        </Badge>)}
-        {otherWorktrees.length > 2 ? <Badge variant="outline" size="sm">+{otherWorktrees.length - 2} worktree</Badge> : null}
+        <span className="min-w-0 flex-1 truncate">{commit.author.name}</span>
+        {labels.length ? <span data-testid="commit-ref-tags" className="flex max-w-[72%] min-w-0 shrink-0 items-center justify-end gap-1">
+          <RefChips labels={labels} limit={1} chipClassName={() => "max-w-[170px] shrink"} />
+        </span> : null}
       </span>
     </span>
   </div>;
@@ -489,24 +520,8 @@ export function RefTags({ refs, headReference, isHeadCommit, size = "sm", limit 
   size?: "sm" | "default";
   limit?: number;
 }): React.JSX.Element | null {
-  const ordered = [...refs].sort((a, b) => rank(a, headReference) - rank(b, headReference));
-  const shown = ordered.slice(0, limit);
-  if (!shown.length && !isHeadCommit) return null;
-  return <>
-    {isHeadCommit ? <Badge size={size} variant="head" className="shrink-0">HEAD</Badge> : null}
-    {shown.map(ref => {
-      const isHead = ref.name === headReference;
-      return <Badge key={ref.name} size={size} variant={isHead ? "head" : ref.kind === "tag" ? "outline" : "default"} className="min-w-0 shrink" title={ref.name}>
-        <span className="truncate">{shortRefName(ref.name)}{isHead ? " · HEAD" : ""}</span>
-      </Badge>;
-    })}
-    {ordered.length > shown.length ? <span className="shrink-0 text-[11px] text-fg3">+{ordered.length - shown.length}</span> : null}
-  </>;
-}
-
-function rank(ref: RefInfo, headReference: string | null): number {
-  if (ref.name === headReference) return 0;
-  return ref.kind === "localBranch" ? 1 : ref.kind === "remoteBranch" ? 2 : 3;
+  return <RefChips labels={refLabels({ refs, headReference, isHeadCommit: Boolean(isHeadCommit) })} size={size} limit={limit}
+    chipClassName={() => "max-w-[320px]"} />;
 }
 
 function LoadingRows({ onCancel }: { onCancel(): Promise<void> }): React.JSX.Element {

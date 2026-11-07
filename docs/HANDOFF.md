@@ -1,6 +1,6 @@
 # 交给 Agent：prompt 模板
 
-日期：2026-11-07。状态：P3-05 的文案与规则依据，尚未实现。行为口径见 [PRODUCT](PRODUCT.md)，界面见 [DESIGN](DESIGN.md)。本次修订区分浏览范围与操作 worktree，收紧清理范围，统一参考数据，并覆盖缺失上下文与多父 merge。
+日期：2026-11-07。状态：P3-05 已实现，本文是文案与规则依据；定向检查与实窗复制证据见[M3 记录](validation/m3-mvp.md)。行为口径见 [PRODUCT](PRODUCT.md)，界面见 [DESIGN](DESIGN.md)。本次修订区分浏览范围与操作 worktree，收紧清理范围，统一参考数据，并覆盖缺失上下文与多父 merge。
 
 ## 原则
 

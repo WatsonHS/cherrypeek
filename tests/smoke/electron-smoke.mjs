@@ -76,8 +76,8 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "branchesContaining", "cancelCommitDetails", "cancelHistoryRead", "cancelRefMergeStatus", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "getCommit", "getCoreStatus", "getLaunchRepository",
-    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "locateCommit", "onCoreStatusChanged", "openRepositorySession",
+    "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository",
+    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "locateCommit", "observeRepository", "onCoreStatusChanged", "onRepositoryObservationChanged", "openRepositorySession",
     "readDiff", "readHistoryPage", "readMergeCommits", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "searchCommits", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");

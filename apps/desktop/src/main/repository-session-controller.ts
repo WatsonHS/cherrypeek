@@ -13,8 +13,12 @@ import type {
   SearchPage,
   SearchIdentities,
   SearchPaths,
+  ActivityStats,
+  RepositoryObservation,
+  RefSnapshotDiff,
+  HandoffFacts,
 } from "../../../../packages/protocol/src/generated/server-message.js";
-import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery,
+import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
@@ -43,6 +47,10 @@ type ViewRecordedResponse = Extract<ServerResponseMessage["data"], { section: "r
 type ClosedResponse = Extract<ServerResponseMessage["data"], { section: "repositoryClosed" }>;
 type RecentResponse = Extract<ServerResponseMessage["data"], { section: "recentRepositories" }>;
 type SearchPathsResponse = Extract<ServerResponseMessage["data"], { section: "searchPaths" }>;
+type ActivityStatsResponse = Extract<ServerResponseMessage["data"], { section: "activityStats" }>;
+type RepositoryObservationResponse = Extract<ServerResponseMessage["data"], { section: "repositoryObservation" }>;
+type RefSnapshotDiffResponse = Extract<ServerResponseMessage["data"], { section: "refSnapshotDiff" }>;
+type HandoffFactsResponse = Extract<ServerResponseMessage["data"], { section: "handoffFacts" }>;
 type RepositoryResponse = Extract<ServerResponseMessage["data"], { section: "repository" }>;
 type CommitsResponse = Extract<ServerResponseMessage["data"], { section: "commits" }>;
 type HistoryPageResponse = Extract<ServerResponseMessage["data"], { section: "historyPage" }>;
@@ -79,6 +87,26 @@ interface ActiveSearchRequest {
   done: Promise<SearchPage | SearchIdentities | SearchPaths>;
 }
 
+interface ActiveActivityStats {
+  abort: AbortController;
+  done: Promise<ActivityStats>;
+}
+
+interface ActiveRepositoryObservation {
+  abort: AbortController;
+  done: Promise<RepositoryObservation>;
+}
+
+interface ActiveRefSnapshotDiff {
+  abort: AbortController;
+  done: Promise<RefSnapshotDiff>;
+}
+
+interface ActiveHandoffFacts {
+  abort: AbortController;
+  done: Promise<HandoffFacts>;
+}
+
 interface ActiveCommitDetailRequest {
   kind: "commit" | "files" | "merge" | "branches" | "diff";
   abort: AbortController;
@@ -100,6 +128,14 @@ export class RepositorySessionController {
   private activeMetadataIndexRequest?: ActiveMetadataIndexRequest;
   private searchIntent = 0;
   private activeSearchRequest?: ActiveSearchRequest;
+  private activityStatsIntent = 0;
+  private activeActivityStats?: ActiveActivityStats;
+  private observationIntent = 0;
+  private activeRepositoryObservation?: ActiveRepositoryObservation;
+  private refSnapshotDiffIntent = 0;
+  private activeRefSnapshotDiff?: ActiveRefSnapshotDiff;
+  private handoffFactsIntent = 0;
+  private activeHandoffFacts?: ActiveHandoffFacts;
   private commitDetailsIntent = 0;
   private activeCommitDetailRequest?: ActiveCommitDetailRequest;
   private currentCommitDetails?: { session: RepositorySessionInfo; details: CommitDetails };
@@ -107,6 +143,10 @@ export class RepositorySessionController {
 
   constructor(private readonly core: CoreProcess) {
     this.unsubscribeCore = core.subscribe(status => this.onCoreStatus(status));
+  }
+
+  getCurrentSessionIdentity(): { repoId: string; generation: string } | null {
+    return this.current ? { repoId: this.current.repoId, generation: this.current.generation } : null;
   }
 
   async open(path: unknown): Promise<RepositorySessionInfo> {
@@ -121,6 +161,8 @@ export class RepositorySessionController {
 
     const operation = ++this.operation;
     ++this.pageIntent;
+    await this.cancelPassiveRequestsForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
@@ -237,6 +279,7 @@ export class RepositorySessionController {
     if (this.activeSearchRequest) await this.cancelSearch();
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
     if (cursor !== null && (typeof cursor !== "string" || cursor.length === 0)) {
       throw new ProtocolClientError("INVALID_REQUEST", "历史页游标无效");
     }
@@ -244,6 +287,8 @@ export class RepositorySessionController {
       throw new ProtocolClientError("INVALID_REQUEST", `每页数量必须为 1 至 ${MAX_HISTORY_PAGE} 的整数`);
     }
     await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true));
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
+    await this.cancelPassiveRequestsForTransition();
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
@@ -269,8 +314,12 @@ export class RepositorySessionController {
     if (this.activeSearchRequest) await this.cancelSearch();
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
     if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
     await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true));
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
+    await this.cancelPassiveRequestsForTransition();
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
@@ -297,6 +346,8 @@ export class RepositorySessionController {
     if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能刷新", true);
     const operation = ++this.operation;
     ++this.pageIntent;
+    await this.cancelPassiveRequestsForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
     if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
@@ -366,6 +417,8 @@ export class RepositorySessionController {
     }
     const operation = ++this.operation;
     ++this.pageIntent;
+    await this.cancelPassiveRequestsForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
@@ -518,6 +571,132 @@ export class RepositorySessionController {
     return result as SearchPaths;
   }
 
+  async getActivityStats(input: unknown): Promise<ActivityStats> {
+    const params = validateActivityStatsParams(input);
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取活动统计", true);
+    const session = this.requireCurrent();
+    this.requireCapability("activityStats");
+    if (this.activeActivityStats) await this.cancelActivityStats();
+    this.ensureBackgroundRequestIdle("活动统计");
+    const intent = ++this.activityStatsIntent;
+    const abort = new AbortController();
+    const active: ActiveActivityStats = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readActivityStats(session, params, abort.signal);
+    this.activeActivityStats = active;
+    try {
+      const result = await active.done;
+      if (intent !== this.activityStatsIntent) throw new ProtocolClientError("CANCELLED", "活动统计已被更新请求取代", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeActivityStats === active) this.activeActivityStats = undefined;
+    }
+  }
+
+  async cancelActivityStats(): Promise<{ cancelled: boolean }> {
+    ++this.activityStatsIntent;
+    const active = this.activeActivityStats;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("活动统计已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeActivityStats === active) this.activeActivityStats = undefined;
+    return { cancelled: true };
+  }
+
+  async observeRepository(): Promise<RepositoryObservation> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能复核引用", true);
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryObservation");
+    if (this.activeRepositoryObservation) return this.activeRepositoryObservation.done;
+    this.ensureBackgroundRequestIdle("仓库引用复核");
+    const intent = ++this.observationIntent;
+    const abort = new AbortController();
+    const active: ActiveRepositoryObservation = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readRepositoryObservation(session, abort.signal);
+    this.activeRepositoryObservation = active;
+    try {
+      const result = await active.done;
+      if (intent !== this.observationIntent) throw new ProtocolClientError("CANCELLED", "仓库引用复核已取消", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeRepositoryObservation === active) this.activeRepositoryObservation = undefined;
+    }
+  }
+
+  async cancelRepositoryObservation(): Promise<{ cancelled: boolean }> {
+    ++this.observationIntent;
+    const active = this.activeRepositoryObservation;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("仓库引用复核已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeRepositoryObservation === active) this.activeRepositoryObservation = undefined;
+    return { cancelled: true };
+  }
+
+  async diffRefSnapshots(): Promise<RefSnapshotDiff> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取更新明细", true);
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryObservation");
+    if (this.activeRefSnapshotDiff) await this.cancelRefSnapshotDiff();
+    this.ensureBackgroundRequestIdle("引用更新明细");
+    const intent = ++this.refSnapshotDiffIntent;
+    const abort = new AbortController();
+    const active: ActiveRefSnapshotDiff = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readRefSnapshotDiff(session, abort.signal);
+    this.activeRefSnapshotDiff = active;
+    try {
+      const result = await active.done;
+      if (intent !== this.refSnapshotDiffIntent) throw new ProtocolClientError("CANCELLED", "更新明细已取消", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeRefSnapshotDiff === active) this.activeRefSnapshotDiff = undefined;
+    }
+  }
+
+  async cancelRefSnapshotDiff(): Promise<{ cancelled: boolean }> {
+    ++this.refSnapshotDiffIntent;
+    const active = this.activeRefSnapshotDiff;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("引用更新明细已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeRefSnapshotDiff === active) this.activeRefSnapshotDiff = undefined;
+    return { cancelled: true };
+  }
+
+  async getHandoffFacts(input: unknown): Promise<HandoffFacts> {
+    const params = validateHandoffFactsParams(input);
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能准备 Agent 交接资料", true);
+    const session = this.requireCurrent();
+    this.requireCapability("handoffFacts");
+    if (this.activeHandoffFacts) await this.cancelHandoffFacts();
+    this.ensureBackgroundRequestIdle("Agent 交接资料");
+    const intent = ++this.handoffFactsIntent;
+    const abort = new AbortController();
+    const active: ActiveHandoffFacts = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readHandoffFacts(session, params, abort.signal);
+    this.activeHandoffFacts = active;
+    try {
+      const result = await active.done;
+      if (intent !== this.handoffFactsIntent) throw new ProtocolClientError("CANCELLED", "Agent 交接资料已被新目标取代", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeHandoffFacts === active) this.activeHandoffFacts = undefined;
+    }
+  }
+
+  async cancelHandoffFacts(): Promise<{ cancelled: boolean }> {
+    ++this.handoffFactsIntent;
+    const active = this.activeHandoffFacts;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("Agent 交接资料已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeHandoffFacts === active) this.activeHandoffFacts = undefined;
+    return { cancelled: true };
+  }
+
   async cancelSearch(): Promise<{ cancelled: boolean }> {
     ++this.searchIntent;
     const active = this.activeSearchRequest;
@@ -598,6 +777,8 @@ export class RepositorySessionController {
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
     if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
     if (this.activeMergeStatus) await this.cancelRefMergeStatus();
+    if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
+    await this.cancelPassiveRequestsForTransition();
     if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
@@ -736,6 +917,23 @@ export class RepositorySessionController {
     }
   }
 
+  private ensureBackgroundRequestIdle(label: string): void {
+    if (this.activeOpen || this.activeRefresh || this.activeHistoryRead || this.activeSearchRequest || this.activeCommitDetailRequest ||
+      this.activeMergeStatus || this.activeMetadataIndexRequest || this.activeActivityStats || this.activeRepositoryObservation ||
+      this.activeRefSnapshotDiff || this.activeHandoffFacts) {
+      throw new ProtocolClientError("BUSY", `交互请求进行中，暂不能读取${label}`, true);
+    }
+  }
+
+  private async cancelPassiveRequestsForTransition(): Promise<void> {
+    await Promise.all([
+      this.cancelActivityStats(),
+      this.cancelRepositoryObservation(),
+      this.cancelRefSnapshotDiff(),
+      this.cancelHandoffFacts(),
+    ]);
+  }
+
   private validateOidForSession(oid: string, session: RepositorySessionInfo): void {
     const length = session.repository.objectFormat === "sha256" ? 64 : 40;
     if (oid.length !== length || !/^[0-9a-f]+$/i.test(oid)) throw new ProtocolClientError("INVALID_REQUEST", "提交 OID 必须与当前仓库对象格式一致");
@@ -766,6 +964,8 @@ export class RepositorySessionController {
     if (this.activeMergeStatus) await this.cancelRefMergeStatus();
     if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
     await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "搜索已取消历史页读取", true));
+    if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+    await this.cancelPassiveRequestsForTransition();
     if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
@@ -852,6 +1052,78 @@ export class RepositorySessionController {
     return paths;
   }
 
+  private async readActivityStats(session: RepositorySessionInfo, params: GetActivityStatsParams, signal: AbortSignal): Promise<ActivityStats> {
+    let stats: ActivityStats | undefined;
+    const completion = await this.core.request("getActivityStats", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS, signal, drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (stats || chunk.data.section !== "activityStats" || !chunk.done) throw invalidSessionResponse("活动统计响应无效");
+        stats = chunk.data.stats;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!stats || completion.coverage.complete !== stats.coverage.complete ||
+      completion.coverage.processed !== Math.min(stats.matchedCount, 0xffff_ffff) || completion.nextCursor !== null ||
+      stats.timeField !== params.query.timeField || stats.timeZone !== params.query.timeZone || !Number.isSafeInteger(stats.matchedCount) || stats.matchedCount < 0) {
+      throw invalidSessionResponse("活动统计响应不完整或查询口径不匹配");
+    }
+    return stats;
+  }
+
+  private async readRepositoryObservation(session: RepositorySessionInfo, signal: AbortSignal): Promise<RepositoryObservation> {
+    let observation: RepositoryObservation | undefined;
+    const completion = await this.core.request("observeRepository", {}, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS, signal, drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (observation || chunk.data.section !== "repositoryObservation" || !chunk.done) throw invalidSessionResponse("仓库引用复核响应无效");
+        observation = chunk.data.observation;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!observation || !completion.coverage.complete || completion.coverage.processed !== Math.min(observation.changeCount, 0xffff_ffff) || completion.nextCursor !== null ||
+      !observation.generation || !Number.isSafeInteger(observation.observedAtUnixMs) || !Number.isSafeInteger(observation.changeCount) || observation.changeCount < 0) {
+      throw invalidSessionResponse("仓库引用复核响应不完整");
+    }
+    return observation;
+  }
+
+  private async readRefSnapshotDiff(session: RepositorySessionInfo, signal: AbortSignal): Promise<RefSnapshotDiff> {
+    let diff: RefSnapshotDiff | undefined;
+    const completion = await this.core.request("diffRefSnapshots", {}, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS, signal, drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (diff || chunk.data.section !== "refSnapshotDiff" || !chunk.done) throw invalidSessionResponse("更新明细响应无效");
+        diff = chunk.data.diff;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!diff || !completion.coverage.complete || completion.coverage.processed !== diff.changes.length || completion.nextCursor !== null ||
+      diff.fromGeneration !== session.generation || !diff.toGeneration || !Number.isSafeInteger(diff.observedAtUnixMs)) {
+      throw invalidSessionResponse("更新明细响应与当前浏览快照不匹配");
+    }
+    return diff;
+  }
+
+  private async readHandoffFacts(session: RepositorySessionInfo, params: GetHandoffFactsParams, signal: AbortSignal): Promise<HandoffFacts> {
+    let facts: HandoffFacts | undefined;
+    const completion = await this.core.request("getHandoffFacts", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS, signal, drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (facts || chunk.data.section !== "handoffFacts" || !chunk.done) throw invalidSessionResponse("交接资料响应无效");
+        facts = chunk.data.facts;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!facts || !completion.coverage.complete || completion.coverage.processed !== 1 || completion.nextCursor !== null ||
+      facts.observedAtUnixMs !== session.observedAtUnixMs || facts.repository.path !== session.repository.path ||
+      JSON.stringify(facts.scope) !== JSON.stringify(session.scope)) throw invalidSessionResponse("交接资料与当前浏览快照不匹配");
+    return facts;
+  }
+
   private async readMetadataIndexStatus(session: RepositorySessionInfo, signal: AbortSignal): Promise<MetadataIndexStatus> {
     return this.readMetadataIndexRequest(session, "getMetadataIndexStatus", {}, signal);
   }
@@ -905,6 +1177,8 @@ export class RepositorySessionController {
   async close(): Promise<{ closed: true }> {
     const operation = ++this.operation;
     ++this.pageIntent;
+    await this.cancelPassiveRequestsForTransition();
+    if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
@@ -979,6 +1253,7 @@ export class RepositorySessionController {
     ++this.mergeIntent;
     ++this.metadataIndexIntent;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("应用正在关闭"));
+    void this.cancelPassiveRequestsForTransition();
     this.activeOpen = undefined;
     this.current = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);
@@ -1290,6 +1565,7 @@ export class RepositorySessionController {
     this.activeCommitDetailRequest = undefined;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("核心已退出"));
     ++this.metadataIndexIntent;
+    void this.cancelPassiveRequestsForTransition();
     this.activeOpen = undefined;
     this.current = undefined;
     this.currentCommitDetails = undefined;
@@ -1354,6 +1630,24 @@ function validateSearchPathsParams(value: unknown): ListSearchPathsParams {
     throw new ProtocolClientError("INVALID_REQUEST", "路径建议请求参数无效");
   }
   return value as unknown as ListSearchPathsParams;
+}
+
+function validateActivityStatsParams(value: unknown): GetActivityStatsParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["query"]) || !isSearchQuery(value.query)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "活动统计请求参数无效");
+  }
+  return value as unknown as GetActivityStatsParams;
+}
+
+function validateHandoffFactsParams(value: unknown): GetHandoffFactsParams {
+  const validNullableText = (item: unknown, maxBytes: number) => item === null || typeof item === "string" && item.length > 0 &&
+    Buffer.byteLength(item, "utf8") <= maxBytes && !item.includes("\0");
+  if (!isRecord(value) || !hasExactKeys(value, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"]) ||
+    !validNullableText(value.branchRef, 16 * 1024) || !validNullableText(value.operationWorktreeId, 256) || !validNullableText(value.staleWorktreeId, 256) ||
+    !(value.selectedOid === null || typeof value.selectedOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.selectedOid))) {
+    throw new ProtocolClientError("INVALID_REQUEST", "Agent 交接资料请求参数无效");
+  }
+  return value as unknown as GetHandoffFactsParams;
 }
 
 function validateGetCommitParams(value: unknown): GetCommitParams {
@@ -1496,13 +1790,14 @@ function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean 
   if (!isRecord(value) || !validOid(value.oid) || !Array.isArray(value.parents) || !value.parents.every(validOid)) return false;
   const commit = value as unknown as HistoryCommit;
   const graph = (value as Record<string, unknown>).graph;
-  if (!isRecord(graph) || !hasExactKeys(graph, ["lane", "color", "parents", "boundary", "above", "below", "hiddenLaneCount", "segments"])) return false;
+  if (!isRecord(graph) || !hasExactKeys(graph, ["lane", "color", "parents", "boundary", "above", "below", "hiddenLaneCount", "hiddenThroughRanges", "segments"])) return false;
   if (!Number.isInteger(graph.lane) || (graph.lane as number) < 0 || (graph.lane as number) > 16_383 ||
     graph.color !== (graph.lane as number) % 6 || typeof graph.boundary !== "boolean" ||
     !Number.isInteger(graph.above) || (graph.above as number) < 0 || (graph.above as number) > 63 ||
     !Number.isInteger(graph.below) || (graph.below as number) < 0 || (graph.below as number) > 63 ||
     !Number.isInteger(graph.hiddenLaneCount) || (graph.hiddenLaneCount as number) < 0 || (graph.hiddenLaneCount as number) > 16_384 ||
     !Array.isArray(graph.parents) || graph.parents.length > 128 || !graph.parents.every(validOid) ||
+    !Array.isArray(graph.hiddenThroughRanges) || graph.hiddenThroughRanges.length > 8192 ||
     !Array.isArray(graph.segments) || graph.segments.length > 256) return false;
   const parents = graph.parents as string[];
   if (graph.boundary !== (parents.length !== commit.parents.length || parents.some((parent, index) => parent !== commit.parents[index]))) return false;
@@ -1514,6 +1809,17 @@ function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean 
   const hiddenLanes = new Set<number>();
   const segments = new Set<string>();
   if (lane >= 6) hiddenLanes.add(lane);
+  let previousRangeEnd = 5;
+  for (const range of graph.hiddenThroughRanges) {
+    if (!isRecord(range) || !hasExactKeys(range, ["startLane", "endLane"]) ||
+      !Number.isInteger(range.startLane) || (range.startLane as number) < 6 || (range.startLane as number) > 16_383 ||
+      !Number.isInteger(range.endLane) || (range.endLane as number) < (range.startLane as number) || (range.endLane as number) > 16_383 ||
+      (range.startLane as number) <= previousRangeEnd) return false;
+    const start = range.startLane as number;
+    const end = range.endLane as number;
+    for (let hiddenLane = start; hiddenLane <= end; hiddenLane += 1) hiddenLanes.add(hiddenLane);
+    previousRangeEnd = end;
+  }
   for (const rawSegment of graph.segments) {
     if (!isRecord(rawSegment) || !hasExactKeys(rawSegment, ["kind", "fromLane", "toLane", "color"])) return false;
     const { kind, fromLane, toLane, color } = rawSegment;
@@ -1521,7 +1827,7 @@ function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean 
       !Number.isInteger(fromLane) || (fromLane as number) < 0 || (fromLane as number) > 16_383 ||
       !Number.isInteger(toLane) || (toLane as number) < 0 || (toLane as number) > 16_383 ||
       !Number.isInteger(color) || (color as number) < 0 || (color as number) >= 6 ||
-      (fromLane as number) >= 6 && (toLane as number) >= 6) return false;
+      kind === "through" && (fromLane as number) >= 6) return false;
     const segmentKey = `${kind}:${fromLane}:${toLane}`;
     if (segments.has(segmentKey) || kind === "through" && fromLane !== toLane) return false;
     segments.add(segmentKey);

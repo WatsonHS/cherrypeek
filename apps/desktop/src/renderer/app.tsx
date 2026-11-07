@@ -1,9 +1,11 @@
 import * as React from "react";
 import { X } from "lucide-react";
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
-import type { RepositorySessionInfo } from "../../../../packages/protocol/src/generated/server-message.js";
+import type { ActivityStats, HandoffFacts, RefSnapshotDiff, RepositoryObservation, RepositorySessionInfo, SearchIdentity } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryScope } from "../../../../packages/protocol/src/generated/server-message.js";
+import type { GetHandoffFactsParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryNavigation } from "../../../../packages/protocol/src/repository-session.js";
+import type { HandoffTarget } from "./components/handoff-dialog.js";
 import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
 import { CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
@@ -17,8 +19,10 @@ import { repositoryName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
+import { DEFAULT_SEARCH_QUERY } from "./lib/metadata-search-store.js";
 import { CommitDetailStore } from "./lib/commit-detail-store.js";
 import { Button } from "./components/ui/button.js";
+import { HandoffDialog } from "./components/handoff-dialog.js";
 
 export interface RepositoryActions {
   path: string;
@@ -165,11 +169,30 @@ export function App(): React.JSX.Element {
   const detailView = React.useSyncExternalStore(detailStore.subscribe, detailStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
+  const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
   const [path, setPathState] = React.useState("");
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
   const [historyLocation, setHistoryLocation] = React.useState<{ oid: string; sessionKey: string; loading: boolean; cancelled: boolean; error: string | null } | null>(null);
+  const [activityStats, setActivityStats] = React.useState<{ key: string; value: ActivityStats } | null>(null);
+  const [activityError, setActivityError] = React.useState<string | null>(null);
+  const [activityLoading, setActivityLoading] = React.useState(false);
+  const activityBusy = React.useRef(false);
+  const activityIntent = React.useRef(0);
+  const activityTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityWanted = React.useRef<{ key: string; signature: string; query: SearchQuery } | null>(null);
+  const activityLoadedSignature = React.useRef<string | null>(null);
+  const activityScheduleRef = React.useRef<(delay?: number) => void>(() => undefined);
+  const [observation, setObservation] = React.useState<RepositoryObservation | null>(null);
+  const observationRef = React.useRef<RepositoryObservation | null>(null);
+  const [refDiff, setRefDiff] = React.useState<RefSnapshotDiff | null>(null);
+  const [refDiffLoading, setRefDiffLoading] = React.useState(false);
+  const [refDiffError, setRefDiffError] = React.useState<string | null>(null);
+  const refDiffIntent = React.useRef(0);
+  const observationIntent = React.useRef(0);
+  const [handoffOpen, setHandoffOpen] = React.useState(false);
+  const [handoffTarget, setHandoffTarget] = React.useState<HandoffTarget | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
@@ -181,6 +204,184 @@ export function App(): React.JSX.Element {
   const loadSearchIdentities = React.useCallback((field: SearchTimeField, text: string) => { void searchStore.loadIdentities(field, text); }, [searchStore]);
   const loadSearchPaths = React.useCallback((text: string) => { void searchStore.loadPaths(text); }, [searchStore]);
   const currentSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  const displayedQuery = historyLocation ? DEFAULT_SEARCH_QUERY : searchView.query;
+  const displayedQueryRef = React.useRef(displayedQuery);
+  displayedQueryRef.current = displayedQuery;
+  const activityKey = `${currentSessionKey ?? "offline"}:${JSON.stringify(displayedQuery)}`;
+  const indexKey = (index: typeof view.metadataIndex) => index
+    ? `${index.snapshotKey ?? ""}:${index.state}:${index.coverage.processed}:${index.coverage.complete}` : "no-index";
+  const activityIndexKey = `${indexKey(view.metadataIndex)}:${searchView.active && searchView.window ? indexKey(searchView.window.index) : "no-search-index"}`;
+  const loadActivity = React.useCallback(async () => {
+    const wanted = activityWanted.current;
+    const session = store.getView().session;
+    if (!activityStatsSupported || !session || !wanted || document.visibilityState !== "visible" || !ready) return;
+    if (activityBusy.current || activityLoadedSignature.current === wanted.signature) return;
+    activityBusy.current = true;
+    const intent = ++activityIntent.current;
+    const requestKey = wanted.key;
+    const requestSignature = wanted.signature;
+    setActivityLoading(true);
+    setActivityError(null);
+    const result = await settle(window.commitScope.getActivityStats({ query: wanted.query }));
+    const currentSession = store.getView().session;
+    const currentKey = currentSession
+      ? `${currentSession.repoId}:${currentSession.generation}:${JSON.stringify(displayedQueryRef.current)}` : null;
+    const stillCurrent = intent === activityIntent.current && activityWanted.current?.key === requestKey
+      && currentKey === requestKey && document.visibilityState === "visible";
+    const temporaryWait = !result.ok && (result.error.code === "BUSY" || result.error.code === "CANCELLED");
+    if (stillCurrent) {
+      if (result.ok) {
+        setActivityStats({ key: requestKey, value: result.value });
+        activityLoadedSignature.current = requestSignature;
+        setActivityLoading(false);
+      } else if (temporaryWait) {
+        setActivityLoading(true);
+      } else {
+        setActivityError(result.error.message);
+        setActivityLoading(false);
+      }
+    }
+    activityBusy.current = false;
+    if (stillCurrent && temporaryWait) {
+      activityScheduleRef.current(2_000);
+    } else if (document.visibilityState === "visible" && (intent !== activityIntent.current || activityWanted.current?.signature !== requestSignature)) {
+      activityScheduleRef.current(500);
+    }
+  }, [activityStatsSupported, ready, store]);
+  const scheduleActivity = React.useCallback((delay = 0) => {
+    if (activityTimer.current && delay > 0) return;
+    if (activityTimer.current) clearTimeout(activityTimer.current);
+    activityTimer.current = null;
+    if (!activityStatsSupported || !store.getView().session || !activityWanted.current || !ready || document.visibilityState !== "visible") return;
+    activityTimer.current = setTimeout(() => {
+      activityTimer.current = null;
+      void loadActivity();
+    }, delay);
+  }, [activityStatsSupported, loadActivity, ready, store]);
+  activityScheduleRef.current = scheduleActivity;
+  React.useEffect(() => {
+    const session = store.getView().session;
+    const key = session ? `${session.repoId}:${session.generation}:${JSON.stringify(displayedQuery)}` : activityKey;
+    const signature = `${key}:${activityIndexKey}`;
+    const previous = activityWanted.current;
+    activityWanted.current = session ? { key, signature, query: displayedQuery } : null;
+    if (!session) return;
+    if (previous && previous.key !== key) {
+      activityIntent.current += 1;
+      activityLoadedSignature.current = null;
+      setActivityError(null);
+      if (activityBusy.current) {
+        setActivityLoading(true);
+        void window.commitScope.cancelActivityStats();
+      }
+      scheduleActivity(0);
+    } else if (!previous || previous.signature !== signature || (ready && !activityBusy.current && activityLoadedSignature.current !== signature && !activityError)) {
+      if (previous && activityBusy.current) return;
+      setActivityError(null);
+      scheduleActivity(previous ? 500 : 0);
+    }
+  }, [activityError, activityIndexKey, activityKey, currentSessionKey, displayedQuery, ready, scheduleActivity, store]);
+  React.useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        activityIntent.current += 1;
+        if (activityTimer.current) clearTimeout(activityTimer.current);
+        activityTimer.current = null;
+        void window.commitScope.cancelActivityStats();
+        setActivityLoading(false);
+      } else scheduleActivity(0);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [scheduleActivity]);
+  React.useEffect(() => {
+    activityIntent.current += 1;
+    activityLoadedSignature.current = null;
+    setActivityStats(null);
+    setActivityError(null);
+    setActivityLoading(false);
+    void window.commitScope.cancelActivityStats();
+    observationRef.current = null;
+    setObservation(null);
+    setRefDiff(null);
+    setRefDiffError(null);
+    setRefDiffLoading(false);
+    refDiffIntent.current += 1;
+    observationIntent.current += 1;
+    void window.commitScope.cancelRefSnapshotDiff();
+    void window.commitScope.cancelRepositoryObservation();
+  }, [currentSessionKey]);
+  React.useEffect(() => () => {
+    if (activityTimer.current) clearTimeout(activityTimer.current);
+    activityWanted.current = null;
+    activityIntent.current += 1;
+    void window.commitScope.cancelActivityStats();
+  }, []);
+  React.useEffect(() => window.commitScope.onRepositoryObservationChanged(event => {
+    const session = store.getView().session;
+    if (!session || event.repoId !== session.repoId || event.browsingGeneration !== session.generation) return;
+    if (observationRef.current?.generation !== event.observation.generation) {
+      refDiffIntent.current += 1;
+      setRefDiff(null);
+      setRefDiffError(null);
+      setRefDiffLoading(false);
+    }
+    observationRef.current = event.observation;
+    setObservation(event.observation);
+  }), [store]);
+  const loadRefDiff = React.useCallback(async () => {
+    if (!view.session || !observation) return;
+    const intent = ++refDiffIntent.current;
+    setRefDiffLoading(true);
+    setRefDiffError(null);
+    const result = await settle(window.commitScope.diffRefSnapshots());
+    if (intent !== refDiffIntent.current) return;
+    if (result.ok && observationRef.current?.generation === result.value.toGeneration) setRefDiff(result.value);
+    else if (result.ok) setRefDiffError("引用观察已更新，请重新比较。");
+    else setRefDiffError(result.error.message);
+    setRefDiffLoading(false);
+  }, [view.session, observation]);
+  const cancelRefDiff = React.useCallback(() => {
+    refDiffIntent.current += 1;
+    observationIntent.current += 1;
+    setRefDiffLoading(false);
+    void window.commitScope.cancelRefSnapshotDiff();
+    void window.commitScope.cancelRepositoryObservation();
+  }, []);
+  const observeNow = React.useCallback(async () => {
+    if (!view.session) return;
+    const intent = ++observationIntent.current;
+    setRefDiffError(null);
+    setRefDiffLoading(true);
+    const result = await settle(window.commitScope.observeRepository());
+    if (intent !== observationIntent.current) return;
+    if (!result.ok) setRefDiffError(result.error.message);
+    else if (observationRef.current?.generation !== result.value.generation) {
+      refDiffIntent.current += 1;
+      void window.commitScope.cancelRefSnapshotDiff();
+      observationRef.current = result.value;
+      setObservation(result.value);
+      setRefDiff(null);
+      setRefDiffLoading(false);
+    }
+    setRefDiffLoading(false);
+  }, [view.session]);
+  const openHandoff = React.useCallback((target: HandoffTarget | null) => {
+    setHandoffTarget(target);
+    setHandoffOpen(true);
+  }, []);
+  const loadHandoffFacts = React.useCallback(async (target: HandoffTarget | null, _intent: number): Promise<HandoffFacts | null> => {
+    if (!view.session) return null;
+    const params: GetHandoffFactsParams = {
+      branchRef: target?.kind === "branch" ? target.ref : null,
+      selectedOid: target?.kind === "commit" ? target.oid : null,
+      operationWorktreeId: target?.kind === "worktree" && !target.stale ? target.id : null,
+      staleWorktreeId: target?.kind === "worktree" && target.stale ? target.id : null,
+    };
+    const result = await settle(window.commitScope.getHandoffFacts(params));
+    if (!result.ok) throw new Error(result.error.message);
+    return result.value;
+  }, [view.session]);
   const returnToSearch = React.useCallback(async (queryOverride?: SearchQuery): Promise<boolean> => {
     const location = historyLocation;
     const point = searchStore.getLocationReturn();
@@ -277,6 +478,12 @@ export function App(): React.JSX.Element {
     const transition = searchStore.updateQuery(query, composing);
     if (transition.wasActive && !transition.active) void restoreHistoryAfterSearch();
   }, [historyLocation, returnToSearch, searchStore, view.session, store, selectedOid, restoreHistoryAfterSearch]);
+  const addActivityAuthor = React.useCallback((identity: SearchIdentity) => {
+    const query = searchStore.getView().query;
+    const exists = query.authors.some(item => item.name === identity.name && item.email === identity.email);
+    updateSearchQuery({ ...query, authors: exists ? query.authors.filter(item => item.name !== identity.name || item.email !== identity.email)
+      : [...query.authors, { name: identity.name, email: identity.email }] });
+  }, [searchStore, updateSearchQuery]);
   const finishSearchComposition = React.useCallback((composing: boolean) => {
     if (composing) searchStore.beginComposition();
     else searchStore.finishComposition();
@@ -545,11 +752,15 @@ export function App(): React.JSX.Element {
   const loadSearchPrevious = React.useCallback(() => { void searchStore.loadPrevious(); }, [searchStore]);
   const retrySearch = React.useCallback(() => { void searchStore.retry(); }, [searchStore]);
 
-  return <div className="flex h-full min-h-0 flex-col">
+  return <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
     {view.repository
       ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
-        searchView={searchView} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths} />
+        searchView={searchView} activityQuery={displayedQuery} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths}
+        observation={observation} refDiff={refDiff} refDiffLoading={refDiffLoading} refDiffError={refDiffError} onLoadRefDiff={loadRefDiff} onCancelRefDiff={cancelRefDiff} onObserve={observeNow}
+        activityStats={activityStats?.key === activityKey ? activityStats.value : null} activityLoading={activityLoading} activityError={activityError}
+        onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
+        onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {alerts.map(message => <p key={message} className="m-0">{message}</p>)}
@@ -568,7 +779,7 @@ export function App(): React.JSX.Element {
       </div> : null}
     </div> : null}
     {view.repository
-      ? <div className="flex min-h-0 flex-1 flex-col">
+      ? <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {historyLocation ? <div role="status" data-testid="history-location-banner" className="flex flex-wrap items-center gap-2 border-b border-line bg-bg px-4 py-2 text-xs text-fg2">
           <span className="min-w-0 flex-1" aria-live="polite">
             {historyLocation.loading ? "正在当前历史快照中定位…" : historyLocation.error ? `定位失败：${historyLocation.error}` : historyLocation.cancelled
@@ -582,14 +793,13 @@ export function App(): React.JSX.Element {
             {locationReturn?.partial ? `返回已发现 ${locationReturn.matchedCount} 个结果` : `返回 ${locationReturn?.matchedCount ?? 0} 个结果`}
           </Button>
         </div> : null}
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
           {searchView.active
             ? <SearchResultList view={searchView} onSelect={selectDisplayedCommit} onAnchor={setSearchAnchor}
               onNext={loadSearchNext} onPrevious={loadSearchPrevious} onRetry={retrySearch} />
             : <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit}
             captureSelectionIntent={captureSelectionIntent} selectIfCurrent={selectIfCurrent} onCancel={actions.cancel}
             onRetry={actions.retry} onRetryPage={actions.retryPage} onCancelPage={actions.cancelPage}
-            onPreviousPage={actions.previousPage} onNextPage={actions.nextPage}
             onLoadWindowEdge={direction => store.loadWindowEdge(direction)}
             onViewportAnchor={setViewportAnchor}
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
@@ -603,7 +813,7 @@ export function App(): React.JSX.Element {
             onLoadContaining={() => detailStore.loadContaining()} onRetryContaining={() => detailStore.retryContaining()}
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
-            selectedTab={detailTab} onTabChange={setDetailTab}
+            selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}
@@ -626,12 +836,12 @@ export function App(): React.JSX.Element {
             }} />
         </div>
       </div>
-      : <OpenScreen preview={view} actions={actions} recent={recent} />}
+      : <OpenScreen preview={view} actions={actions} recent={recent} onOpenHandoff={() => openHandoff(null)} />}
     <StatusBar status={status} preview={statusView}
       previewStatus={searchView.active ? searchView.window
         ? searchView.window.coverage.complete ? `搜索最终结果 · ${searchView.window.matchedCount} 条` : `搜索部分结果 · ${searchView.window.matchedCount} 条`
         : searchView.loading ? "正在搜索当前历史范围…" : "搜索尚未读取到结果" : undefined}
-      searchBusy={searchRequestBusy} timeField={searchView.active ? searchView.query.timeField : undefined}
+      searchBusy={searchRequestBusy}
       onIndexAction={async action => {
         const applied = await store.controlMetadataIndex(action);
         const index = store.getView().metadataIndex;
@@ -640,6 +850,9 @@ export function App(): React.JSX.Element {
           await searchStore.retry();
         }
       }} />
+    <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} target={handoffTarget} sessionKey={detailSessionKey}
+      onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
+      onCopyText={text => window.commitScope.copyText(text)} />
   </div>;
 }
 

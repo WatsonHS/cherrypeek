@@ -31,7 +31,7 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
     setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false); setPathVisible(false);
     onQueryChange({ ...query, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
   };
-  return <div className="flex min-w-[200px] flex-[0_1_320px] items-center gap-1.5">
+  return <div className="topbar-search-controls flex min-w-0 flex-[1_1_220px] items-center gap-1">
     <label className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-lg bg-sunken px-2.5 text-fg3" title="搜索完整提交消息、身份、OID 和日期">
       <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
       <span className="sr-only">搜索提交消息</span>

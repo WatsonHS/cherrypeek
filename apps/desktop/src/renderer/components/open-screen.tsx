@@ -1,5 +1,5 @@
 import * as React from "react";
-import { FolderOpen, LoaderCircle, TriangleAlert } from "lucide-react";
+import { ExternalLink, FolderOpen, LoaderCircle, TriangleAlert } from "lucide-react";
 import type { RepositoryView } from "../lib/repository-session-store.js";
 import type { RepositoryActions } from "../app.js";
 import { errorTitle } from "../lib/errors.js";
@@ -7,7 +7,7 @@ import { Button } from "./ui/button.js";
 import { PathField } from "./path-field.js";
 import { RecentRepositories, type RecentState } from "./recent-repositories.js";
 
-export function OpenScreen({ preview, actions, recent }: { preview: RepositoryView; actions: RepositoryActions; recent: RecentState }): React.JSX.Element {
+export function OpenScreen({ preview, actions, recent, onOpenHandoff }: { preview: RepositoryView; actions: RepositoryActions; recent: RecentState; onOpenHandoff(): void }): React.JSX.Element {
   const loading = preview.state === "loading" || preview.opening !== null;
   return <main className="min-h-0 flex-1 overflow-auto px-6 pt-16 pb-14">
     <div className="mx-auto flex max-w-[760px] flex-col gap-7">
@@ -19,9 +19,12 @@ export function OpenScreen({ preview, actions, recent }: { preview: RepositoryVi
           </div>
           <p className="m-0 text-sm text-fg2">只读查看本地 Git 历史。浏览分支和 worktree 都不会 checkout。</p>
         </div>
-        <Button size="lg" onClick={() => { void actions.choose(); }} disabled={loading}>
-          <FolderOpen className="size-4" strokeWidth={1.75} />选择仓库目录…
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="lg" onClick={onOpenHandoff}><ExternalLink className="size-4" />交给 Agent</Button>
+          <Button size="lg" onClick={() => { void actions.choose(); }} disabled={loading}>
+            <FolderOpen className="size-4" strokeWidth={1.75} />选择仓库目录…
+          </Button>
+        </div>
       </div>
 
       {loading ? <div className="flex items-center gap-3 rounded-xl bg-sunken px-4 py-3 text-[13px] text-fg2">

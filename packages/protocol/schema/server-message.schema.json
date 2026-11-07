@@ -1,6 +1,112 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ActivityAuthor": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "email": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email",
+        "count"
+      ],
+      "type": "object"
+    },
+    "ActivityDay": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "day": {
+          "maxLength": 10,
+          "minLength": 10,
+          "type": "string"
+        }
+      },
+      "required": [
+        "day",
+        "count"
+      ],
+      "type": "object"
+    },
+    "ActivityStats": {
+      "additionalProperties": false,
+      "properties": {
+        "authors": {
+          "items": {
+            "$ref": "#/definitions/ActivityAuthor"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "authorsTruncated": {
+          "type": "boolean"
+        },
+        "coverage": {
+          "$ref": "#/definitions/MetadataIndexCoverage"
+        },
+        "days": {
+          "items": {
+            "$ref": "#/definitions/ActivityDay"
+          },
+          "maxItems": 3660,
+          "type": "array"
+        },
+        "daysTruncated": {
+          "type": "boolean"
+        },
+        "index": {
+          "$ref": "#/definitions/MetadataIndexStatus"
+        },
+        "matchedCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "queryKey": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "timeField": {
+          "$ref": "#/definitions/SearchTimeField"
+        },
+        "timeZone": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "queryKey",
+        "coverage",
+        "index",
+        "matchedCount",
+        "timeField",
+        "timeZone",
+        "days",
+        "daysTruncated",
+        "authors",
+        "authorsTruncated"
+      ],
+      "type": "object"
+    },
     "BranchesContainingResult": {
       "additionalProperties": false,
       "properties": {
@@ -52,7 +158,10 @@
         "metadataIndex",
         "metadataSearch",
         "historyGraph",
-        "commitDetails"
+        "commitDetails",
+        "activityStats",
+        "repositoryObservation",
+        "handoffFacts"
       ],
       "type": "string"
     },
@@ -800,6 +909,256 @@
       ],
       "type": "object"
     },
+    "HandoffFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "ahead": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DefaultBase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "behind": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RefInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branchCommits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "branchCommitsCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "branchCommitsTruncated": {
+          "type": "boolean"
+        },
+        "changedFiles": {
+          "items": {
+            "$ref": "#/definitions/ChangedFile"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "changedFilesCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changedFilesTruncated": {
+          "type": "boolean"
+        },
+        "checkedOutBy": {
+          "items": {
+            "$ref": "#/definitions/WorktreeInfo"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "checkedOutByComplete": {
+          "type": "boolean"
+        },
+        "mergeParentGroups": {
+          "items": {
+            "$ref": "#/definitions/HandoffParentGroup"
+          },
+          "maxItems": 127,
+          "type": "array"
+        },
+        "mergeParentGroupsTruncated": {
+          "type": "boolean"
+        },
+        "mergeStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MergeStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operationWorktree": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorktreeInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overlapComplete": {
+          "type": "boolean"
+        },
+        "overlapPaths": {
+          "items": {
+            "$ref": "#/definitions/GitPath"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "overlapTruncated": {
+          "type": "boolean"
+        },
+        "repository": {
+          "$ref": "#/definitions/RepositoryInfo"
+        },
+        "scope": {
+          "$ref": "#/definitions/RepositoryScope"
+        },
+        "selectedCommit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CommitSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "staleWorktree": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorktreeInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "windowWorktree": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorktreeInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "observedAtUnixMs",
+        "repository",
+        "scope",
+        "windowWorktree",
+        "branch",
+        "base",
+        "operationWorktree",
+        "selectedCommit",
+        "ahead",
+        "behind",
+        "overlapPaths",
+        "overlapComplete",
+        "overlapTruncated",
+        "branchCommits",
+        "branchCommitsTruncated",
+        "branchCommitsCount",
+        "changedFiles",
+        "changedFilesTruncated",
+        "changedFilesCount",
+        "mergeParentGroups",
+        "mergeParentGroupsTruncated",
+        "mergeStatus",
+        "checkedOutBy",
+        "checkedOutByComplete",
+        "staleWorktree"
+      ],
+      "type": "object"
+    },
+    "HandoffParentGroup": {
+      "additionalProperties": false,
+      "properties": {
+        "commits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "parentIndex": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "parentIndex",
+        "totalCount",
+        "commits",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "HistoryCommit": {
       "additionalProperties": false,
       "properties": {
@@ -877,6 +1236,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "hiddenThroughRanges": {
+          "items": {
+            "$ref": "#/definitions/HistoryGraphLaneRange"
+          },
+          "maxItems": 8192,
+          "type": "array"
+        },
         "lane": {
           "format": "uint16",
           "maximum": 16383,
@@ -906,7 +1272,30 @@
         "above",
         "below",
         "hiddenLaneCount",
+        "hiddenThroughRanges",
         "segments"
+      ],
+      "type": "object"
+    },
+    "HistoryGraphLaneRange": {
+      "additionalProperties": false,
+      "properties": {
+        "endLane": {
+          "format": "uint16",
+          "maximum": 16383,
+          "minimum": 6,
+          "type": "integer"
+        },
+        "startLane": {
+          "format": "uint16",
+          "maximum": 16383,
+          "minimum": 6,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startLane",
+        "endLane"
       ],
       "type": "object"
     },
@@ -1327,6 +1716,155 @@
       ],
       "type": "object"
     },
+    "RefSnapshotChange": {
+      "additionalProperties": false,
+      "properties": {
+        "addedCommits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "addedCommitsTruncated": {
+          "type": "boolean"
+        },
+        "addedCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "change": {
+          "$ref": "#/definitions/RefSnapshotChangeKind"
+        },
+        "deletedMergeStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MergeStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/RefKind"
+        },
+        "name": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "newOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replacedCount": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "change",
+        "oldOid",
+        "newOid",
+        "addedCount",
+        "addedCommits",
+        "addedCommitsTruncated",
+        "replacedCount",
+        "deletedMergeStatus"
+      ],
+      "type": "object"
+    },
+    "RefSnapshotChangeKind": {
+      "enum": [
+        "fastForward",
+        "rewritten",
+        "created",
+        "deleted",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RefSnapshotDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/definitions/RefSnapshotChange"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "fromGeneration": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "toGeneration": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "worktreesChanged": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fromGeneration",
+        "toGeneration",
+        "observedAtUnixMs",
+        "changes",
+        "truncated",
+        "complete",
+        "worktreesChanged"
+      ],
+      "type": "object"
+    },
     "RepositoryInfo": {
       "additionalProperties": false,
       "properties": {
@@ -1426,6 +1964,50 @@
         "worktreesTruncated",
         "defaultBase",
         "observedAtUnixMs"
+      ],
+      "type": "object"
+    },
+    "RepositoryObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "changeCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changedRefCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refsTruncated": {
+          "type": "boolean"
+        },
+        "worktreesChanged": {
+          "type": "boolean"
+        },
+        "worktreesTruncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "generation",
+        "observedAtUnixMs",
+        "changedRefCount",
+        "worktreesChanged",
+        "changeCount",
+        "refsTruncated",
+        "worktreesTruncated"
       ],
       "type": "object"
     },
@@ -1627,6 +2209,74 @@
           "required": [
             "section",
             "paths"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "section": {
+              "const": "activityStats",
+              "type": "string"
+            },
+            "stats": {
+              "$ref": "#/definitions/ActivityStats"
+            }
+          },
+          "required": [
+            "section",
+            "stats"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "$ref": "#/definitions/RepositoryObservation"
+            },
+            "section": {
+              "const": "repositoryObservation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "observation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "diff": {
+              "$ref": "#/definitions/RefSnapshotDiff"
+            },
+            "section": {
+              "const": "refSnapshotDiff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "diff"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "facts": {
+              "$ref": "#/definitions/HandoffFacts"
+            },
+            "section": {
+              "const": "handoffFacts",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "facts"
           ],
           "type": "object"
         },

@@ -44,7 +44,7 @@ function makeCommit(sessionInfo) {
     oid: sessionInfo.repository.headOid,
     parents: [], summary: "summary", summaryTruncated: false, textLossy: false,
     isNewSinceLastSeen: false,
-    graph: { lane: 0, color: 0, parents: [], boundary: false, above: 0, below: 0, hiddenLaneCount: 0, segments: [] },
+    graph: { lane: 0, color: 0, parents: [], boundary: false, above: 0, below: 0, hiddenLaneCount: 0, hiddenThroughRanges: [], segments: [] },
     author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
     committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" },
   };
@@ -54,7 +54,7 @@ function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex", "commitDetails"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex", "activityStats", "commitDetails"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -467,6 +467,53 @@ test("commit details requests validate inputs, preserve captured time, and drain
   controller.dispose();
 });
 
+test("foreground details cancel and drain activity stats before taking the request slot", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  openRequest.terminal = true;
+  await opening;
+
+  const query = { authors: [], caseSensitive: false, committers: [], fromTimestamp: null, message: "",
+    oidPrefix: "", path: null, timeField: "author", timeZone: "UTC", toTimestamp: null };
+  const statsRead = controller.getActivityStats({ query });
+  const statsRequest = await waitFor(() => core.requests[1]);
+  assert.equal(statsRequest.method, "getActivityStats");
+
+  const oid = opened.repository.headOid;
+  const detailsRead = controller.getCommit({ oid });
+  assert.equal(statsRequest.options.signal.aborted, true, "the passive stats request is cancelled first");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(core.requests.length, 2, "details must wait for the cancelled stats request's terminal drain");
+
+  const stats = { authors: [], authorsTruncated: false, coverage: { processed: 1, complete: true }, days: [], daysTruncated: false,
+    index: { snapshotKey: "snapshot-a", state: "complete", coverage: { processed: 1, complete: true }, diskBytes: 1, quotaBytes: 1000, error: null },
+    matchedCount: 1, queryKey: "query-a", timeField: "author", timeZone: "UTC" };
+  send(statsRequest, { section: "activityStats", stats });
+  statsRequest.terminal = true;
+  await assert.rejects(statsRead, error => error.code === "CANCELLED");
+
+  const detailsRequest = await waitFor(() => core.requests[2]);
+  assert.equal(detailsRequest.method, "getCommit");
+  assert.equal(detailsRequest.options.signal.aborted, false);
+  assert.equal(core.requests.filter(request => !request.terminal).length, 1, "only the foreground request remains in flight");
+  const value = {
+    commit: { oid, parents: [], summary: "summary", summaryTruncated: false, textLossy: false,
+      author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
+      committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" } },
+    message: "summary", messageWithoutTrailers: "summary", trailers: [], refs: [], worktrees: [],
+    observedAtUnixMs: opened.observedAtUnixMs, refsTruncated: false, worktreesTruncated: false,
+    update: { state: "unaffected", reason: null, checkedAtUnixMs: 200 },
+  };
+  send(detailsRequest, { section: "commitDetails", details: value });
+  detailsRequest.terminal = true;
+  assert.deepEqual(await detailsRead, value);
+  controller.dispose();
+});
+
 test("merge-status generations cancel and drain superseded and explicitly cancelled requests", async () => {
   const core = makeCore();
   const controller = new RepositorySessionController(core);
@@ -581,6 +628,16 @@ test("history pages validate headers, cursor metadata, and page-local coverage",
     done: false, sequence: 0, repoId: opened.repoId, generation: opened.generation,
     coverage: { complete: false, processed: 0 }, nextCursor: null });
   const commit = makeCommit(opened);
+  const hiddenParent = "b".repeat(40);
+  commit.parents = [hiddenParent];
+  commit.graph = {
+    lane: 8, color: 2, parents: [hiddenParent], boundary: false, above: 0, below: 0, hiddenLaneCount: 5,
+    hiddenThroughRanges: [{ startLane: 6, endLane: 7 }],
+    segments: [
+      { kind: "incoming", fromLane: 9, toLane: 8, color: 3 },
+      { kind: "outgoing", fromLane: 8, toLane: 10, color: 4 },
+    ],
+  };
   request.options.onChunk({ data: { section: "historyPage", commits: [commit], offset: 0, pageSize: 100,
     cursor: "cursor-0", previousCursor: null, hasMore: true, newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null }, done: true, sequence: 1,
     repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 1 }, nextCursor: "cursor-1" });

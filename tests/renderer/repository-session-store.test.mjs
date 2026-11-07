@@ -101,7 +101,7 @@ function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, pre
   return {
     ...preview,
     commits: pageCommits.map(commit => ({ ...commit, graph: commit.graph ?? {
-      lane: 0, color: 0, parents: commit.parents, boundary: false, above: 0, below: 0, hiddenLaneCount: 0, segments: [],
+      lane: 0, color: 0, parents: commit.parents, boundary: false, above: 0, below: 0, hiddenLaneCount: 0, hiddenThroughRanges: [], segments: [],
     } })),
     offset,
     pageSize: 200,

@@ -35,7 +35,10 @@ export type Capability =
   | "metadataIndex"
   | "metadataSearch"
   | "historyGraph"
-  | "commitDetails";
+  | "commitDetails"
+  | "activityStats"
+  | "repositoryObservation"
+  | "handoffFacts";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -57,6 +60,22 @@ export type ResponseData =
   | {
       paths: SearchPaths;
       section: "searchPaths";
+    }
+  | {
+      section: "activityStats";
+      stats: ActivityStats;
+    }
+  | {
+      observation: RepositoryObservation;
+      section: "repositoryObservation";
+    }
+  | {
+      diff: RefSnapshotDiff;
+      section: "refSnapshotDiff";
+    }
+  | {
+      facts: HandoffFacts;
+      section: "handoffFacts";
     }
   | {
       details: CommitDetails;
@@ -161,12 +180,10 @@ export type MetadataIndexState =
   "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
 export type SearchTimeField = "author" | "committer";
 export type SearchPathKind = "file" | "directory";
+export type RefSnapshotChangeKind = "fastForward" | "rewritten" | "created" | "deleted" | "unknown";
+export type MergeStatus = "merged" | "notMerged" | "unavailable";
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
-export type CommitUpdateReason = "scopeUnavailable" | "noLongerReachable";
-export type CommitUpdateState = "unaffected" | "affected" | "unknown";
 export type ChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "typeChanged";
-export type FileDiffKind = "text" | "binary" | "gitlink" | "lfs" | "tooLarge";
-export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -175,9 +192,12 @@ export type RepositoryScope =
   | {
       worktree: string;
     };
+export type CommitUpdateReason = "scopeUnavailable" | "noLongerReachable";
+export type CommitUpdateState = "unaffected" | "affected" | "unknown";
+export type FileDiffKind = "text" | "binary" | "gitlink" | "lfs" | "tooLarge";
+export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
-export type MergeStatus = "merged" | "notMerged" | "unavailable";
 
 export interface CoreReady {
   capabilities: Capability[];
@@ -283,6 +303,546 @@ export interface GitPath {
   rawHex: string;
   textLossy: boolean;
 }
+export interface ActivityStats {
+  /**
+   * @maxItems 500
+   */
+  authors: ActivityAuthor[];
+  authorsTruncated: boolean;
+  coverage: MetadataIndexCoverage;
+  /**
+   * @maxItems 3660
+   */
+  days: ActivityDay[];
+  daysTruncated: boolean;
+  index: MetadataIndexStatus;
+  matchedCount: number;
+  queryKey: string;
+  timeField: SearchTimeField;
+  timeZone: string;
+}
+export interface ActivityAuthor {
+  count: number;
+  email: string;
+  name: string;
+}
+export interface ActivityDay {
+  count: number;
+  day: string;
+}
+export interface RepositoryObservation {
+  changeCount: number;
+  changedRefCount: number;
+  generation: string;
+  observedAtUnixMs: number;
+  refsTruncated: boolean;
+  worktreesChanged: boolean;
+  worktreesTruncated: boolean;
+}
+export interface RefSnapshotDiff {
+  /**
+   * @maxItems 2000
+   */
+  changes: RefSnapshotChange[];
+  complete: boolean;
+  fromGeneration: string;
+  observedAtUnixMs: number;
+  toGeneration: string;
+  truncated: boolean;
+  worktreesChanged: boolean;
+}
+export interface RefSnapshotChange {
+  /**
+   * @maxItems 20
+   */
+  addedCommits:
+    | []
+    | [CommitSummary]
+    | [CommitSummary, CommitSummary]
+    | [CommitSummary, CommitSummary, CommitSummary]
+    | [CommitSummary, CommitSummary, CommitSummary, CommitSummary]
+    | [CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary]
+    | [CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary]
+    | [CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary, CommitSummary]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ]
+    | [
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary,
+        CommitSummary
+      ];
+  addedCommitsTruncated: boolean;
+  addedCount: number | null;
+  change: RefSnapshotChangeKind;
+  deletedMergeStatus: MergeStatus | null;
+  kind: RefKind;
+  name: string;
+  newOid: string | null;
+  oldOid: string | null;
+  replacedCount: number | null;
+}
+export interface HandoffFacts {
+  ahead: number | null;
+  base: DefaultBase | null;
+  behind: number | null;
+  branch: RefInfo | null;
+  /**
+   * @maxItems 50
+   */
+  branchCommits: CommitSummary[];
+  branchCommitsCount: number | null;
+  branchCommitsTruncated: boolean;
+  /**
+   * @maxItems 50
+   */
+  changedFiles: ChangedFile[];
+  changedFilesCount: number | null;
+  changedFilesTruncated: boolean;
+  /**
+   * @maxItems 128
+   */
+  checkedOutBy: WorktreeInfo[];
+  checkedOutByComplete: boolean;
+  /**
+   * @maxItems 127
+   */
+  mergeParentGroups: HandoffParentGroup[];
+  mergeParentGroupsTruncated: boolean;
+  mergeStatus: MergeStatus | null;
+  observedAtUnixMs: number;
+  operationWorktree: WorktreeInfo | null;
+  overlapComplete: boolean;
+  /**
+   * @maxItems 20
+   */
+  overlapPaths:
+    | []
+    | [GitPath]
+    | [GitPath, GitPath]
+    | [GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath, GitPath]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ]
+    | [
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath,
+        GitPath
+      ];
+  overlapTruncated: boolean;
+  repository: RepositoryInfo;
+  scope: RepositoryScope;
+  selectedCommit: CommitSummary | null;
+  staleWorktree: WorktreeInfo | null;
+  windowWorktree: WorktreeInfo | null;
+}
+export interface DefaultBase {
+  name: string;
+  oid: string;
+}
+export interface RefInfo {
+  kind: RefKind;
+  name: string;
+  oid: string;
+  peeledOid: string | null;
+  symbolicTarget: string | null;
+}
+export interface ChangedFile {
+  additions: number | null;
+  binary: boolean;
+  deletions: number | null;
+  gitlink: boolean;
+  newMode: string;
+  newOid: string | null;
+  newPath: GitPath | null;
+  oldMode: string;
+  oldOid: string | null;
+  oldPath: GitPath | null;
+  similarity: number | null;
+  status: ChangedFileStatus;
+}
+export interface WorktreeInfo {
+  available: boolean;
+  headOid: string | null;
+  headReference: string | null;
+  id: string;
+  isBare: boolean;
+  isCurrent: boolean;
+  isDetached: boolean;
+  isMain: boolean;
+  lockedReason: string | null;
+  path: string;
+  prunableReason: string | null;
+}
+export interface HandoffParentGroup {
+  /**
+   * @maxItems 50
+   */
+  commits: CommitSummary[];
+  parentIndex: number;
+  totalCount: number | null;
+  truncated: boolean;
+}
+export interface RepositoryInfo {
+  commonDir: string;
+  gitDir: string;
+  headOid: string | null;
+  headReference: string | null;
+  isBare: boolean;
+  isShallow: boolean;
+  objectFormat: string;
+  path: string;
+  worktreePath: string | null;
+}
 export interface CommitDetails {
   commit: CommitSummary;
   message: string;
@@ -304,13 +864,6 @@ export interface CommitDetails {
   worktrees: WorktreeInfo[];
   worktreesTruncated: boolean;
 }
-export interface RefInfo {
-  kind: RefKind;
-  name: string;
-  oid: string;
-  peeledOid: string | null;
-  symbolicTarget: string | null;
-}
 export interface Trailer {
   key: string;
   value: string;
@@ -319,19 +872,6 @@ export interface CommitUpdate {
   checkedAtUnixMs: number;
   reason: CommitUpdateReason | null;
   state: CommitUpdateState;
-}
-export interface WorktreeInfo {
-  available: boolean;
-  headOid: string | null;
-  headReference: string | null;
-  id: string;
-  isBare: boolean;
-  isCurrent: boolean;
-  isDetached: boolean;
-  isMain: boolean;
-  lockedReason: string | null;
-  path: string;
-  prunableReason: string | null;
 }
 export interface ChangedFilesPage {
   /**
@@ -346,20 +886,6 @@ export interface ChangedFilesPage {
   parentIndex: number | null;
   parentOid: string | null;
   totalFiles: number;
-}
-export interface ChangedFile {
-  additions: number | null;
-  binary: boolean;
-  deletions: number | null;
-  gitlink: boolean;
-  newMode: string;
-  newOid: string | null;
-  newPath: GitPath | null;
-  oldMode: string;
-  oldOid: string | null;
-  oldPath: GitPath | null;
-  similarity: number | null;
-  status: ChangedFileStatus;
 }
 export interface ChangeOverview {
   additions: number;
@@ -433,17 +959,6 @@ export interface FileDiff {
   textLossy: boolean;
   truncated: boolean;
 }
-export interface RepositoryInfo {
-  commonDir: string;
-  gitDir: string;
-  headOid: string | null;
-  headReference: string | null;
-  isBare: boolean;
-  isShallow: boolean;
-  objectFormat: string;
-  path: string;
-  worktreePath: string | null;
-}
 export interface RepositorySessionInfo {
   generation: string;
   observedAtUnixMs: number;
@@ -497,6 +1012,10 @@ export interface HistoryGraph {
   boundary: boolean;
   color: number;
   hiddenLaneCount: number;
+  /**
+   * @maxItems 8192
+   */
+  hiddenThroughRanges: HistoryGraphLaneRange[];
   lane: number;
   /**
    * @maxItems 128
@@ -506,6 +1025,10 @@ export interface HistoryGraph {
    * @maxItems 256
    */
   segments: HistoryGraphSegment[];
+}
+export interface HistoryGraphLaneRange {
+  endLane: number;
+  startLane: number;
 }
 export interface HistoryGraphSegment {
   color: number;
@@ -526,10 +1049,6 @@ export interface RepositoryNavigation {
    */
   worktrees: WorktreeInfo[];
   worktreesTruncated: boolean;
-}
-export interface DefaultBase {
-  name: string;
-  oid: string;
 }
 export interface RefMergeStatusResult {
   defaultBase: DefaultBase | null;

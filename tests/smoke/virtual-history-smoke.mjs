@@ -134,15 +134,6 @@ try {
   await page.waitForFunction(expected => document.querySelector('[data-testid="commit-row"][data-oid="' + CSS.escape(expected) + '"]'), headOid, { timeout: 10_000 });
   const head = page.locator(`[data-testid="commit-row"][data-oid="${headOid}"]`);
   await head.click();
-  const previousButton = page.getByRole("button", { name: "上一页", exact: true });
-  const nextButton = page.getByRole("button", { name: "下一页", exact: true });
-  assert.equal(await previousButton.isDisabled(), true, "selecting HEAD must activate the first history page");
-  const countBeforeNavigation = (await readWindowMetrics(page)).loadedCount;
-  await nextButton.click();
-  await page.waitForFunction(expected => document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === expected,
-    orderedOids[200], { timeout: 5000 });
-  assert.equal((await readWindowMetrics(page)).loadedCount, countBeforeNavigation,
-    "navigating to the already loaded next page must not request or append another page");
   await list.evaluate(element => { element.scrollTop = 0; });
   await page.waitForFunction(expected => document.querySelector('[data-testid="commit-row"][data-oid="' + CSS.escape(expected) + '"]'), headOid, { timeout: 5000 });
   await page.locator(`[data-testid="commit-row"][data-oid="${headOid}"]`).click();

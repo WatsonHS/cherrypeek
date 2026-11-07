@@ -1,4 +1,6 @@
-use commitscope_core::{HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind};
+use commitscope_core::{
+    HistoryGraph, HistoryGraphLaneRange, HistoryGraphSegment, HistoryGraphSegmentKind,
+};
 use std::mem::size_of;
 
 pub const MAX_ACTIVE_SLOTS: usize = 16_384;
@@ -7,6 +9,7 @@ pub const CHECKPOINT_INTERVAL: u32 = 200;
 pub const CHECKPOINT_LIMIT: usize = 64;
 pub const CHECKPOINT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 256;
+const MAX_HIDDEN_THROUGH_RANGES: usize = 8192;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LayoutState {
@@ -137,21 +140,26 @@ impl LayoutState {
         }
 
         let mut segments = Vec::new();
+        let mut hidden_through = Vec::new();
         for (slot, target) in before.iter().enumerate() {
             if slot < after.len()
                 && target.is_some()
                 && target.as_deref() != Some(oid)
                 && after[slot] == *target
             {
-                push_segment(
-                    &mut segments,
-                    HistoryGraphSegment {
-                        kind: HistoryGraphSegmentKind::Through,
-                        from_lane: slot as u16,
-                        to_lane: slot as u16,
-                        color: (slot % 6) as u8,
-                    },
-                )?;
+                if slot < 6 {
+                    push_segment(
+                        &mut segments,
+                        HistoryGraphSegment {
+                            kind: HistoryGraphSegmentKind::Through,
+                            from_lane: slot as u16,
+                            to_lane: slot as u16,
+                            color: (slot % 6) as u8,
+                        },
+                    )?;
+                } else {
+                    hidden_through.push(slot);
+                }
             }
         }
         for slot in &incoming {
@@ -177,6 +185,8 @@ impl LayoutState {
             )?;
         }
 
+        let hidden_through_ranges = lane_ranges(&hidden_through)?;
+
         if after.len() > MAX_ACTIVE_SLOTS {
             return Err(LayoutError::ResourceLimit);
         }
@@ -196,6 +206,7 @@ impl LayoutState {
             above,
             below,
             hidden_lane_count: hidden_slots.len() as u16,
+            hidden_through_ranges,
             segments,
         };
         *self = std::mem::take(&mut next);
@@ -221,14 +232,43 @@ fn push_segment(
     segments: &mut Vec<HistoryGraphSegment>,
     segment: HistoryGraphSegment,
 ) -> Result<(), LayoutError> {
-    if segment.from_lane >= 6 && segment.to_lane >= 6 {
-        return Ok(());
-    }
     if segments.len() >= MAX_SEGMENTS {
         return Err(LayoutError::ResourceLimit);
     }
     segments.push(segment);
     Ok(())
+}
+
+fn lane_ranges(lanes: &[usize]) -> Result<Vec<HistoryGraphLaneRange>, LayoutError> {
+    let mut ranges = Vec::new();
+    let mut iter = lanes.iter().copied();
+    let Some(mut start) = iter.next() else {
+        return Ok(ranges);
+    };
+    let mut end = start;
+    for lane in iter {
+        if lane == end + 1 {
+            end = lane;
+            continue;
+        }
+        if ranges.len() >= MAX_HIDDEN_THROUGH_RANGES {
+            return Err(LayoutError::ResourceLimit);
+        }
+        ranges.push(HistoryGraphLaneRange {
+            start_lane: start as u16,
+            end_lane: end as u16,
+        });
+        start = lane;
+        end = lane;
+    }
+    if ranges.len() >= MAX_HIDDEN_THROUGH_RANGES {
+        return Err(LayoutError::ResourceLimit);
+    }
+    ranges.push(HistoryGraphLaneRange {
+        start_lane: start as u16,
+        end_lane: end as u16,
+    });
+    Ok(ranges)
 }
 
 #[cfg(test)]
@@ -341,12 +381,10 @@ mod tests {
         assert_eq!(graph.color, 0);
         assert_eq!(graph.above, 0b11_1111);
         assert_eq!(graph.hidden_lane_count, 1);
-        assert!(
-            graph
-                .segments
-                .iter()
-                .all(|segment| { segment.from_lane < 6 || segment.to_lane < 6 })
-        );
+        assert!(graph.hidden_through_ranges.is_empty());
+        assert!(graph.segments.iter().all(|segment| {
+            segment.kind != HistoryGraphSegmentKind::Through || segment.from_lane < 6
+        }));
 
         let mut wide = LayoutState {
             active_slots: (0..256).map(|slot| Some(format!("x{slot}"))).collect(),
@@ -355,6 +393,55 @@ mod tests {
         let graph = wide.advance("new-root", &[], &[]).unwrap();
         assert_eq!(graph.lane, 256);
         assert_eq!(graph.color, 4);
+    }
+
+    #[test]
+    fn hidden_through_ranges_and_hidden_to_hidden_edges_are_preserved() {
+        let mut state = LayoutState {
+            active_slots: (0..10).map(|slot| Some(format!("target-{slot}"))).collect(),
+            ..LayoutState::default()
+        };
+        let through = state
+            .advance(
+                "current",
+                &parents(&["new-parent"]),
+                &parents(&["new-parent"]),
+            )
+            .unwrap();
+        assert_eq!(
+            through.hidden_through_ranges,
+            [HistoryGraphLaneRange {
+                start_lane: 6,
+                end_lane: 9,
+            }]
+        );
+        assert!(through.segments.iter().all(|segment| {
+            segment.kind != HistoryGraphSegmentKind::Through || segment.from_lane < 6
+        }));
+
+        let mut state = LayoutState {
+            active_slots: (0..8)
+                .map(|slot| Some(if slot == 7 { "current" } else { "other" }.to_owned()))
+                .collect(),
+            ..LayoutState::default()
+        };
+        let graph = state
+            .advance(
+                "current",
+                &parents(&["hidden-parent"]),
+                &parents(&["hidden-parent"]),
+            )
+            .unwrap();
+        assert!(graph.segments.iter().any(|segment| {
+            segment.kind == HistoryGraphSegmentKind::Incoming
+                && segment.from_lane == 7
+                && segment.to_lane == 7
+        }));
+        assert!(graph.segments.iter().any(|segment| {
+            segment.kind == HistoryGraphSegmentKind::Outgoing
+                && segment.from_lane == 7
+                && segment.to_lane >= 6
+        }));
     }
 
     #[test]

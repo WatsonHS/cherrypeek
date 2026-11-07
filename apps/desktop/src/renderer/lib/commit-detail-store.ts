@@ -42,7 +42,10 @@ export class CommitDetailStore {
   private requestIntent = 0;
   private activeRequest?: Promise<unknown>;
   private activeKind?: "details" | "files" | "merge" | "containing" | "diff";
+  private retryKind?: "details" | "files" | "merge" | "containing" | "diff";
   private requestTail: Promise<void> = Promise.resolve();
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private retryWake?: () => void;
 
   constructor(private readonly api: CommitDetailApi) {}
 
@@ -90,7 +93,7 @@ export class CommitDetailStore {
     this.view = { ...this.view, fileParentIndex: parentIndex, fileOffset: offset,
       files: { ...this.view.files, state: "loading", error: null }, diff: idle(), diffKey: null };
     this.emit();
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("files");
     if (!this.isCurrent(selection, sequence, sessionKey, oid)) return;
     await this.readFiles(selection, sequence, sessionKey, oid, parentIndex, offset);
     if (this.isCurrent(selection, sequence, sessionKey, oid)) await this.loadDefaultMergeIfNeeded(selection, sequence, sessionKey, oid);
@@ -105,7 +108,7 @@ export class CommitDetailStore {
     this.view = { ...this.view, mergeParentIndex: parentIndex, mergeOffset: offset,
       merge: { ...this.view.merge, state: "loading", error: null } };
     this.emit();
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("merge");
     if (!this.isCurrent(selection, sequence, sessionKey, oid)) return;
     await this.readMerge(selection, sequence, sessionKey, oid, parentIndex, offset);
   }
@@ -117,7 +120,7 @@ export class CommitDetailStore {
     const sequence = ++this.sequenceIntent;
     this.view = { ...this.view, containing: { ...this.view.containing, state: "loading", error: null } };
     this.emit();
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("containing");
     if (!this.isCurrent(selection, sequence, sessionKey, oid)) return;
     this.view = { ...this.view, containing: { ...this.view.containing, state: "loading", error: null } };
     this.emit();
@@ -134,7 +137,7 @@ export class CommitDetailStore {
     const sequence = ++this.sequenceIntent;
     this.view = { ...this.view, details: { ...this.view.details, state: "loading", error: null } };
     this.emit();
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("details");
     if (!this.isCurrent(selection, sequence, sessionKey, oid)) return;
     await this.readDetails(selection, sequence, sessionKey, oid, true);
     if (this.isCurrent(selection, sequence, sessionKey, oid)) {
@@ -179,7 +182,7 @@ export class CommitDetailStore {
     const selection = this.selectionIntent;
     const sequence = ++this.sequenceIntent;
     this.update({ ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key });
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("diff");
     if (!this.isCurrent(selection, sequence, sessionKey, oid) || this.view.diffKey !== key) return;
     this.view = { ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key };
     this.emit();
@@ -210,18 +213,23 @@ export class CommitDetailStore {
   }
 
   async cancel(): Promise<void> {
+    const selection = this.selectionIntent;
+    const sessionKey = this.view.sessionKey;
+    const oid = this.view.oid;
     ++this.sequenceIntent;
+    const sequence = this.sequenceIntent;
     ++this.requestIntent;
     await this.cancelActiveRequest();
-    if (this.view.details.state === "loading" && this.view.details.value) {
-      this.update({ ...this.view, details: { ...this.view.details, state: "ready" } });
-    } else if (this.view.details.state === "loading") {
-      this.update({ ...this.view, details: idle() });
-    }
+    if (selection !== this.selectionIntent || sequence !== this.sequenceIntent || sessionKey !== this.view.sessionKey || oid !== this.view.oid) return;
+    this.update({
+      ...this.view,
+      details: settled(this.view.details), files: settled(this.view.files), merge: settled(this.view.merge),
+      containing: settled(this.view.containing), diff: settled(this.view.diff),
+    });
   }
 
   private async loadSelection(selection: number, sequence: number, sessionKey: string | null, oid: string | undefined): Promise<void> {
-    await this.cancelActiveRequest();
+    await this.cancelActiveRequest("details");
     if (!sessionKey || !oid || !this.isCurrent(selection, sequence, sessionKey, oid)) return;
     const details = await this.readDetails(selection, sequence, sessionKey, oid, false);
     if (!details || !this.isCurrent(selection, sequence, sessionKey, oid)) return;
@@ -285,33 +293,53 @@ export class CommitDetailStore {
     accept: (value: T) => void,
     quietCancel = false,
   ): Promise<T | null> {
+    const retryKind = this.retryKind;
+    this.cancelRetryWait();
+    if (retryKind && retryKind !== kind) this.settleLoadingKind(retryKind);
     const requestIntent = ++this.requestIntent;
     const work = this.requestTail.catch(() => undefined).then(async () => {
       if (!this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
-      const pending = request();
-      this.activeRequest = pending;
-      this.activeKind = kind;
-      try {
-        const result = await pending;
-        if (!this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
-        if (!result.ok) {
-          if (result.error.code === "CANCELLED" && quietCancel) return null;
-          this.setError(kind, result.error);
-          return null;
+      const retryDelays = [250, 500, 1_000, 1_000];
+      let retries = 0;
+      while (this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) {
+        let pending: Promise<RepositorySessionResult<T>> | undefined;
+        let requestError: { code: string; message: string } | null = null;
+        try {
+          pending = request();
+          this.activeRequest = pending;
+          this.activeKind = kind;
+          const result = await pending;
+          if (!this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
+          if (result.ok) {
+            accept(result.value);
+            return result.value;
+          }
+          requestError = result.error;
+        } catch (error) {
+          if (!this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
+          requestError = normalizeError(error);
+        } finally {
+          if (pending && this.activeRequest === pending) {
+            this.activeRequest = undefined;
+            this.activeKind = undefined;
+          }
         }
-        accept(result.value);
-        return result.value;
-      } catch (error) {
-        if (!this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
-        const normalized = normalizeError(error);
-        if (!(quietCancel && normalized.code === "CANCELLED")) this.setError(kind, normalized);
+        if (!requestError || !this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
+        if (requestError.code === "BUSY" && retries < retryDelays.length) {
+          this.retryKind = kind;
+          const resume = await this.waitForRetry(retryDelays[retries++]!);
+          if (this.retryKind === kind) this.retryKind = undefined;
+          if (!resume || !this.isRequestCurrent(selection, sequence, requestIntent, sessionKey, oid)) return null;
+          continue;
+        }
+        if (!(quietCancel && requestError.code === "CANCELLED")) {
+          this.setError(kind, requestError.code === "BUSY"
+            ? { ...requestError, message: "读取暂时繁忙，请稍后重试" }
+            : requestError);
+        }
         return null;
-      } finally {
-        if (this.activeRequest === pending) {
-          this.activeRequest = undefined;
-          this.activeKind = undefined;
-        }
       }
+      return null;
     });
     this.requestTail = work.then(() => undefined, () => undefined);
     return await work;
@@ -325,21 +353,41 @@ export class CommitDetailStore {
     else this.update({ ...this.view, diff: { ...this.view.diff, state: "error", error } });
   }
 
-  private async cancelActiveRequest(): Promise<void> {
+  private async cancelActiveRequest(keepLoadingKind?: "details" | "files" | "merge" | "containing" | "diff"): Promise<void> {
+    const retryKind = this.retryKind;
+    this.cancelRetryWait();
+    if (retryKind && retryKind !== keepLoadingKind) this.settleLoadingKind(retryKind);
     const active = this.activeRequest;
     if (!active) return;
     const kind = this.activeKind;
     await this.api.cancelCommitDetails().catch(() => undefined);
     await active.catch(() => undefined);
-    if (kind) {
-      const restore = <T,>(slice: DetailLoad<T>): DetailLoad<T> => slice.state === "loading"
-        ? { ...slice, state: slice.value ? "ready" : "idle", error: null } : slice;
-      if (kind === "details") this.update({ ...this.view, details: restore(this.view.details) });
-      else if (kind === "files") this.update({ ...this.view, files: restore(this.view.files) });
-      else if (kind === "merge") this.update({ ...this.view, merge: restore(this.view.merge) });
-      else if (kind === "containing") this.update({ ...this.view, containing: restore(this.view.containing) });
-      else this.update({ ...this.view, diff: restore(this.view.diff) });
-    }
+    if (kind && kind !== keepLoadingKind) this.settleLoadingKind(kind);
+  }
+
+  private settleLoadingKind(kind: "details" | "files" | "merge" | "containing" | "diff"): void {
+    if (kind === "details") this.update({ ...this.view, details: settled(this.view.details) });
+    else if (kind === "files") this.update({ ...this.view, files: settled(this.view.files) });
+    else if (kind === "merge") this.update({ ...this.view, merge: settled(this.view.merge) });
+    else if (kind === "containing") this.update({ ...this.view, containing: settled(this.view.containing) });
+    else this.update({ ...this.view, diff: settled(this.view.diff) });
+  }
+
+  private waitForRetry(delay: number): Promise<boolean> {
+    return new Promise(resolve => {
+      const finish = (resume: boolean) => {
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = undefined;
+        this.retryWake = undefined;
+        resolve(resume);
+      };
+      this.retryWake = () => finish(false);
+      this.retryTimer = setTimeout(() => finish(true), delay);
+    });
+  }
+
+  private cancelRetryWait(): void {
+    this.retryWake?.();
   }
 
   private isCurrent(selection: number, sequence: number, sessionKey: string, oid: string): boolean {

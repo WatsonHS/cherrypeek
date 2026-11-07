@@ -34,7 +34,9 @@ export type RequestParams =
   | ReadMergeCommitsParams
   | BranchesContainingParams
   | ReadDiffParams
-  | ListSearchPathsParams;
+  | ListSearchPathsParams
+  | GetActivityStatsParams
+  | GetHandoffFactsParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -144,4 +146,13 @@ export interface ReadDiffParams {
 export interface ListSearchPathsParams {
   limit: number;
   text: string;
+}
+export interface GetActivityStatsParams {
+  query: SearchQuery;
+}
+export interface GetHandoffFactsParams {
+  branchRef: string | null;
+  operationWorktreeId: string | null;
+  selectedOid: string | null;
+  staleWorktreeId: string | null;
 }

@@ -278,7 +278,8 @@ async function graphMetrics(targetPage) {
     const graphs = [...element.querySelectorAll('[data-testid="commit-row"] [data-testid="commit-graph"]')];
     return {
       hiddenRows: graphs.filter(graph => Number(graph.getAttribute("data-graph-lane")) >= 6).length,
-      overflowRows: graphs.filter(graph => Number(graph.getAttribute("data-graph-hidden-count")) > 0 && graph.querySelector("text")?.textContent?.startsWith("+")).length,
+      overflowRows: graphs.filter(graph => Number(graph.getAttribute("data-graph-hidden-count")) > 0 &&
+        graph.parentElement?.querySelector('[data-testid="graph-expand"]')).length,
       graphRows: graphs.length,
     };
   });

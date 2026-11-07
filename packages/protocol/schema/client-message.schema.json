@@ -31,6 +31,18 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "GetActivityStatsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "$ref": "#/definitions/SearchQuery"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
     "GetCommitParams": {
       "additionalProperties": false,
       "properties": {
@@ -42,6 +54,50 @@
       },
       "required": [
         "oid"
+      ],
+      "type": "object"
+    },
+    "GetHandoffFactsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "branchRef": {
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operationWorktreeId": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selectedOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "staleWorktreeId": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "branchRef",
+        "selectedOid",
+        "operationWorktreeId",
+        "staleWorktreeId"
       ],
       "type": "object"
     },
@@ -406,6 +462,18 @@
         },
         {
           "$ref": "#/definitions/ListSearchPathsParams"
+        },
+        {
+          "$ref": "#/definitions/GetActivityStatsParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/GetHandoffFactsParams"
         },
         {
           "$ref": "#/definitions/EmptyParams"

@@ -188,7 +188,7 @@ export class ProtocolTransport {
       return Promise.reject(new ProtocolClientError("STALE_CONTEXT", "当前没有可用的仓库会话"));
     }
     if (this.pending.size >= this.maxPendingRequests) {
-      return Promise.reject(new ProtocolClientError("BUSY", "交互请求已满", true));
+      return Promise.reject(new ProtocolClientError("BUSY", "读取暂时繁忙，请稍后重试", true));
     }
     if (options.signal?.aborted) {
       return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
@@ -198,6 +198,7 @@ export class ProtocolTransport {
     }
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
+      method !== "getActivityStats" && method !== "observeRepository" && method !== "diffRefSnapshots" && method !== "getHandoffFacts" &&
       !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
@@ -592,6 +593,13 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "listSearchPaths" && isRecord(params) && hasExactKeys(params, ["limit", "text"]) &&
     typeof params.text === "string" && Buffer.byteLength(params.text, "utf8") <= 32 * 1024 && Number.isInteger(params.limit) &&
     (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
+  if (method === "getActivityStats" && isRecord(params) && hasExactKeys(params, ["query"]) && isSearchQuery(params.query)) return true;
+  if ((method === "observeRepository" || method === "diffRefSnapshots") && isRecord(params) && hasExactKeys(params, [])) return true;
+  if (method === "getHandoffFacts" && isRecord(params) && hasExactKeys(params, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"]) &&
+    (params.branchRef === null || typeof params.branchRef === "string" && Buffer.byteLength(params.branchRef, "utf8") <= 16 * 1024 && !params.branchRef.includes("\0")) &&
+    (params.operationWorktreeId === null || typeof params.operationWorktreeId === "string" && params.operationWorktreeId.length > 0 && Buffer.byteLength(params.operationWorktreeId, "utf8") <= 256) &&
+    (params.staleWorktreeId === null || typeof params.staleWorktreeId === "string" && params.staleWorktreeId.length > 0 && Buffer.byteLength(params.staleWorktreeId, "utf8") <= 256) &&
+    (params.selectedOid === null || typeof params.selectedOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.selectedOid))) return true;
   if (["getCommit", "branchesContaining"].includes(method) && isRecord(params) && hasExactKeys(params, ["oid"]) &&
     typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid)) return true;
   if (["listChangedFiles", "readMergeCommits"].includes(method) && isRecord(params) &&
@@ -649,7 +657,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
   return undefined;
 }
 

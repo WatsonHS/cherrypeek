@@ -13,6 +13,10 @@ export function graphWidth(geometry: GraphGeometry): number {
   return laneX(MAX_VISIBLE_LANES - 1, geometry) + geometry.x0 + OVERFLOW_WIDTH;
 }
 
+export function graphWidthForMaxLane(geometry: GraphGeometry, maxLane: number): number {
+  return laneX(Math.max(0, maxLane), geometry) + geometry.x0;
+}
+
 export function lanesInMask(mask: number): number[] {
   const lanes: number[] = [];
   for (let lane = 0; lane < MAX_VISIBLE_LANES; lane += 1) {
@@ -21,9 +25,43 @@ export function lanesInMask(mask: number): number[] {
   return lanes;
 }
 
-/** Converts backend graph segments to paths for one rendered row. Hidden endpoints stay outside the SVG's six-lane clip. */
-export function graphPaths(graph: HistoryGraph, geometry: GraphGeometry): Array<{ d: string; color: number }> {
-  return graph.segments.map(segment => ({ d: segmentPath(segment, geometry), color: segment.color }));
+export function graphAboveLanes(graph: HistoryGraph): number[] {
+  const lanes = new Set(lanesInMask(graph.above));
+  for (const segment of graph.segments) {
+    if (segment.kind === "incoming" && segment.fromLane >= MAX_VISIBLE_LANES) lanes.add(segment.fromLane);
+  }
+  for (const range of graph.hiddenThroughRanges ?? []) {
+    for (let lane = range.startLane; lane <= range.endLane; lane += 1) lanes.add(lane);
+  }
+  return [...lanes].sort((a, b) => a - b);
+}
+
+export function maxGraphLane(graph: HistoryGraph): number {
+  let maxLane = graph.lane;
+  for (const segment of graph.segments) maxLane = Math.max(maxLane, segment.fromLane, segment.toLane);
+  for (const range of graph.hiddenThroughRanges ?? []) maxLane = Math.max(maxLane, range.endLane);
+  return maxLane;
+}
+
+export function hiddenThroughPaths(graph: HistoryGraph, geometry: GraphGeometry): Array<{ color: number; d: string }> {
+  const paths = new Map<number, string[]>();
+  for (const range of graph.hiddenThroughRanges ?? []) {
+    for (let lane = range.startLane; lane <= range.endLane; lane += 1) {
+      const color = lane % 6;
+      const x = laneX(lane, geometry);
+      const segments = paths.get(color) ?? [];
+      segments.push(`M${x} 0V${geometry.rowHeight}`);
+      paths.set(color, segments);
+    }
+  }
+  return [...paths].map(([color, segments]) => ({ color, d: segments.join("") }));
+}
+
+/** Converts backend graph segments to paths for one rendered row. A lane limit keeps compact views to intersecting segments. */
+export function graphPaths(graph: HistoryGraph, geometry: GraphGeometry, laneLimit?: number): Array<{ d: string; color: number }> {
+  return graph.segments
+    .filter(segment => laneLimit === undefined || segment.fromLane <= laneLimit || segment.toLane <= laneLimit)
+    .map(segment => ({ d: segmentPath(segment, geometry), color: segment.color }));
 }
 
 function segmentPath(segment: HistoryGraphSegment, geometry: GraphGeometry): string {

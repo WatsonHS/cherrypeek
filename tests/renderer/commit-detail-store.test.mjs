@@ -47,23 +47,39 @@ function deferredApi() {
     active = call;
     return promise;
   }
+  async function reply(name, result) {
+    await settled();
+    const call = calls.find(item => item.name === name && item.resolve);
+    assert.ok(call, `expected pending ${name}`);
+    const resolve = call.resolve;
+    call.resolve = null;
+    if (active === call) active = undefined;
+    resolve(result);
+    await settled();
+  }
   return {
     api, calls,
     async answer(name, value) {
-      await settled();
-      const call = calls.find(item => item.name === name && item.resolve);
-      assert.ok(call, `expected pending ${name}`);
-      const resolve = call.resolve;
-      call.resolve = null;
-      if (active === call) active = undefined;
-      resolve(ok(value));
-      await settled();
+      await reply(name, ok(value));
+    },
+    async answerResult(name, result) {
+      await reply(name, result);
     },
   };
 }
 
 async function settled() {
   for (let index = 0; index < 12; index += 1) await new Promise(resolve => setImmediate(resolve));
+}
+
+async function waitForCall(api, predicate, timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const call = api.calls.find(predicate);
+    if (call) return call;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail("timed out waiting for the expected detail request");
 }
 
 async function loadDefault(api, oid = "a") {
@@ -112,6 +128,50 @@ test("a late detail response for A cannot replace the newer selection B", async 
   await api.answer("listChangedFiles", files("b", null));
   assert.equal(store.getView().details.value.commit.oid, "b");
   assert.equal(store.getView().detailsSessionKey, "repo:g1:head");
+});
+
+test("a transient BUSY detail request retries automatically while the loading state stays visible", async () => {
+  const api = deferredApi();
+  const store = new CommitDetailStore(api.api);
+  const observedStates = [];
+  store.subscribe(() => observedStates.push(store.getView().details.state));
+  store.bind("repo:g1:head", "a", true);
+  await waitForCall(api, call => call.name === "getCommit");
+  await api.answerResult("getCommit", { ok: false, error: { code: "BUSY", message: "BUSY", retryable: true } });
+
+  assert.equal(store.getView().details.state, "loading");
+  assert.equal(store.getView().details.error, null);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(store.getView().details.state, "loading", "the backoff must not turn a temporary BUSY into an error state");
+  const retry = await waitForCall(api, call => call.name === "getCommit" && api.calls.indexOf(call) > 0);
+  assert.deepEqual(retry.params, { oid: "a" });
+  await api.answer("getCommit", details("a", []));
+  assert.equal(store.getView().details.state, "ready");
+  assert.equal(store.getView().details.error, null);
+  assert.ok(observedStates.includes("loading"));
+
+  await api.answer("listChangedFiles", files("a", null));
+});
+
+test("selecting B during A's BUSY backoff starts B and prevents another A attempt", async () => {
+  const api = deferredApi();
+  const store = new CommitDetailStore(api.api);
+  store.bind("repo:g1:head", "a", true);
+  const firstA = await waitForCall(api, call => call.name === "getCommit");
+  await api.answerResult("getCommit", { ok: false, error: { code: "BUSY", message: "BUSY", retryable: true } });
+  assert.equal(store.getView().details.state, "loading");
+
+  store.bind("repo:g1:head", "b", true);
+  const requestB = await waitForCall(api, call => call.name === "getCommit" && call.params.oid === "b", 200);
+  assert.notEqual(requestB, firstA, "the new selection must not wait through A's retry delay");
+  await new Promise(resolve => setTimeout(resolve, 320));
+  assert.equal(api.calls.some(call => call.name === "getCommit" && call.params.oid === "a" && call !== firstA), false,
+    "A must not retry after selection changes");
+
+  await api.answer("getCommit", details("b", []));
+  assert.equal(store.getView().oid, "b");
+  assert.equal(store.getView().details.value.commit.oid, "b");
+  await api.answer("listChangedFiles", files("b", null));
 });
 
 test("an unloaded retained selection preserves every old slice and cannot query it in a new session", async () => {

@@ -1,5 +1,6 @@
 import type { CoreReady } from "./core-ready.js";
 import type { RepositorySessionApi } from "./repository-session.js";
+import type { RepositoryObservationEvent } from "./repository-session.js";
 
 export type CoreStatus =
   | { state: "starting"; revision: number }
@@ -14,4 +15,5 @@ export interface CommitScopeApi extends RepositorySessionApi {
   /** Absolute path given with `--repository=` at launch, or null. */
   getLaunchRepository(): Promise<string | null>;
   copyText(text: string): Promise<void>;
+  onRepositoryObservationChanged(listener: (event: RepositoryObservationEvent) => void): () => void;
 }

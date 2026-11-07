@@ -136,6 +136,9 @@
   body,
   #root {
     height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   body {
@@ -190,4 +193,37 @@
 .window-toolbar textarea,
 .window-toolbar select {
   user-select: text;
+}
+
+body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
+  -webkit-app-region: no-drag;
+}
+
+@media (max-width: 1250px) {
+  .topbar-repository { width: clamp(100px, 13vw, 156px); flex: 0 1 clamp(100px, 13vw, 156px); }
+  .topbar-repository > span { max-width: calc(100% - 24px); }
+  .topbar-scope-picker { width: clamp(100px, 13vw, 150px); flex: 0 1 clamp(100px, 13vw, 150px); }
+  .topbar-scope-label { max-width: calc(100% - 28px); }
+  .topbar-worktree { width: clamp(92px, 14vw, 166px); flex: 0 1 clamp(92px, 14vw, 166px); }
+  .topbar-worktree-meta,
+  .topbar-action-label { display: none; }
+  .topbar-search-controls { flex: 1 1 170px; }
+  .topbar-search-controls > label { min-width: 0; }
+  .topbar-updates-label { max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-busy-copy { display: none; }
+  .topbar-cancel-button { width: 28px; height: 28px; padding: 0; }
+  .topbar-cancel-label { font-size: 0; }
+  .topbar-cancel-label::after { content: "×"; font-size: 16px; }
+}
+
+@media (max-width: 900px) {
+  .topbar-repository { width: 94px; flex-basis: 94px; padding-inline: 4px; }
+  .topbar-scope-picker { width: 76px; flex-basis: 76px; padding-inline: 4px; }
+  .topbar-worktree { width: 92px; flex-basis: 92px; padding-inline: 4px; }
+  .topbar-search-controls { flex-basis: 112px; }
+  .topbar-handoff,
+  .topbar-refresh { width: 28px; height: 28px; padding: 0; }
+  .topbar-updates-label { display: none; }
+  .topbar-divider { margin-inline: -2px; }
+  .topbar-activity { gap: 0; padding-inline: 3px; }
 }

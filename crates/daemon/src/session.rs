@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -22,6 +22,114 @@ pub struct RepositorySession {
     pub info: RepositorySessionInfo,
     pub discovered: Arc<DiscoveredRepository>,
     pub history: Arc<HistoryState>,
+    pub(crate) latest_observation: Arc<Mutex<LatestObservationSlot>>,
+}
+
+#[derive(Clone)]
+pub struct LatestObservedSnapshot {
+    pub generation: String,
+    pub discovered: Arc<DiscoveredRepository>,
+    pub observed_at_unix_ms: u64,
+    pub changed_ref_count: u32,
+    pub worktrees_changed: bool,
+    pub change_count: u32,
+}
+
+pub(crate) struct LatestObservationSlot {
+    pub(crate) snapshot: LatestObservedSnapshot,
+    pub(crate) sequence: u64,
+}
+
+impl RepositorySession {
+    pub fn begin_observation(&self) -> u64 {
+        let mut slot = self
+            .latest_observation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        slot.sequence = slot.sequence.wrapping_add(1).max(1);
+        slot.sequence
+    }
+
+    pub fn latest_observation(&self) -> LatestObservedSnapshot {
+        self.latest_observation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .snapshot
+            .clone()
+    }
+
+    pub fn publish_observation(
+        &self,
+        sequence: u64,
+        discovered: Arc<DiscoveredRepository>,
+        observed_at_unix_ms: u64,
+    ) -> Result<Option<LatestObservedSnapshot>, SessionError> {
+        let mut slot = self
+            .latest_observation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if sequence != slot.sequence {
+            return Ok(None);
+        }
+        let latest = &slot.snapshot.discovered;
+        let latest_changed_ref_count = changed_ref_count(&latest.refs, &discovered.refs)
+            .saturating_add(u32::from(
+                latest.refs_truncated != discovered.refs_truncated,
+            ));
+        let latest_navigation = latest.navigation.as_ref().ok();
+        let new_navigation = discovered.navigation.as_ref().ok();
+        let latest_worktree_delta = match (latest_navigation, new_navigation) {
+            (Some(old), Some(new)) => changed_worktree_count(&old.worktrees, &new.worktrees),
+            (None, Some(new)) => new.worktrees.len().max(1).min(u32::MAX as usize) as u32,
+            _ => 0,
+        };
+        let latest_default_base_changed = matches!((latest_navigation, new_navigation), (Some(old), Some(new)) if old.default_base != new.default_base);
+        let latest_worktree_truncation_changed = match (latest_navigation, new_navigation) {
+            (Some(old), Some(new)) => old.worktrees_truncated != new.worktrees_truncated,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let changed_since_latest = latest_changed_ref_count
+            .saturating_add(latest_worktree_delta)
+            .saturating_add(u32::from(latest_default_base_changed))
+            .saturating_add(u32::from(latest_worktree_truncation_changed))
+            > 0;
+        let changed_ref_count = changed_ref_count(&self.discovered.refs, &discovered.refs)
+            .saturating_add(u32::from(
+                self.discovered.refs_truncated != discovered.refs_truncated,
+            ));
+        let browser_navigation = self.discovered.navigation.as_ref().ok();
+        let browser_worktree_delta = match (browser_navigation, new_navigation) {
+            (Some(old), Some(new)) => changed_worktree_count(&old.worktrees, &new.worktrees),
+            (None, Some(new)) => new.worktrees.len().max(1).min(u32::MAX as usize) as u32,
+            _ => 0,
+        };
+        let worktrees_changed = browser_worktree_delta > 0
+            || matches!((browser_navigation, new_navigation), (Some(old), Some(new)) if old.worktrees_truncated != new.worktrees_truncated);
+        let change_count = changed_ref_count
+            .saturating_add(browser_worktree_delta)
+            .saturating_add(u32::from(worktrees_changed && browser_worktree_delta == 0));
+        let generation = if changed_since_latest {
+            fresh_token("observed").map_err(|_| {
+                SessionError::new(
+                    ErrorCode::RepositoryUnavailable,
+                    "Could not identify observed repository state",
+                )
+            })?
+        } else {
+            slot.snapshot.generation.clone()
+        };
+        let snapshot = LatestObservedSnapshot {
+            generation,
+            discovered,
+            observed_at_unix_ms,
+            changed_ref_count,
+            worktrees_changed,
+            change_count,
+        };
+        slot.snapshot = snapshot.clone();
+        Ok(Some(snapshot))
+    }
 }
 
 pub struct SessionCommit {
@@ -163,7 +271,7 @@ impl SessionManager {
 
         let info = RepositorySessionInfo {
             repo_id,
-            generation,
+            generation: generation.clone(),
             repository_key,
             worktree_id,
             scope,
@@ -178,8 +286,19 @@ impl SessionManager {
         };
         let session = Arc::new(RepositorySession {
             info,
-            discovered,
+            discovered: Arc::clone(&discovered),
             history,
+            latest_observation: Arc::new(Mutex::new(LatestObservationSlot {
+                snapshot: LatestObservedSnapshot {
+                    generation: generation.clone(),
+                    discovered,
+                    observed_at_unix_ms,
+                    changed_ref_count: 0,
+                    worktrees_changed: false,
+                    change_count: 0,
+                },
+                sequence: 0,
+            })),
         });
         let replaced_repo_id = self
             .current
@@ -257,6 +376,56 @@ impl SessionManager {
     }
 }
 
+fn changed_ref_count(old: &[commitscope_core::RefInfo], new: &[commitscope_core::RefInfo]) -> u32 {
+    use std::collections::BTreeMap;
+    let old = old
+        .iter()
+        .map(|reference| (reference.name.as_str(), reference))
+        .collect::<BTreeMap<_, _>>();
+    let new = new
+        .iter()
+        .map(|reference| (reference.name.as_str(), reference))
+        .collect::<BTreeMap<_, _>>();
+    old.keys()
+        .chain(new.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| match (old.get(name), new.get(name)) {
+            (Some(old), Some(new)) => {
+                old.kind != new.kind || old.oid != new.oid || old.peeled_oid != new.peeled_oid
+            }
+            (None, None) => false,
+            _ => true,
+        })
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
+fn changed_worktree_count(
+    old: &[commitscope_core::WorktreeInfo],
+    new: &[commitscope_core::WorktreeInfo],
+) -> u32 {
+    use std::collections::BTreeMap;
+    let old = old
+        .iter()
+        .map(|worktree| (worktree.id.as_str(), worktree))
+        .collect::<BTreeMap<_, _>>();
+    let new = new
+        .iter()
+        .map(|worktree| (worktree.id.as_str(), worktree))
+        .collect::<BTreeMap<_, _>>();
+    old.keys()
+        .chain(new.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|id| old.get(id) != new.get(id))
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
+#[derive(Debug)]
 pub struct SessionError {
     pub code: ErrorCode,
     pub message: String,

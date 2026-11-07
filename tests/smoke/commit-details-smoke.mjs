@@ -38,7 +38,7 @@ try {
   });
   page = await app.firstWindow();
   await page.bringToFront();
-  await page.locator('[data-testid="preview-state"][data-state="ready"]').waitFor({ state: "visible", timeout: 30_000 });
+  await page.locator('[data-testid="preview-state"][data-state="ready"]').waitFor({ state: "attached", timeout: 30_000 });
   const list = page.locator('[aria-label="提交列表"] [role="listbox"]');
   await list.waitFor({ state: "visible" });
   await page.getByTestId("commit-row").first().waitFor({ state: "visible" });
@@ -46,10 +46,7 @@ try {
   assert.ok(initialBudget.loaded <= 1_800, `main summary window exceeds its reservation: ${JSON.stringify(initialBudget)}`);
 
   const mergeRow = page.locator(`[data-testid="commit-row"][data-oid="${fixture.merge}"]`);
-  if (await mergeRow.count() === 0) {
-    await page.getByRole("button", { name: "下一页", exact: true }).click();
-    await mergeRow.waitFor({ state: "visible", timeout: 15_000 });
-  }
+  await scrollHistoryUntilCommitVisible(page, list, fixture.merge);
   await mergeRow.click();
   await page.getByTestId("commit-detail-message").waitFor({ state: "visible", timeout: 20_000 });
   await page.getByTestId("commit-detail-trailers").waitFor({ state: "visible", timeout: 10_000 });
@@ -190,6 +187,41 @@ async function waitForDom(currentPage, predicate, timeoutMs = 10_000, argument) 
     await delay(50);
   }
   throw new Error("Timed out waiting for expected synchronous DOM state");
+}
+
+async function scrollHistoryUntilCommitVisible(currentPage, list, oid) {
+  const row = currentPage.locator(`[data-testid="commit-row"][data-oid="${oid}"]`);
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await row.count()) {
+      await row.waitFor({ state: "visible", timeout: 5000 });
+      return;
+    }
+    const state = await list.evaluate(element => ({
+      loading: element.dataset.pageLoading === "true",
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      offset: Number(element.dataset.loadedOffset),
+      count: Number(element.dataset.loadedCount),
+    }));
+    if (state.loading) {
+      await waitForDom(currentPage, () => document.querySelector('[aria-label="提交列表"] [role="listbox"]')?.dataset.pageLoading === "false", 20_000);
+      continue;
+    }
+    const maxScrollTop = Math.max(0, state.scrollHeight - state.clientHeight);
+    const nextScrollTop = Math.min(maxScrollTop, state.scrollTop + Math.max(100, Math.floor(state.clientHeight * 0.8)));
+    await list.evaluate((element, top) => { element.scrollTop = top; }, nextScrollTop);
+    await delay(50);
+    if (nextScrollTop >= maxScrollTop - 1) {
+      const previousEnd = state.offset + state.count;
+      await waitForDom(currentPage, previous => {
+        const element = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+        return Boolean(element && (element.dataset.pageLoading === "true" ||
+          element.dataset.pageLoading === "false" && Number(element.dataset.loadedOffset) + Number(element.dataset.loadedCount) > previous));
+      }, 15_000, previousEnd);
+    }
+  }
+  throw new Error(`History scroll did not render commit ${oid}`);
 }
 
 async function snapshotReadOnly(currentPage, path, expected) {

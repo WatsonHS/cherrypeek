@@ -37,17 +37,21 @@ try {
   assert.ok(initialWindow.domRows <= 60);
   assert.equal(await page.getByTestId("history-marker").count(), 0, "a first view has no new markers");
 
-  await page.getByRole("button", { name: "下一页", exact: true }).click();
+  const list = page.locator('[aria-label="提交列表"] [role="listbox"]');
+  await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await page.waitForFunction(expected => {
+    const element = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+    return element && element.dataset.pageLoading === "false" && Number(element.dataset.loadedCount) === expected;
+  }, 205, { timeout: 15000 });
+  await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
   await page.locator('[aria-label="提交列表"] [role="listbox"]').getByText("Commit 5", { exact: true }).waitFor({ state: "visible" });
-  await page.waitForFunction(() => Number(document.querySelector('[aria-label="提交列表"] [role="listbox"]')?.dataset.loadedCount) === 205, null, { timeout: 15000 });
   const nextWindow = await windowMetrics(page);
   assert.equal(nextWindow.loadedCount, 205);
   assert.ok(nextWindow.domRows <= 60);
 
-  await page.getByRole("button", { name: "上一页", exact: true }).click();
+  await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
   await page.locator('[aria-label="提交列表"] [role="listbox"]').getByText("Commit 6", { exact: true }).waitFor({ state: "visible" });
-  assert.equal((await windowMetrics(page)).loadedCount, 205, "explicit page navigation keeps the adjacent page in the bounded window");
-  assert.deepEqual(await snapshotTree(repository), repositoryBeforeUI, "paging must be read-only");
+  assert.deepEqual(await snapshotTree(repository), repositoryBeforeUI, "scrolling across history pages must be read-only");
 
   const oldSelected = page.getByTestId("commit-row").filter({ hasText: "Commit 6" });
   await oldSelected.click();
@@ -58,7 +62,6 @@ try {
   const commit10Oid = git(repository, "log", "--format=%H%x09%s", "HEAD").split("\n")
     .find(line => line.endsWith("\tCommit 10"))?.split("\t", 1)[0];
   assert.ok(commit10Oid, "fixture should have an independently identifiable Commit 10 OID");
-  const list = page.locator('[aria-label="提交列表"] [role="listbox"]');
   await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
   const commit10Row = page.locator(`[data-testid="commit-row"][data-oid="${commit10Oid}"]`);
   await commit10Row.scrollIntoViewIfNeeded();

@@ -6,7 +6,7 @@
 
 - Electron 使用 `titleBarStyle: hidden` 与 Window Controls Overlay；macOS 保留原生红黄绿按钮，位置为 x=16、y=18。窗口内容铺满窗口，背景跟随应用深浅色。依据 [Electron 标题栏文档](https://www.electronjs.org/docs/latest/tutorial/custom-title-bar)。
 - 仓库工具栏直接位于窗口顶部，空白处可拖动，按钮和输入控件使用 `no-drag`；通过 overlay 安全区避让窗口按钮。打开页保留同高拖动区，错误提示放在工具栏下。
-- 搜索占位框可收缩，保留占位标签；默认 1180px 宽度下工具栏保持 52px 单行。850px 沿用换行布局，不扩展到 M4 窄窗口设计。
+- 搜索占位框可收缩，保留占位标签；默认 1180px 宽度下工具栏保持 52px 单行。初版 850px 沿用换行布局；2026-11-08 试用修复后 850px 也保持单行，见[M3 回归记录](m3-mvp.md)。完整窄窗口布局仍属 M4。
 - 没有新增 preload / IPC 接口；不改变 Rust 查询、历史窗口或仓库数据。
 
 ## 验证

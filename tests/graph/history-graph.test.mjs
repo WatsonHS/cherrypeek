@@ -222,6 +222,17 @@ function assertGraphOracle(commits, expectedRows, label) {
   assert.deepEqual(commits.map(commit => commit.oid), expectedRows.map(row => row.oid), `${label}: Git topo order`);
   const indexByOid = new Map(commits.map((commit, index) => [commit.oid, index]));
   const expectedByOid = new Map(expectedRows.map(row => [row.oid, row.parents]));
+  const expectedHiddenThroughByRow = commits.map(() => new Set());
+  for (const [originIndex, origin] of commits.entries()) {
+    const outgoing = origin.graph.segments.filter(segment => segment.kind === "outgoing");
+    for (const [parentIndex, segment] of outgoing.entries()) {
+      const targetIndex = indexByOid.get(origin.graph.parents[parentIndex]);
+      if (targetIndex === undefined || targetIndex <= originIndex + 1 || segment.toLane < 6) continue;
+      for (let rowIndex = originIndex + 1; rowIndex < targetIndex; rowIndex += 1) {
+        if (commits[rowIndex].graph.lane !== segment.toLane) expectedHiddenThroughByRow[rowIndex].add(segment.toLane);
+      }
+    }
+  }
   for (const [rowIndex, commit] of commits.entries()) {
     const graph = commit.graph;
     const effectiveParents = expectedByOid.get(commit.oid);
@@ -233,15 +244,28 @@ function assertGraphOracle(commits, expectedRows, label) {
     assert.ok(Number.isInteger(graph.below) && graph.below >= 0 && graph.below <= 63, `${label}: below mask`);
     assert.ok(Number.isInteger(graph.hiddenLaneCount) && graph.hiddenLaneCount >= 0 && graph.hiddenLaneCount <= 16_384, `${label}: hidden lane count`);
     assert.ok(Array.isArray(graph.segments) && graph.segments.length <= 256, `${label}: bounded segments`);
+    assert.ok(Array.isArray(graph.hiddenThroughRanges) && graph.hiddenThroughRanges.length <= 8_192, `${label}: bounded hidden through ranges`);
+    const hiddenThroughLanes = [];
+    let previousEnd = 5;
+    for (const range of graph.hiddenThroughRanges) {
+      assert.ok(Number.isInteger(range.startLane) && Number.isInteger(range.endLane) && range.startLane >= 6 &&
+        range.endLane >= range.startLane && range.endLane <= 16_383, `${label}: hidden range is a valid inclusive lane interval`);
+      assert.ok(range.startLane > previousEnd, `${label}: hidden through ranges are sorted and disjoint`);
+      for (let lane = range.startLane; lane <= range.endLane; lane += 1) hiddenThroughLanes.push(lane);
+      previousEnd = range.endLane;
+    }
+    assert.deepEqual(hiddenThroughLanes, [...expectedHiddenThroughByRow[rowIndex]].sort((left, right) => left - right),
+      `${label}: hidden ranges represent exactly the real Git parent edges continuing through ${commit.oid}`);
     for (const segment of graph.segments) {
       assert.ok(["through", "incoming", "outgoing"].includes(segment.kind), `${label}: recognized graph segment`);
       assert.ok(segment.fromLane >= 0 && segment.fromLane <= 16_383 && segment.toLane >= 0 && segment.toLane <= 16_383);
-      assert.ok(segment.fromLane < 6 || segment.toLane < 6, `${label}: fully hidden segments are omitted`);
       const expectedColor = segment.kind === "outgoing" ? segment.toLane % 6 : segment.fromLane % 6;
       assert.equal(segment.color, expectedColor, `${label}: segment color follows its continuous lane`);
       if (segment.kind === "through") {
         assert.equal(segment.fromLane, segment.toLane, `${label}: through edge preserves a target slot`);
-        assert.ok(maskContains(graph.above, segment.fromLane) && maskContains(graph.below, segment.toLane), `${label}: through edge agrees with active masks`);
+        if (segment.fromLane < 6) {
+          assert.ok(maskContains(graph.above, segment.fromLane) && maskContains(graph.below, segment.toLane), `${label}: visible through edge agrees with active masks`);
+        } else assert.fail(`${label}: hidden straight through lanes use hiddenThroughRanges instead of segments`);
       } else if (segment.kind === "incoming") {
         assert.equal(segment.toLane, graph.lane, `${label}: incoming edge reaches this commit node`);
         if (segment.fromLane < 6) assert.ok(maskContains(graph.above, segment.fromLane), `${label}: visible incoming edge starts in the above mask`);
@@ -252,19 +276,21 @@ function assertGraphOracle(commits, expectedRows, label) {
     }
 
     const outgoing = graph.segments.filter(segment => segment.kind === "outgoing");
-    if (graph.lane < 6) {
-      assert.equal(outgoing.length, effectiveParents.length, `${label}: every parent edge from a visible node is represented`);
-      for (let parentIndex = 0; parentIndex < effectiveParents.length; parentIndex += 1) {
-        const targetLane = outgoing[parentIndex].toLane;
-        const parentOid = effectiveParents[parentIndex];
-        const parentRow = indexByOid.get(parentOid);
-        if (parentRow === undefined) continue;
-        assert.ok(parentRow > rowIndex, `${label}: parent appears later in topo order`);
-        assert.equal(commits[parentRow].graph.lane, targetLane, `${label}: outgoing lane reaches the actual Git parent`);
-        for (let between = rowIndex + 1; targetLane < 6 && between < parentRow; between += 1) {
-          assert.ok(commits[between].graph.segments.some(segment => segment.kind === "through" && segment.fromLane === targetLane && segment.toLane === targetLane),
-            `${label}: edge ${commit.oid} -> ${parentOid} stays connected through row ${commits[between].oid}`);
-        }
+    assert.equal(outgoing.length, effectiveParents.length, `${label}: every Git parent edge is represented, including hidden origins`);
+    for (let parentIndex = 0; parentIndex < effectiveParents.length; parentIndex += 1) {
+      const targetLane = outgoing[parentIndex].toLane;
+      const parentOid = effectiveParents[parentIndex];
+      const parentRow = indexByOid.get(parentOid);
+      if (parentRow === undefined) continue;
+      assert.ok(parentRow > rowIndex, `${label}: parent appears later in topo order`);
+      assert.equal(commits[parentRow].graph.lane, targetLane, `${label}: outgoing lane reaches the actual Git parent`);
+      for (let between = rowIndex + 1; between < parentRow; between += 1) {
+        const intermediate = commits[between].graph;
+        const connected = targetLane < 6
+          ? intermediate.segments.some(segment => segment.kind === "through" && segment.fromLane === targetLane && segment.toLane === targetLane)
+          : intermediate.hiddenThroughRanges.some(range => range.startLane <= targetLane && targetLane <= range.endLane);
+        if (intermediate.lane === targetLane) continue;
+        assert.ok(connected, `${label}: edge ${commit.oid} -> ${parentOid} stays connected through lane ${targetLane} at row ${commits[between].oid}`);
       }
     }
   }

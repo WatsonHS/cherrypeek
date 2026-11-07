@@ -1,12 +1,12 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
-    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, ListSearchPathsParams,
-    LocateCommitParams, MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION,
-    ReadDiffParams, ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
-    RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope, ResponseData,
-    SearchCommitsParams, SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams,
-    ServerMessage,
+    EmptyParams, ErrorCode, GetActivityStatsParams, GetCommitParams, GetHandoffFactsParams,
+    ListChangedFilesParams, ListSearchPathsParams, LocateCommitParams, MetadataIndexAction,
+    OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams, ReadHistoryPageParams,
+    ReadMergeCommitsParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
+    RefreshRepositoryParams, RepositoryScope, ResponseData, SearchCommitsParams,
+    SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -55,6 +55,10 @@ enum RequestOperation {
     SearchCommits(SearchCommitsParams),
     ListSearchIdentities(SearchIdentitiesParams),
     ListSearchPaths(ListSearchPathsParams),
+    GetActivityStats(GetActivityStatsParams),
+    ObserveRepository,
+    DiffRefSnapshots,
+    GetHandoffFacts(GetHandoffFactsParams),
     GetCommit(GetCommitParams),
     ListChangedFiles(ListChangedFilesParams),
     ReadMergeCommits(ReadMergeCommitsParams),
@@ -501,6 +505,10 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::SearchCommits(_)
             | RequestOperation::ListSearchIdentities(_)
             | RequestOperation::ListSearchPaths(_)
+            | RequestOperation::GetActivityStats(_)
+            | RequestOperation::ObserveRepository
+            | RequestOperation::DiffRefSnapshots
+            | RequestOperation::GetHandoffFacts(_)
             | RequestOperation::GetCommit(_)
             | RequestOperation::ListChangedFiles(_)
             | RequestOperation::ReadMergeCommits(_)
@@ -852,6 +860,99 @@ fn dispatch_request(
                     })?;
                     let processed = paths.entries.len() as u32;
                     Ok((ResponseData::SearchPaths { paths }, processed))
+                },
+            );
+        }
+        RequestOperation::GetActivityStats(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled = Arc::clone(&cancelled);
+            let metadata_tasks = Arc::clone(metadata_tasks);
+            let request_id = request_id.clone();
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            workers.push(thread::spawn(move || {
+                execute_activity_stats(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    session,
+                    params,
+                    metadata_tasks,
+                    cancelled,
+                );
+            }));
+        }
+        RequestOperation::ObserveRepository => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let observation =
+                        crate::updates::observe_repository(git, session, cancelled, deadline)
+                            .map_err(crate::updates::to_detail_error)?;
+                    let processed = observation.change_count;
+                    Ok((
+                        ResponseData::RepositoryObservation { observation },
+                        processed,
+                    ))
+                },
+            );
+        }
+        RequestOperation::DiffRefSnapshots => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let diff =
+                        crate::updates::diff_ref_snapshots(git, session, cancelled, deadline)
+                            .map_err(crate::updates::to_detail_error)?;
+                    let processed = diff.changes.len() as u32;
+                    Ok((ResponseData::RefSnapshotDiff { diff }, processed))
+                },
+            );
+        }
+        RequestOperation::GetHandoffFacts(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let facts = crate::handoff::get_handoff_facts(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::HandoffFacts { facts }, 1))
                 },
             );
         }
@@ -1803,6 +1904,10 @@ fn validate_request(
         | "searchCommits"
         | "listSearchIdentities"
         | "listSearchPaths"
+        | "getActivityStats"
+        | "observeRepository"
+        | "diffRefSnapshots"
+        | "getHandoffFacts"
         | "getCommit"
         | "listChangedFiles"
         | "readMergeCommits"
@@ -1899,6 +2004,26 @@ fn validate_request(
                             )
                         })
                 }
+                "getActivityStats" => {
+                    serde_json::from_value::<GetActivityStatsParams>(params.clone())
+                        .map(RequestOperation::GetActivityStats)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "getActivityStats params 无效".into(),
+                            )
+                        })
+                }
+                "getHandoffFacts" => {
+                    serde_json::from_value::<GetHandoffFactsParams>(params.clone())
+                        .map(RequestOperation::GetHandoffFacts)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "getHandoffFacts params 无效".into(),
+                            )
+                        })
+                }
                 "getCommit" => serde_json::from_value::<GetCommitParams>(params.clone())
                     .map(RequestOperation::GetCommit)
                     .map_err(|_| (ErrorCode::InvalidRequest, "getCommit params 无效".into())),
@@ -1961,6 +2086,8 @@ fn validate_request(
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
                         "getMetadataIndexStatus" => RequestOperation::GetMetadataIndexStatus,
                         "getRepositoryNavigation" => RequestOperation::GetRepositoryNavigation,
+                        "observeRepository" => RequestOperation::ObserveRepository,
+                        "diffRefSnapshots" => RequestOperation::DiffRefSnapshots,
                         "readSessionPreview" => RequestOperation::ReadSessionPreview,
                         "recordRepositoryView" => RequestOperation::RecordRepositoryView,
                         _ => RequestOperation::CloseRepository,
@@ -1986,6 +2113,10 @@ fn validate_request(
         | "searchCommits"
         | "listSearchIdentities"
         | "listSearchPaths"
+        | "getActivityStats"
+        | "observeRepository"
+        | "diffRefSnapshots"
+        | "getHandoffFacts"
         | "getCommit"
         | "listChangedFiles"
         | "readMergeCommits"
@@ -2918,6 +3049,115 @@ fn execute_search_identities(
         if !send_task_message(sender, shutdown, &cancelled, &message) {
             finish_cancelled(sender, shutdown, request_id, repo_id, generation);
         }
+    }
+    remove_request(requests, request_id, &cancelled);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_activity_stats(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    params: GetActivityStatsParams,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let cache_epoch = metadata_tasks.search_cache_epoch(&session);
+    let result = crate::search::activity_stats(
+        git_path,
+        &session_store::SessionStore::from_env(),
+        &session,
+        &params,
+        cache_epoch,
+        &cancelled,
+        std::time::Instant::now() + PREVIEW_TIMEOUT,
+    );
+    let mut stats = match result {
+        Ok(stats) => stats,
+        Err(error) => {
+            send_search_failure(
+                sender, shutdown, request_id, repo_id, generation, error, &cancelled,
+            );
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+    };
+    if metadata_tasks.search_cache_epoch(&session) != cache_epoch {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::SnapshotChanged,
+            "元数据索引已重建，请重试活动统计".into(),
+            true,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    let current_index = metadata_tasks.status(
+        &session_store::SessionStore::from_env(),
+        &session,
+        stats.index.quota_bytes,
+    );
+    if let Some(error) = current_index.error.as_ref().filter(|error| {
+        matches!(
+            error.code,
+            ErrorCode::IndexCorrupt
+                | ErrorCode::IndexVersionUnsupported
+                | ErrorCode::IndexUnavailable
+        )
+    }) {
+        send_search_failure(
+            sender,
+            shutdown,
+            request_id,
+            repo_id,
+            generation,
+            crate::metadata_index::IndexError {
+                code: error.code,
+                message: error.message.clone(),
+            },
+            &cancelled,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    stats.index = current_index;
+    let complete = stats.coverage.complete;
+    let processed = stats.matched_count.min(u32::MAX as u64) as u32;
+    let message = ServerMessage::Response {
+        request_id: request_id.to_owned(),
+        repo_id: repo_id.clone(),
+        generation: generation.clone(),
+        sequence: 0,
+        done: true,
+        coverage: Coverage {
+            complete,
+            processed,
+        },
+        next_cursor: None,
+        data: ResponseData::ActivityStats { stats },
+    };
+    if serde_json::to_vec(&message).map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES) {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::ResourceLimit,
+            "活动统计响应超过大小限制".into(),
+            false,
+        );
+    } else if !send_task_message(sender, shutdown, &cancelled, &message) {
+        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
     }
     remove_request(requests, request_id, &cancelled);
 }

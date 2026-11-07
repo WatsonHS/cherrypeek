@@ -5,7 +5,6 @@ import type { MetadataIndexAction } from "../../../../../packages/protocol/src/g
 import type { MetadataIndexStatus } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { isMetadataIndexRequestIdle, type RepositoryView } from "../lib/repository-session-store.js";
 import { errorTitle } from "../lib/errors.js";
-import { zoneLabel } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
@@ -29,32 +28,27 @@ export function previewLabel(preview: RepositoryView): string {
   if (preview.state === "cancelled") return "已取消";
   if (preview.state === "idle") return "未打开仓库";
   if (preview.commits.length === 0) return "当前范围没有提交";
-  const refsWarning = preview.refsTruncated ? " · 引用列表不完整" : "";
-  if (preview.pageOffset !== null && preview.hasMore) return `已显示第 ${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条，仍有更多${refsWarning}`;
-  if (preview.pageOffset !== null) return `当前页第 ${preview.pageOffset + 1}–${preview.pageOffset + preview.commits.length} 条${refsWarning}`;
-  if (preview.refsTruncated) return "首屏已加载 · 引用列表不完整";
-  return "首屏已加载";
+  if (preview.refsTruncated) return "引用列表不完整";
+  return "";
 }
 
-export function StatusBar({ status, preview, onIndexAction, previewStatus, searchBusy, timeField }: {
+export function StatusBar({ status, preview, onIndexAction, previewStatus, searchBusy }: {
   status: CoreStatus;
   preview: RepositoryView;
   onIndexAction(action: MetadataIndexAction): void;
   previewStatus?: string;
   searchBusy?: boolean;
-  timeField?: "author" | "committer";
 }): React.JSX.Element {
   const indexSupported = status.state === "ready" && status.core.capabilities.includes("metadataIndex");
+  const previewText = previewStatus ?? previewLabel(preview);
   return <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-[18px] border-t border-line px-4 text-xs text-fg3">
     <span className="flex items-center gap-1.5" title={status.state === "ready" ? `${status.core.coreVersion} · PID ${status.core.pid}` : undefined}>
       <span aria-hidden="true" className={cn("size-[7px] rounded-full", status.state === "ready" ? "bg-ok" : status.state === "error" ? "bg-bad" : "bg-line2")} />
       <span>{coreLabel(status)}</span>
     </span>
     <span>只读</span>
-      <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite">{previewStatus ?? previewLabel(preview)}</span>
+      <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite" className={previewText ? undefined : "hidden"}>{previewText}</span>
     {preview.session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} interactionBusy={Boolean(searchBusy)} /> : null}
-    <span className="flex-1" />
-    <span>{timeField === "author" ? "作者时间" : timeField === "committer" ? "提交者时间" : "提交时间"} · {zoneLabel()}</span>
   </footer>;
 }
 

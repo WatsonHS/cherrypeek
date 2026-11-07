@@ -10,7 +10,10 @@ export type Capability =
   | "metadataIndex"
   | "metadataSearch"
   | "historyGraph"
-  | "commitDetails";
+  | "commitDetails"
+  | "activityStats"
+  | "repositoryObservation"
+  | "handoffFacts";
 
 export interface CoreReady {
   capabilities: Capability[];

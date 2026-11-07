@@ -7,6 +7,10 @@ import type {
   SearchPaths,
   SearchPathEntry,
   SearchPathMatch,
+  ActivityStats,
+  RepositoryObservation,
+  RefSnapshotDiff,
+  HandoffFacts,
   ErrorCode,
   HistoryCommit,
   RecentRepository,
@@ -26,7 +30,8 @@ import type {
 } from "./generated/server-message.js";
 import type { MetadataIndexAction } from "./generated/client-message.js";
 import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField,
-  ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
+  ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetActivityStatsParams, GetHandoffFactsParams,
+  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
@@ -34,8 +39,10 @@ export type { MetadataIndexAction } from "./generated/client-message.js";
 export type { MetadataIndexStatus } from "./generated/server-message.js";
 export type { SearchPage, SearchIdentities, SearchIdentity } from "./generated/server-message.js";
 export type { SearchPaths, SearchPathEntry, SearchPathMatch } from "./generated/server-message.js";
+export type { ActivityStats, ActivityDay, ActivityAuthor, RepositoryObservation, RefSnapshotDiff, RefSnapshotChange, HandoffFacts, HandoffParentGroup } from "./generated/server-message.js";
 export type { CommitDetails, ChangedFilesPage, ChangedFile, ChangeOverview, MergeCommitsPage, BranchesContainingResult, FileDiff, GitPath, Trailer } from "./generated/server-message.js";
 export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField, SearchPathFilter, SearchPathKind, ListSearchPathsParams } from "./generated/client-message.js";
+export type { GetActivityStatsParams, GetHandoffFactsParams } from "./generated/client-message.js";
 export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
@@ -82,6 +89,12 @@ export interface RefreshedRepository {
   page: HistoryPage;
 }
 
+export interface RepositoryObservationEvent {
+  repoId: string;
+  browsingGeneration: string;
+  observation: RepositoryObservation;
+}
+
 export interface RepositorySessionApi {
   openRepositorySession(path: string): Promise<RepositorySessionResult<RepositorySessionInfo>>;
   getRepositorySession(): Promise<RepositorySessionResult<RepositorySessionInfo>>;
@@ -103,6 +116,14 @@ export interface RepositorySessionApi {
   listSearchIdentities(params: SearchIdentitiesParams): Promise<RepositorySessionResult<SearchIdentities>>;
   listSearchPaths(params: ListSearchPathsParams): Promise<RepositorySessionResult<SearchPaths>>;
   cancelSearch(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  getActivityStats(params: GetActivityStatsParams): Promise<RepositorySessionResult<ActivityStats>>;
+  cancelActivityStats(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  observeRepository(): Promise<RepositorySessionResult<RepositoryObservation>>;
+  cancelRepositoryObservation(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  diffRefSnapshots(): Promise<RepositorySessionResult<RefSnapshotDiff>>;
+  cancelRefSnapshotDiff(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  getHandoffFacts(params: GetHandoffFactsParams): Promise<RepositorySessionResult<HandoffFacts>>;
+  cancelHandoffFacts(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   getCommit(params: GetCommitParams): Promise<RepositorySessionResult<CommitDetails>>;
   listChangedFiles(params: ListChangedFilesParams): Promise<RepositorySessionResult<ChangedFilesPage>>;
   readMergeCommits(params: ReadMergeCommitsParams): Promise<RepositorySessionResult<MergeCommitsPage>>;

@@ -10,3 +10,5 @@ rust-version = "1.95"
 schemars = "=1.2.3"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
+chrono = "=0.4.45"
+chrono-tz = "=0.10.4"

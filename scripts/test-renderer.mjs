@@ -17,6 +17,7 @@ try {
       "selection-intent": resolve(root, "apps/desktop/src/renderer/lib/selection-intent.ts"),
       "virtual-window": resolve(root, "apps/desktop/src/renderer/lib/virtual-window.ts"),
       "graph": resolve(root, "apps/desktop/src/renderer/lib/graph.ts"),
+      "handoff-prompt": resolve(root, "apps/desktop/src/renderer/lib/handoff-prompt.ts"),
     },
     outdir: buildDir,
     bundle: true,
@@ -27,7 +28,9 @@ try {
     sourcemap: false,
   });
   const testDir = resolve(root, "tests/renderer");
-  const testFiles = (await readdir(testDir)).filter(file => file.endsWith(".test.mjs")).map(file => resolve(testDir, file));
+  const requestedTests = process.env.COMMITSCOPE_RENDERER_TEST_FILES?.split(",").map(file => file.trim()).filter(Boolean);
+  const testFiles = (await readdir(testDir)).filter(file => file.endsWith(".test.mjs") && (!requestedTests || requestedTests.includes(file))).map(file => resolve(testDir, file));
+  if (testFiles.length === 0) throw new Error("No renderer tests matched COMMITSCOPE_RENDERER_TEST_FILES.");
   const child = spawn(process.execPath, ["--test", "--test-timeout=10000", ...testFiles], {
     cwd: root,
     env: { ...process.env, COMMITSCOPE_RENDERER_BUILD_DIR: buildDir },

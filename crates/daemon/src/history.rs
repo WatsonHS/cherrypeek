@@ -815,6 +815,7 @@ fn read_page_from_stream(
                 above: 0,
                 below: 0,
                 hidden_lane_count: 0,
+                hidden_through_ranges: Vec::new(),
                 segments: Vec::new(),
             },
         })

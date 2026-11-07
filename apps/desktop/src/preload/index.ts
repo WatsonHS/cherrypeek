@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { CommitScopeApi, CoreStatus } from "../../../../packages/protocol/src/core-status.js";
+import type { RepositoryObservationEvent } from "../../../../packages/protocol/src/repository-session.js";
 
 const api: CommitScopeApi = {
   getCoreStatus: () => ipcRenderer.invoke("commitscope:core:get-status") as Promise<CoreStatus>,
@@ -11,6 +12,11 @@ const api: CommitScopeApi = {
   chooseRepository: () => ipcRenderer.invoke("commitscope:repository:choose") as Promise<string | null>,
   getLaunchRepository: () => ipcRenderer.invoke("commitscope:repository:launch") as Promise<string | null>,
   copyText: text => ipcRenderer.invoke("commitscope:clipboard:write-text", text) as Promise<void>,
+  onRepositoryObservationChanged(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, observation: RepositoryObservationEvent) => listener(observation);
+    ipcRenderer.on("commitscope:updates:observed", wrapped);
+    return () => ipcRenderer.removeListener("commitscope:updates:observed", wrapped);
+  },
   openRepositorySession: path => ipcRenderer.invoke("commitscope:session:open", path),
   getRepositorySession: () => ipcRenderer.invoke("commitscope:session:get"),
   readSessionPreview: () => ipcRenderer.invoke("commitscope:session:preview"),
@@ -31,6 +37,14 @@ const api: CommitScopeApi = {
   listSearchIdentities: params => ipcRenderer.invoke("commitscope:search:identities", params),
   listSearchPaths: params => ipcRenderer.invoke("commitscope:search:paths", params),
   cancelSearch: () => ipcRenderer.invoke("commitscope:search:cancel"),
+  getActivityStats: params => ipcRenderer.invoke("commitscope:activity:stats", params),
+  cancelActivityStats: () => ipcRenderer.invoke("commitscope:activity:stats:cancel"),
+  observeRepository: () => ipcRenderer.invoke("commitscope:updates:observe"),
+  cancelRepositoryObservation: () => ipcRenderer.invoke("commitscope:updates:observe:cancel"),
+  diffRefSnapshots: () => ipcRenderer.invoke("commitscope:updates:diff"),
+  cancelRefSnapshotDiff: () => ipcRenderer.invoke("commitscope:updates:diff:cancel"),
+  getHandoffFacts: params => ipcRenderer.invoke("commitscope:handoff:facts", params),
+  cancelHandoffFacts: () => ipcRenderer.invoke("commitscope:handoff:cancel"),
   getCommit: params => ipcRenderer.invoke("commitscope:details:get", params),
   listChangedFiles: params => ipcRenderer.invoke("commitscope:details:files", params),
   readMergeCommits: params => ipcRenderer.invoke("commitscope:details:merge", params),

@@ -2,7 +2,7 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0、M1（P1-01 至 P1-06）及 P2-01 已完成本机 macOS 技术验收，P2-02 至 P2-04、P3-01 已实现并完成定向检查，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条，主列表最多保留 1800 条摘要，另为当前 merge 页预留 200 条；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，固定六列并提示隐藏数量，明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整消息 / trailer、父提交文件比较、merge 带入分页与按需包含分支已接入，见 [P2-02 验证记录](docs/validation/p2-02-commit-details.md)；完整实窗检查未跑完。P2-03 已接入点击文件展开只读 diff，支持父提交切换、行号、二进制 / LFS / gitlink 提示和截断说明，见[实现及检查记录](docs/implementation/p2-03-readonly-diff.md)。P2-04 已接入搜索结果的历史定位与返回，恢复原查询、选择和滚动锚点，并提供快捷键说明，见[实现记录](docs/implementation/p2-04-history-location.md)。P3-01 已接入文件 / 目录字面路径筛选、当前快照路径补全和 merge 命中父说明，见[实现记录](docs/implementation/p3-01-path-history.md)。活动统计与外部通知等尚未完成，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：只读 MVP 功能已齐全，M3 本机小规模主流程通过，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条，主列表最多保留 1800 条摘要，另为当前 merge 页预留 200 条；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，默认显示六列，点击图区 +N 可展开当前范围的全部图线并横向滚动，支持收起；明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整消息 / trailer、父提交文件比较、merge 带入分页与按需包含分支已接入，见 [P2-02 验证记录](docs/validation/p2-02-commit-details.md)；完整实窗检查未跑完。P2-03 已接入点击文件展开只读 diff，支持父提交切换、行号、二进制 / LFS / gitlink 提示和截断说明，见[实现及检查记录](docs/implementation/p2-03-readonly-diff.md)。P2-04 已接入搜索结果的历史定位与返回，恢复原查询、选择和滚动锚点，并提供快捷键说明，见[实现记录](docs/implementation/p2-04-history-location.md)。P3-01 已接入文件 / 目录字面路径筛选、当前快照路径补全和 merge 命中父说明，见[实现记录](docs/implementation/p3-01-path-history.md)。P3-02 活动统计、P3-03 外部变化提示与 P3-05 可编辑 Agent 提示词已接入；P3-04 的 8 步实窗流程和当前项目只读数据对照通过，见[M3 记录](docs/validation/m3-mvp.md)。尚未完成 M4 性能、长期稳定性与发行验收。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
@@ -62,8 +62,10 @@
 | [P2-03 代码级计划](docs/implementation/p2-03-readonly-diff.md) | 点击文件读取 unified diff、内容边界与最小检查 |
 | [P2-04 代码级计划](docs/implementation/p2-04-history-location.md) | 搜索结果定位到历史、返回锚点与快捷键 |
 | [P3-01 代码级计划](docs/implementation/p3-01-path-history.md) | 字面文件 / 目录筛选、冻结快照补全与命中父说明 |
+| [M3 功能批次](docs/implementation/p3-02-05-mvp-batch.md) | 统计、外部更新和 Agent 提示词的代码计划 |
+| [M3 主流程记录](docs/validation/m3-mvp.md) | 定向检查、实窗闭环与未验证范围 |
 
-建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M3 / P3-02` 活动统计，继续沿用 Claude 的界面设计。
+建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M4 / P4-01` 性能达标与边界恢复，继续沿用 Claude 的界面设计。
 
 ## 本地运行
 

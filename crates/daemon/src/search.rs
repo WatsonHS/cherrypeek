@@ -7,17 +7,17 @@ use crate::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use caseless::default_case_fold_str;
 use commitscope_core::{
-    CommitIdentity, CommitSummary, ErrorCode, ListSearchPathsParams, MetadataIndexCoverage,
-    SearchCommitsParams, SearchIdentities, SearchIdentitiesParams, SearchIdentity, SearchPage,
-    SearchPathEntry, SearchPathFilter, SearchPathKind, SearchPathMatch, SearchPaths, SearchQuery,
-    SearchTimeField,
+    ActivityAuthor, ActivityDay, ActivityStats, CommitIdentity, CommitSummary, ErrorCode,
+    GetActivityStatsParams, ListSearchPathsParams, MetadataIndexCoverage, SearchCommitsParams,
+    SearchIdentities, SearchIdentitiesParams, SearchIdentity, SearchPage, SearchPathEntry,
+    SearchPathFilter, SearchPathKind, SearchPathMatch, SearchPaths, SearchQuery, SearchTimeField,
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     path::Path,
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::Instant,
@@ -30,6 +30,8 @@ const JS_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 const PATH_DIFF_BATCH_SIZE: usize = 64;
 const PATH_DIFF_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const PATH_COMPLETION_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const ACTIVITY_AUTHOR_LIMIT: usize = 500;
+const ACTIVITY_DAY_LIMIT: usize = 3660;
 
 #[derive(Clone)]
 struct CompiledQuery {
@@ -269,6 +271,242 @@ pub(crate) fn list_search_identities(
             })
         },
     )
+}
+
+pub(crate) fn activity_stats(
+    executable: Option<&Path>,
+    store: &SessionStore,
+    session: &session::RepositorySession,
+    params: &GetActivityStatsParams,
+    cache_epoch: u64,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<ActivityStats, IndexError> {
+    let (snapshot_key, _) = metadata_index::snapshot_identity(session)?;
+    let compiled = compile_query(&params.query, session, &snapshot_key)?;
+    if compiled.path_bytes.is_some() && executable.is_none() {
+        return Err(IndexError {
+            code: ErrorCode::GitUnavailable,
+            message: "Git executable is required for path activity statistics".into(),
+        });
+    }
+    let time_zone = params
+        .query
+        .time_zone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| invalid_request("timeZone must be an IANA time zone"))?;
+    metadata_index::with_readonly_search_snapshot(
+        store,
+        session,
+        metadata_index::configured_quota()?,
+        cache_epoch,
+        cancelled,
+        deadline,
+        |connection, snapshot| {
+            let mut matched_count = 0_u64;
+            let mut days = BTreeMap::<String, u64>::new();
+            let mut authors = BTreeMap::<(String, String), u64>::new();
+            let mut days_truncated = false;
+            let mut authors_truncated = false;
+            let mut path_batch = Vec::<ActivityCandidate>::with_capacity(PATH_DIFF_BATCH_SIZE);
+            if let Some(connection) = connection {
+                let mut statement = connection.prepare(SEARCH_SCAN_SQL).map_err(map_sql_error)?;
+                let mut rows = statement
+                    .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+                    .map_err(map_sql_error)?;
+                while let Some(row) = rows.next().map_err(map_sql_error)? {
+                    check_active(cancelled, deadline)?;
+                    let Some(key) = matching_row_key(row, &compiled, cancelled, deadline)? else {
+                        continue;
+                    };
+                    let author_name: String = row.get(4).map_err(map_sql_error)?;
+                    let author_email: String = row.get(5).map_err(map_sql_error)?;
+                    if compiled.path_bytes.is_some() {
+                        path_batch.push(ActivityCandidate {
+                            key,
+                            summary: summary_from_row(row)?,
+                            author_name,
+                            author_email,
+                        });
+                        if path_batch.len() == PATH_DIFF_BATCH_SIZE {
+                            add_path_activity_batch(
+                                executable.expect("path activity requires Git"),
+                                session,
+                                &compiled,
+                                &time_zone,
+                                &mut path_batch,
+                                cancelled,
+                                deadline,
+                                &mut matched_count,
+                                &mut days,
+                                &mut authors,
+                                &mut days_truncated,
+                                &mut authors_truncated,
+                            )?;
+                        }
+                    } else {
+                        record_activity(
+                            key.timestamp,
+                            author_name,
+                            author_email,
+                            &time_zone,
+                            &mut matched_count,
+                            &mut days,
+                            &mut authors,
+                            &mut days_truncated,
+                            &mut authors_truncated,
+                        )?;
+                    }
+                }
+            }
+            if !path_batch.is_empty() {
+                add_path_activity_batch(
+                    executable.expect("path activity requires Git"),
+                    session,
+                    &compiled,
+                    &time_zone,
+                    &mut path_batch,
+                    cancelled,
+                    deadline,
+                    &mut matched_count,
+                    &mut days,
+                    &mut authors,
+                    &mut days_truncated,
+                    &mut authors_truncated,
+                )?;
+            }
+            Ok(ActivityStats {
+                query_key: compiled.key.clone(),
+                coverage: MetadataIndexCoverage {
+                    processed: snapshot.watermark,
+                    complete: snapshot.complete,
+                },
+                index: snapshot.index_status.clone(),
+                matched_count,
+                time_field: compiled.query.time_field,
+                time_zone: compiled.query.time_zone.clone(),
+                days: days
+                    .into_iter()
+                    .map(|(day, count)| ActivityDay { day, count })
+                    .collect(),
+                days_truncated,
+                authors: authors
+                    .into_iter()
+                    .map(|((name, email), count)| ActivityAuthor { name, email, count })
+                    .collect(),
+                authors_truncated,
+            })
+        },
+    )
+}
+
+struct ActivityCandidate {
+    key: CandidateKey,
+    summary: CommitSummary,
+    author_name: String,
+    author_email: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_path_activity_batch(
+    executable: &Path,
+    session: &session::RepositorySession,
+    compiled: &CompiledQuery,
+    time_zone: &chrono_tz::Tz,
+    batch: &mut Vec<ActivityCandidate>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    matched_count: &mut u64,
+    days: &mut BTreeMap<String, u64>,
+    authors: &mut BTreeMap<(String, String), u64>,
+    days_truncated: &mut bool,
+    authors_truncated: &mut bool,
+) -> Result<(), IndexError> {
+    let filter = compiled.query.path.as_ref().expect("path activity filter");
+    let path = compiled.path_bytes.as_deref().expect("path activity bytes");
+    let summaries = batch
+        .iter()
+        .map(|candidate| candidate.summary.clone())
+        .collect::<Vec<_>>();
+    let matches = path_indices_for_commits(
+        executable,
+        Path::new(&session.discovered.info.path),
+        filter,
+        path,
+        &summaries,
+        cancelled,
+        deadline,
+    )?;
+    for (candidate, parent_indices) in batch.drain(..).zip(matches) {
+        if !parent_indices.is_empty() {
+            record_activity(
+                candidate.key.timestamp,
+                candidate.author_name,
+                candidate.author_email,
+                time_zone,
+                matched_count,
+                days,
+                authors,
+                days_truncated,
+                authors_truncated,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_activity(
+    timestamp: i64,
+    author_name: String,
+    author_email: String,
+    time_zone: &chrono_tz::Tz,
+    matched_count: &mut u64,
+    days: &mut BTreeMap<String, u64>,
+    authors: &mut BTreeMap<(String, String), u64>,
+    days_truncated: &mut bool,
+    authors_truncated: &mut bool,
+) -> Result<(), IndexError> {
+    let date = chrono::DateTime::from_timestamp(timestamp, 0)
+        .ok_or_else(|| corrupt_index("Indexed commit timestamp is outside supported range"))?
+        .with_timezone(time_zone)
+        .date_naive()
+        .to_string();
+    *matched_count = matched_count
+        .checked_add(1)
+        .ok_or_else(|| invalid_request("Activity match count overflow"))?;
+    increment_bounded(days, date, ACTIVITY_DAY_LIMIT, days_truncated)?;
+    increment_bounded(
+        authors,
+        (author_name, author_email),
+        ACTIVITY_AUTHOR_LIMIT,
+        authors_truncated,
+    )?;
+    Ok(())
+}
+
+fn increment_bounded<K: Ord>(
+    values: &mut BTreeMap<K, u64>,
+    key: K,
+    limit: usize,
+    truncated: &mut bool,
+) -> Result<(), IndexError> {
+    if let Some(count) = values.get_mut(&key) {
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid_request("Activity bucket count overflow"))?;
+        return Ok(());
+    }
+    if values.len() < limit {
+        values.insert(key, 1);
+    } else if values.last_key_value().is_some_and(|(last, _)| &key < last) {
+        values.pop_last();
+        values.insert(key, 1);
+        *truncated = true;
+    } else {
+        *truncated = true;
+    }
+    Ok(())
 }
 
 pub(crate) fn list_search_paths(
@@ -1705,6 +1943,48 @@ mod tests {
         insert_path_suggestion(&mut entries, b"src/lib.rs".to_vec(), 0, 1, &mut truncated);
         assert!(truncated);
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn activity_buckets_use_iana_dst_and_raw_author_identity() {
+        let timezone = "America/Los_Angeles".parse::<chrono_tz::Tz>().unwrap();
+        let mut matched = 0;
+        let mut days = BTreeMap::new();
+        let mut authors = BTreeMap::new();
+        let mut days_truncated = false;
+        let mut authors_truncated = false;
+        for (time, name, email) in [
+            ("2026-03-08T07:30:00Z", "A", "a@example.test"),
+            ("2026-03-08T08:30:00Z", "A", "a@example.test"),
+            ("2026-03-08T08:30:00Z", "a", "a@example.test"),
+        ] {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(time)
+                .unwrap()
+                .timestamp();
+            record_activity(
+                timestamp,
+                name.into(),
+                email.into(),
+                &timezone,
+                &mut matched,
+                &mut days,
+                &mut authors,
+                &mut days_truncated,
+                &mut authors_truncated,
+            )
+            .unwrap();
+        }
+        assert_eq!(matched, 3);
+        assert_eq!(days.get("2026-03-07"), Some(&1));
+        assert_eq!(days.get("2026-03-08"), Some(&2));
+        assert_eq!(
+            authors.get(&("A".into(), "a@example.test".into())),
+            Some(&2)
+        );
+        assert_eq!(
+            authors.get(&("a".into(), "a@example.test".into())),
+            Some(&1)
+        );
     }
 
     #[test]

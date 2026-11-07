@@ -214,6 +214,27 @@ impl JsonSchema for NullableParentIndexSchema {
     }
 }
 
+struct NullableSchema<T>(std::marker::PhantomData<T>);
+
+impl<T: JsonSchema> JsonSchema for NullableSchema<T> {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        format!("Nullable{}", T::schema_name()).into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let value_schema = generator.subschema_for::<T>();
+        let value_schema = serde_json::to_value(value_schema).expect("nullable schema serializes");
+        Schema::try_from(serde_json::json!({
+            "anyOf": [value_schema, {"type": "null"}]
+        }))
+        .expect("valid nullable schema")
+    }
+}
+
 struct NullableCommitUpdateReasonSchema;
 
 impl JsonSchema for NullableCommitUpdateReasonSchema {
@@ -272,6 +293,9 @@ pub enum Capability {
     MetadataSearch,
     HistoryGraph,
     CommitDetails,
+    ActivityStats,
+    RepositoryObservation,
+    HandoffFacts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -306,6 +330,9 @@ impl CoreReady {
                 Capability::MetadataSearch,
                 Capability::HistoryGraph,
                 Capability::CommitDetails,
+                Capability::ActivityStats,
+                Capability::RepositoryObservation,
+                Capability::HandoffFacts,
             ],
         }
     }
@@ -369,6 +396,10 @@ pub enum RequestParams {
     BranchesContaining(BranchesContainingParams),
     ReadDiff(ReadDiffParams),
     ListSearchPaths(ListSearchPathsParams),
+    GetActivityStats(GetActivityStatsParams),
+    ObserveRepository(EmptyParams),
+    DiffRefSnapshots(EmptyParams),
+    GetHandoffFacts(GetHandoffFactsParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -563,6 +594,224 @@ pub struct ListSearchPathsParams {
     pub text: String,
     #[schemars(range(min = 1, max = 100))]
     pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetActivityStatsParams {
+    pub query: SearchQuery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivityDay {
+    #[schemars(length(min = 10, max = 10))]
+    pub day: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivityAuthor {
+    #[schemars(length(max = 4096))]
+    pub name: String,
+    #[schemars(length(max = 4096))]
+    pub email: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivityStats {
+    #[schemars(length(min = 1, max = 128))]
+    pub query_key: String,
+    pub coverage: MetadataIndexCoverage,
+    pub index: MetadataIndexStatus,
+    pub matched_count: u64,
+    pub time_field: SearchTimeField,
+    #[schemars(length(min = 1, max = 128))]
+    pub time_zone: String,
+    #[schemars(length(max = 3660))]
+    pub days: Vec<ActivityDay>,
+    pub days_truncated: bool,
+    #[schemars(length(max = 500))]
+    pub authors: Vec<ActivityAuthor>,
+    pub authors_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryObservation {
+    #[schemars(length(min = 1, max = 256))]
+    pub generation: String,
+    pub observed_at_unix_ms: u64,
+    pub changed_ref_count: u32,
+    pub worktrees_changed: bool,
+    pub change_count: u32,
+    pub refs_truncated: bool,
+    pub worktrees_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RefSnapshotChangeKind {
+    FastForward,
+    Rewritten,
+    Created,
+    Deleted,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefSnapshotChange {
+    #[schemars(length(min = 1, max = 16384))]
+    pub name: String,
+    pub kind: RefKind,
+    pub change: RefSnapshotChangeKind,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub old_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub new_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub added_count: Option<u64>,
+    #[schemars(length(max = 20))]
+    pub added_commits: Vec<CommitSummary>,
+    pub added_commits_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub replaced_count: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<MergeStatus>")]
+    pub deleted_merge_status: Option<MergeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefSnapshotDiff {
+    #[schemars(length(min = 1, max = 256))]
+    pub from_generation: String,
+    #[schemars(length(min = 1, max = 256))]
+    pub to_generation: String,
+    pub observed_at_unix_ms: u64,
+    #[schemars(length(max = 2000))]
+    pub changes: Vec<RefSnapshotChange>,
+    pub truncated: bool,
+    pub complete: bool,
+    pub worktrees_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetHandoffFactsParams {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 16384))]
+    pub branch_ref: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub selected_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 256))]
+    pub operation_worktree_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 256))]
+    pub stale_worktree_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HandoffParentGroup {
+    pub parent_index: u16,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub total_count: Option<u64>,
+    #[schemars(length(max = 50))]
+    pub commits: Vec<CommitSummary>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HandoffFacts {
+    pub observed_at_unix_ms: u64,
+    pub repository: RepositoryInfo,
+    pub scope: RepositoryScope,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorktreeInfo>")]
+    pub window_worktree: Option<WorktreeInfo>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<RefInfo>")]
+    pub branch: Option<RefInfo>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableDefaultBaseSchema")]
+    pub base: Option<DefaultBase>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorktreeInfo>")]
+    pub operation_worktree: Option<WorktreeInfo>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<CommitSummary>")]
+    pub selected_commit: Option<CommitSummary>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub ahead: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub behind: Option<u64>,
+    #[schemars(length(max = 20))]
+    pub overlap_paths: Vec<GitPath>,
+    pub overlap_complete: bool,
+    pub overlap_truncated: bool,
+    #[schemars(length(max = 50))]
+    pub branch_commits: Vec<CommitSummary>,
+    pub branch_commits_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub branch_commits_count: Option<u64>,
+    #[schemars(length(max = 50))]
+    pub changed_files: Vec<ChangedFile>,
+    pub changed_files_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub changed_files_count: Option<u64>,
+    #[schemars(length(max = 127))]
+    pub merge_parent_groups: Vec<HandoffParentGroup>,
+    pub merge_parent_groups_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<MergeStatus>")]
+    pub merge_status: Option<MergeStatus>,
+    #[schemars(length(max = 128))]
+    pub checked_out_by: Vec<WorktreeInfo>,
+    pub checked_out_by_complete: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorktreeInfo>")]
+    pub stale_worktree: Option<WorktreeInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1073,6 +1322,14 @@ pub enum ResponseData {
     SearchIdentities { result: SearchIdentities },
     #[serde(rename = "searchPaths")]
     SearchPaths { paths: SearchPaths },
+    #[serde(rename = "activityStats")]
+    ActivityStats { stats: ActivityStats },
+    #[serde(rename = "repositoryObservation")]
+    RepositoryObservation { observation: RepositoryObservation },
+    #[serde(rename = "refSnapshotDiff")]
+    RefSnapshotDiff { diff: RefSnapshotDiff },
+    #[serde(rename = "handoffFacts")]
+    HandoffFacts { facts: HandoffFacts },
     #[serde(rename = "commitDetails")]
     CommitDetails { details: CommitDetails },
     #[serde(rename = "changedFiles")]
@@ -1159,8 +1416,19 @@ pub struct HistoryGraph {
     pub below: u8,
     #[schemars(range(max = 16384))]
     pub hidden_lane_count: u16,
+    #[schemars(length(max = 8192))]
+    pub hidden_through_ranges: Vec<HistoryGraphLaneRange>,
     #[schemars(length(max = 256))]
     pub segments: Vec<HistoryGraphSegment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryGraphLaneRange {
+    #[schemars(range(min = 6, max = 16383))]
+    pub start_lane: u16,
+    #[schemars(range(min = 6, max = 16383))]
+    pub end_lane: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1733,7 +2001,7 @@ mod tests {
             "committer":{"name":"A","email":"a@example.test","timestamp":"1","offset":"+0000"},
             "textLossy":false,
             "isNewSinceLastSeen":true,
-            "graph":{"lane":0,"color":0,"parents":[],"boundary":false,"above":0,"below":0,"hiddenLaneCount":0,"segments":[]}
+            "graph":{"lane":0,"color":0,"parents":[],"boundary":false,"above":0,"below":0,"hiddenLaneCount":0,"hiddenThroughRanges":[],"segments":[]}
         });
         let decoded: HistoryCommit = serde_json::from_value(wire.clone()).unwrap();
         assert!(decoded.is_new_since_last_seen);

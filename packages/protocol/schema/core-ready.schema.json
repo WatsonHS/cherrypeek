@@ -13,7 +13,10 @@
         "metadataIndex",
         "metadataSearch",
         "historyGraph",
-        "commitDetails"
+        "commitDetails",
+        "activityStats",
+        "repositoryObservation",
+        "handoffFacts"
       ],
       "type": "string"
     },

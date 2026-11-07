@@ -1,5 +1,8 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, session, type IpcMainInvokeEvent } from "electron";
-import { isAbsolute, resolve } from "node:path";
+import { watch, readdirSync, type FSWatcher } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+import type { RepositoryObservationEvent } from "../../../../packages/protocol/src/repository-session.js";
+import type { RepositorySessionInfo } from "../../../../packages/protocol/src/generated/server-message.js";
 import { pathToFileURL } from "node:url";
 import { CoreProcess } from "./core-process.js";
 import { ProtocolClientError } from "./protocol-transport.js";
@@ -33,6 +36,15 @@ const IPC_SEARCH_COMMITS = "commitscope:search:commits";
 const IPC_SEARCH_IDENTITIES = "commitscope:search:identities";
 const IPC_SEARCH_PATHS = "commitscope:search:paths";
 const IPC_SEARCH_CANCEL = "commitscope:search:cancel";
+const IPC_ACTIVITY_STATS = "commitscope:activity:stats";
+const IPC_ACTIVITY_STATS_CANCEL = "commitscope:activity:stats:cancel";
+const IPC_REPOSITORY_OBSERVE = "commitscope:updates:observe";
+const IPC_REPOSITORY_OBSERVE_CANCEL = "commitscope:updates:observe:cancel";
+const IPC_REPOSITORY_OBSERVED = "commitscope:updates:observed";
+const IPC_REFS_DIFF = "commitscope:updates:diff";
+const IPC_REFS_DIFF_CANCEL = "commitscope:updates:diff:cancel";
+const IPC_HANDOFF_FACTS = "commitscope:handoff:facts";
+const IPC_HANDOFF_CANCEL = "commitscope:handoff:cancel";
 const IPC_COMMIT_GET = "commitscope:details:get";
 const IPC_CHANGED_FILES = "commitscope:details:files";
 const IPC_MERGE_COMMITS = "commitscope:details:merge";
@@ -50,6 +62,9 @@ let window: BrowserWindow | undefined;
 let core: CoreProcess | undefined;
 let repositorySessions: RepositorySessionController | undefined;
 let quitting = false;
+let repositoryWatchers: FSWatcher[] = [];
+let observationTimer: ReturnType<typeof setTimeout> | undefined;
+let observationFallback: ReturnType<typeof setInterval> | undefined;
 
 function isTrustedMainFrame(event: IpcMainInvokeEvent): boolean {
   return Boolean(window && !window.isDestroyed() && event.sender === window.webContents &&
@@ -93,7 +108,11 @@ function launchRepository(): string | null {
 function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_SESSION_OPEN, (event, path: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.open(path));
+    return sessionResult(async () => {
+      const result = await repositorySessions!.open(path);
+      configureRepositoryObservation(result);
+      return result;
+    });
   });
   ipcMain.handle(IPC_SESSION_GET, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
@@ -109,7 +128,11 @@ function registerRepositorySessionIpc(): void {
   });
   ipcMain.handle(IPC_SESSION_CLOSE, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.close());
+    return sessionResult(async () => {
+      const result = await repositorySessions!.close();
+      clearRepositoryObservation();
+      return result;
+    });
   });
   ipcMain.handle(IPC_SESSION_LIST_RECENT, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
@@ -121,7 +144,11 @@ function registerRepositorySessionIpc(): void {
   });
   ipcMain.handle(IPC_SESSION_SELECT_SCOPE, (event, scope: unknown, pageSize: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.selectScope(scope, pageSize === undefined ? 200 : pageSize as number));
+    return sessionResult(async () => {
+      const result = await repositorySessions!.selectScope(scope, pageSize === undefined ? 200 : pageSize as number);
+      configureRepositoryObservation(result.session);
+      return result;
+    });
   });
   ipcMain.handle(IPC_REF_MERGE_STATUS, (event, refNames: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
@@ -193,8 +220,105 @@ function registerRepositorySessionIpc(): void {
   });
   ipcMain.handle(IPC_HISTORY_REFRESH, (event, pageSize: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.refreshRepository(pageSize === undefined ? 200 : pageSize as number));
+    return sessionResult(async () => {
+      const result = await repositorySessions!.refreshRepository(pageSize === undefined ? 200 : pageSize as number);
+      configureRepositoryObservation(result.session);
+      return result;
+    });
   });
+  ipcMain.handle(IPC_ACTIVITY_STATS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getActivityStats(params));
+  });
+  ipcMain.handle(IPC_ACTIVITY_STATS_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelActivityStats());
+  });
+  ipcMain.handle(IPC_REPOSITORY_OBSERVE, (event) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(async () => {
+      const identity = repositorySessions!.getCurrentSessionIdentity();
+      const observation = await repositorySessions!.observeRepository();
+      if (identity) broadcastRepositoryObservation({ ...identity, browsingGeneration: identity.generation, observation });
+      return observation;
+    });
+  });
+  ipcMain.handle(IPC_REPOSITORY_OBSERVE_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelRepositoryObservation());
+  });
+  ipcMain.handle(IPC_REFS_DIFF, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.diffRefSnapshots());
+  });
+  ipcMain.handle(IPC_REFS_DIFF_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelRefSnapshotDiff());
+  });
+  ipcMain.handle(IPC_HANDOFF_FACTS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getHandoffFacts(params));
+  });
+  ipcMain.handle(IPC_HANDOFF_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelHandoffFacts());
+  });
+}
+
+function broadcastRepositoryObservation(event: RepositoryObservationEvent): void {
+  if (window && !window.isDestroyed()) window.webContents.send(IPC_REPOSITORY_OBSERVED, event);
+}
+
+function configureRepositoryObservation(sessionInfo: RepositorySessionInfo): void {
+  clearRepositoryObservation();
+  const refsDirs = [join(sessionInfo.repository.commonDir, "refs"), join(sessionInfo.repository.gitDir, "refs")];
+  const paths = new Set([join(sessionInfo.repository.gitDir, "HEAD"), join(sessionInfo.repository.commonDir, "packed-refs"), join(sessionInfo.repository.commonDir, "worktrees"), ...refsDirs]);
+  const dirs = new Set<string>();
+  for (const root of refsDirs) collectDirectories(root, dirs);
+  for (const path of [...paths, ...dirs]) {
+    try {
+      repositoryWatchers.push(watch(path, () => scheduleRepositoryObservation()));
+    } catch { /* Git metadata may be absent or inaccessible; focus and visible polling remain. */ }
+  }
+  observationFallback = setInterval(() => {
+    if (window && !window.isDestroyed() && window.isVisible()) void observeAndBroadcast();
+  }, 5_000);
+  scheduleRepositoryObservation();
+}
+
+function collectDirectories(path: string, output: Set<string>): void {
+  try {
+    output.add(path);
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (entry.isDirectory()) collectDirectories(join(path, entry.name), output);
+    }
+  } catch { /* Missing refs directories are normal in empty repositories. */ }
+}
+
+function scheduleRepositoryObservation(): void {
+  if (observationTimer) clearTimeout(observationTimer);
+  observationTimer = setTimeout(() => {
+    observationTimer = undefined;
+    void observeAndBroadcast();
+  }, 300);
+}
+
+async function observeAndBroadcast(): Promise<void> {
+  if (!repositorySessions) return;
+  const identity = repositorySessions.getCurrentSessionIdentity();
+  if (!identity) return;
+  const result = await sessionResult(() => repositorySessions!.observeRepository());
+  if (!result.ok) return;
+  broadcastRepositoryObservation({ ...identity, browsingGeneration: identity.generation, observation: result.value });
+}
+
+function clearRepositoryObservation(): void {
+  for (const watcher of repositoryWatchers) watcher.close();
+  repositoryWatchers = [];
+  if (observationTimer) clearTimeout(observationTimer);
+  observationTimer = undefined;
+  if (observationFallback) clearInterval(observationFallback);
+  observationFallback = undefined;
 }
 
 async function sessionResult<T>(action: () => Promise<T>): Promise<RepositorySessionResult<T>> {
@@ -244,6 +368,7 @@ async function createWindow(): Promise<void> {
       });
     }
   };
+  window.on("focus", () => { void observeAndBroadcast(); });
   syncWindowAppearance();
   nativeTheme.on("updated", syncWindowAppearance);
   window.on("closed", () => nativeTheme.removeListener("updated", syncWindowAppearance));
@@ -263,6 +388,7 @@ async function createWindow(): Promise<void> {
 async function quitApplication(): Promise<void> {
   if (quitting) return;
   quitting = true;
+  clearRepositoryObservation();
   repositorySessions?.dispose();
   await core?.stop();
   app.quit();

@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { CommitSummary } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
-import { identityTime, shortOid } from "../lib/format.js";
+import { identityTime, identityTimeTitle, shortOid } from "../lib/format.js";
 import { createVirtualLayout } from "../lib/virtual-window.js";
 import { Button } from "./ui/button.js";
 
@@ -68,7 +68,7 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
   const partialNote = !window?.coverage.complete
     ? state === "paused" ? "部分结果 · 索引已暂停" : state === "cancelled" ? "部分结果 · 索引已取消" : state === "failed" || state === "unavailable" ? "部分结果 · 索引当前不可用" : "部分结果 · 索引仍在构建"
     : null;
-  return <nav aria-label="搜索结果" data-testid="search-results" className="flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col border-r border-line">
+  return <nav aria-label="搜索结果" data-testid="search-results" className="flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col overflow-hidden border-r border-line">
     <div className="flex min-h-[46px] shrink-0 flex-col justify-center gap-0.5 px-3 text-xs text-fg3">
       <span data-testid="search-status" aria-live="polite">{status}</span>
       {partialNote ? <span>{partialNote}</span> : null}
@@ -82,7 +82,7 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
     </div> : null}
     {window?.index.error ? <p className="mx-3 my-1 text-xs text-warn">索引状态：{window.index.error.message}；历史仍可浏览。</p> : null}
     <div ref={containerRef} role="listbox" aria-label="搜索提交" tabIndex={0} aria-busy={view.loading || view.pageLoading}
-      className="min-h-0 flex-1 overflow-auto outline-none" onScroll={onScroll}>
+      className="min-h-0 flex-1 overflow-auto overscroll-contain outline-none" onScroll={onScroll}>
       {view.loading && !window ? <div role="status" className="p-4 text-sm text-fg3">正在搜索…</div> : null}
       {!view.loading && window?.coverage.complete && window.matchedCount === 0 ? <div className="p-4 text-sm text-fg3">最终没有匹配提交。</div> : null}
       {!view.loading && !window && !view.error ? <div role="status" className="p-4 text-sm text-fg3">输入消息或添加筛选条件开始搜索。</div> : null}
@@ -111,7 +111,7 @@ function resultRow(commit: CommitSummary, view: SearchView, pathParents: (number
       <span className="truncate text-[13px] font-medium text-fg">{commit.summary || "（空摘要）"}</span>
       <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg3"><span className="truncate">{identity.name || identity.email || "未知身份"}</span>
         {pathParentLabel ? <span className="shrink-0 text-accent-fg" title={pathParentLabel} data-testid={`search-path-match-${commit.oid}`}>{pathParentLabel}</span> : null}
-        <span className="shrink-0">{identityTime(identity)}</span><span className="ml-auto shrink-0 font-mono">#{rank + 1}</span></span>
+        <span className="shrink-0" title={identityTimeTitle(identity)}>{identityTime(identity)}</span><span className="ml-auto shrink-0 font-mono">#{rank + 1}</span></span>
     </span>
     <code className="shrink-0 font-mono text-[10.5px] text-fg3">{shortOid(commit.oid)}</code>
   </button>;
