@@ -62,7 +62,9 @@ try {
   await detail.getByText(mergeOid, { exact: true }).waitFor({ state: "visible" });
   assert.match(await detail.innerText(), /Merge Author/);
   assert.match(await detail.innerText(), /Merge Committer/);
-  assert.match(await detail.innerText(), /Git 原始偏移 \+0000/);
+  // Times show in the device timezone; the offset Git recorded stays available on hover.
+  const recordedZones = await detail.locator('[title^="提交记录的时区"]').evaluateAll(nodes => nodes.map(node => node.getAttribute("title")));
+  assert.deepEqual(recordedZones, ["提交记录的时区：UTC+00:00", "提交记录的时区：UTC+00:00"], "author and committer keep the Git-recorded +0000 offset");
   const expectedParents = execFileSync("git", ["-C", expectedRepositoryPath, "show", "-s", "--format=%P", mergeOid], { encoding: "utf8" }).trim().split(" ").filter(Boolean);
   for (const parent of expectedParents) assert.ok((await detail.innerText()).includes(parent), `selected commit details must include parent ${parent}`);
   await page.screenshot({ path: resolve(screenshotDir, "p0-03-repository-preview.png") });
@@ -99,7 +101,7 @@ try {
   await page.getByTestId("commit-row").first().waitFor({ state: "visible" });
   await waitForState(page, "ready");
   await page.getByRole("button", { name: "切换仓库：topology" }).click();
-  assert.match(await page.getByTestId("previous-view").innerText(), new RegExp(`上次查看 .+ · 当时 HEAD ${topologyHead.slice(0, 8)}，与现在相同`));
+  assert.match(await page.getByTestId("previous-view").innerText(), new RegExp(`上次查看 .+ · 当时此范围的 tip：${topologyHead.slice(0, 8)}，与当前范围相同`));
   await page.keyboard.press("Escape");
   const recent = JSON.parse(await readFile(join(stateDir, "recent-repositories-v1.json"), "utf8"));
   assert.deepEqual(new Set(recent.repositories.map(entry => entry.path)), new Set([expectedRepositoryPath, emptyPath]));

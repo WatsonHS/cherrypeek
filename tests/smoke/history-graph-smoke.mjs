@@ -234,7 +234,6 @@ async function assertGraphRows(targetPage, expectedHead) {
       clipWidth: clip?.getAttribute("width"),
       clipOverflow: clip ? getComputedStyle(clip).overflow : null,
       visibleNodeCount: clip?.querySelectorAll("circle").length ?? 0,
-      overflowCount: element.querySelector("text")?.textContent ?? null,
     };
   });
   assert.equal(metrics.clipWidth, "59", "the segment viewport clips after six lane columns");
@@ -245,7 +244,7 @@ async function assertGraphRows(targetPage, expectedHead) {
     const hidden = await targetPage.locator(`[data-testid="commit-row"][data-oid="${hiddenOid}"] [data-testid="commit-graph"]`).evaluate(element => {
       const clip = [...element.children].find(child => child.tagName.toLowerCase() === "svg");
       return { clipNodes: clip?.querySelectorAll("circle").length ?? -1, overflowNodes: element.querySelectorAll(":scope > circle").length,
-        label: element.querySelector(":scope > text")?.textContent ?? null };
+        label: element.parentElement?.querySelector('[data-testid="graph-expand"]')?.textContent ?? null };
     });
     assert.equal(hidden.clipNodes, 0, "a hidden node is not drawn as lane six");
     assert.equal(hidden.overflowNodes, 1, "a hidden node uses a neutral marker in the overflow gutter");
@@ -258,10 +257,11 @@ async function assertHiddenNodeColor(targetPage) {
     const graph = graphs.find(candidate => Number(candidate.getAttribute("data-graph-lane")) >= 6);
     if (!graph) return null;
     const marker = graph.querySelector(":scope > circle");
-    const label = graph.querySelector(":scope > text");
+    // The "+n" expand control is an HTML button next to the SVG, so its text color is compared.
+    const label = graph.parentElement?.querySelector('[data-testid="graph-expand"]');
     return {
       markerFill: marker ? getComputedStyle(marker).fill : null,
-      labelFill: label ? getComputedStyle(label).fill : null,
+      labelFill: label ? getComputedStyle(label).color : null,
     };
   });
   assert.ok(result, "the initial visible graph window contains a node beyond the six visible lanes");
