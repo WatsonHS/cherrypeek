@@ -32,6 +32,14 @@ pub struct PreviewTail {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DiscoveredRepository {
+    pub info: RepositoryInfo,
+    pub refs: Vec<RefInfo>,
+    pub refs_truncated: bool,
+    pub oid_length: usize,
+}
+
 pub fn read_repository_preview(
     executable: &Path,
     input_path: &str,
@@ -39,6 +47,21 @@ pub fn read_repository_preview(
     deadline: Instant,
     mut emit_repository: impl FnMut(RepositoryInfo, Vec<RefInfo>, bool) -> Result<(), PreviewError>,
 ) -> Result<PreviewTail, PreviewError> {
+    let discovered = discover_repository(executable, input_path, cancelled, deadline)?;
+    emit_repository(
+        discovered.info.clone(),
+        discovered.refs.clone(),
+        discovered.refs_truncated,
+    )?;
+    read_discovered_preview(executable, &discovered, cancelled, deadline)
+}
+
+pub fn discover_repository(
+    executable: &Path,
+    input_path: &str,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<DiscoveredRepository, PreviewError> {
     let path = normalize_repository_path(input_path)?;
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
 
@@ -62,18 +85,24 @@ pub fn read_repository_preview(
         return Err(git_exit_error(&bare_result));
     }
     let bare = parse_bool(&strip_one_lf(bare_result.stdout)?)?;
-    let git_dir = git_path(&git, &path, "--git-dir", cancelled, deadline)?;
-    let common_dir = git_path(&git, &path, "--git-common-dir", cancelled, deadline)?;
+    let git_dir = canonical_git_path(git_path(&git, &path, "--git-dir", cancelled, deadline)?)?;
+    let common_dir = canonical_git_path(git_path(
+        &git,
+        &path,
+        "--git-common-dir",
+        cancelled,
+        deadline,
+    )?)?;
     let worktree_path = if bare {
         None
     } else {
-        Some(git_path(
+        Some(canonical_git_path(git_path(
             &git,
             &path,
             "--show-toplevel",
             cancelled,
             deadline,
-        )?)
+        )?)?)
     };
     let is_shallow = git_bool(&git, &path, "--is-shallow-repository", cancelled, deadline)?;
     let object_format = git_string(&git, &path, "--show-object-format", cancelled, deadline)?;
@@ -102,7 +131,7 @@ pub fn read_repository_preview(
         HeadState::Commit(oid) => Some(oid),
     };
     let (refs, refs_truncated) = read_refs(&git, &path, oid_length, cancelled, deadline)?;
-    let repository_path = worktree_path.clone().unwrap_or(path_to_string(&path)?);
+    let repository_path = worktree_path.clone().unwrap_or_else(|| git_dir.clone());
     let repository = RepositoryInfo {
         path: repository_path,
         git_dir,
@@ -118,18 +147,52 @@ pub fn read_repository_preview(
     if cancelled.load(Ordering::Acquire) {
         return Err(cancelled_error());
     }
-    emit_repository(repository, refs, refs_truncated)?;
+    Ok(DiscoveredRepository {
+        info: repository,
+        refs,
+        refs_truncated,
+        oid_length,
+    })
+}
 
-    let Some(head_oid) = head_oid else {
+pub fn read_discovered_preview(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<PreviewTail, PreviewError> {
+    let Some(head_oid) = discovered.info.head_oid.as_deref() else {
         return Ok(PreviewTail {
             commits: Vec::new(),
             has_more: false,
         });
     };
-    let (oids, has_more) =
-        read_commit_oids(&git, &path, &head_oid, oid_length, cancelled, deadline)?;
-    let commits = read_commits(&git, &path, &oids, oid_length, cancelled, deadline)?;
+    let path = Path::new(&discovered.info.path);
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+    let (oids, has_more) = read_commit_oids(
+        &git,
+        path,
+        head_oid,
+        discovered.oid_length,
+        cancelled,
+        deadline,
+    )?;
+    let commits = read_commits(
+        &git,
+        path,
+        &oids,
+        discovered.oid_length,
+        cancelled,
+        deadline,
+    )?;
     Ok(PreviewTail { commits, has_more })
+}
+
+fn canonical_git_path(path: String) -> Result<String, PreviewError> {
+    let canonical = Path::new(&path)
+        .canonicalize()
+        .map_err(|error| map_path_error(error, "Repository metadata path is unavailable"))?;
+    path_to_string(&canonical)
 }
 
 fn normalize_repository_path(input: &str) -> Result<PathBuf, PreviewError> {
@@ -148,13 +211,9 @@ fn normalize_repository_path(input: &str) -> Result<PathBuf, PreviewError> {
             false,
         ));
     }
-    let canonical = input_path.canonicalize().map_err(|_| {
-        preview_error(
-            ErrorCode::RepositoryUnavailable,
-            "Repository path is unavailable",
-            true,
-        )
-    })?;
+    let canonical = input_path
+        .canonicalize()
+        .map_err(|error| map_path_error(error, "Repository path is unavailable"))?;
     if !canonical.is_dir() {
         return Err(preview_error(
             ErrorCode::NotARepository,
@@ -886,6 +945,14 @@ fn path_to_string(path: &Path) -> Result<String, PreviewError> {
     })
 }
 
+fn map_path_error(error: std::io::Error, message: &str) -> PreviewError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        preview_error(ErrorCode::PermissionDenied, message, false)
+    } else {
+        preview_error(ErrorCode::RepositoryUnavailable, message, true)
+    }
+}
+
 fn validate_oid(oid: &str, expected_length: usize) -> Result<(), PreviewError> {
     if oid.len() != expected_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(preview_error(
@@ -913,7 +980,12 @@ fn git_exit_error(output: &CommandOutput) -> PreviewError {
     } else {
         format!("Git command failed (exit {status}): {}", sanitized.trim())
     };
-    preview_error(ErrorCode::GitError, message, false)
+    let code = if detail.to_ascii_lowercase().contains("permission denied") {
+        ErrorCode::PermissionDenied
+    } else {
+        ErrorCode::GitError
+    };
+    preview_error(code, message, false)
 }
 
 fn is_missing_object_diagnostic(stderr: &[u8]) -> bool {

@@ -17,9 +17,12 @@ export type ClientMessage =
       requestId: string;
       type: "cancel";
     };
-export type RequestParams = EmptyParams | ReadRepositoryPreviewParams;
+export type RequestParams = EmptyParams | ReadRepositoryPreviewParams | OpenRepositoryParams;
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
+  path: string;
+}
+export interface OpenRepositoryParams {
   path: string;
 }

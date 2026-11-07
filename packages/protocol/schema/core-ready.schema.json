@@ -5,7 +5,8 @@
     "Capability": {
       "enum": [
         "getRuntimeInfo",
-        "readRepositoryPreview"
+        "readRepositoryPreview",
+        "repositorySessions"
       ],
       "type": "string"
     },

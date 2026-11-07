@@ -25,7 +25,7 @@ export type ServerMessage =
       retryable: boolean;
       type: "error";
     };
-export type Capability = "getRuntimeInfo" | "readRepositoryPreview";
+export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -46,8 +46,28 @@ export type ResponseData =
       commits: CommitSummary[];
       hasMore: boolean;
       section: "commits";
+    }
+  | {
+      section: "repositorySession";
+      session: RepositorySessionInfo;
+    }
+  | {
+      saved: boolean;
+      section: "repositoryViewRecorded";
+      status: StoreStatus;
+    }
+  | {
+      closed: boolean;
+      section: "repositoryClosed";
+    }
+  | {
+      repositories: RecentRepository[];
+      section: "recentRepositories";
+      status: StoreStatus;
     };
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
+export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
+export type RepositoryScope = "head";
 export type ErrorCode =
   | "PROTOCOL_MISMATCH"
   | "PROTOCOL_ERROR"
@@ -64,7 +84,8 @@ export type ErrorCode =
   | "MISSING_OBJECT"
   | "UNSUPPORTED_REPOSITORY"
   | "RESOURCE_LIMIT"
-  | "GIT_ERROR";
+  | "GIT_ERROR"
+  | "PERMISSION_DENIED";
 
 export interface CoreReady {
   capabilities: Capability[];
@@ -114,4 +135,36 @@ export interface CommitIdentity {
   name: string;
   offset: string;
   timestamp: string;
+}
+export interface RepositorySessionInfo {
+  generation: string;
+  observedAtUnixMs: number;
+  persistence: SessionPersistenceStatus;
+  previousView: LastViewedSnapshot | null;
+  repoId: string;
+  repository: RepositoryInfo;
+  repositoryKey: string;
+  scope: RepositoryScope;
+  worktreeId: string;
+}
+export interface SessionPersistenceStatus {
+  lastSeen: StoreStatus;
+  recent: StoreStatus;
+}
+export interface LastViewedSnapshot {
+  /**
+   * @maxItems 1
+   */
+  tips: [] | [string];
+  viewedAtUnixMs: number;
+}
+export interface RecentRepository {
+  commonDir: string;
+  gitDir: string;
+  lastOpenedAtUnixMs: number;
+  objectFormat: string;
+  path: string;
+  repositoryKey: string;
+  worktreeId: string;
+  worktreePath: string | null;
 }

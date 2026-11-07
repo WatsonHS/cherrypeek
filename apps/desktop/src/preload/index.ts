@@ -18,6 +18,12 @@ const api: CommitScopeApi = {
     ipcRenderer.on("commitscope:repository:changed", wrapped);
     return () => ipcRenderer.removeListener("commitscope:repository:changed", wrapped);
   },
+  openRepositorySession: path => ipcRenderer.invoke("commitscope:session:open", path),
+  getRepositorySession: () => ipcRenderer.invoke("commitscope:session:get"),
+  readSessionPreview: () => ipcRenderer.invoke("commitscope:session:preview"),
+  recordRepositoryView: () => ipcRenderer.invoke("commitscope:session:record-view"),
+  closeRepositorySession: () => ipcRenderer.invoke("commitscope:session:close"),
+  listRecentRepositories: () => ipcRenderer.invoke("commitscope:session:list-recent"),
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

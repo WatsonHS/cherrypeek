@@ -11,10 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 commitscope-core = { path = "../core" }
+getrandom = { version = "=0.4.3", default-features = false }
+libc = "=0.2.191"
+serde.workspace = true
 serde_json.workspace = true
+sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 gix = { version = "=0.90.0", default-features = false, features = ["sha1", "sha256", "max-performance"] }
-libc = "=0.2.191"
-serde.workspace = true
-sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }

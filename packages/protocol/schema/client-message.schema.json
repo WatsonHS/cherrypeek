@@ -5,6 +5,20 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "OpenRepositoryParams": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "ReadRepositoryPreviewParams": {
       "additionalProperties": false,
       "properties": {
@@ -26,6 +40,24 @@
         },
         {
           "$ref": "#/definitions/ReadRepositoryPreviewParams"
+        },
+        {
+          "$ref": "#/definitions/OpenRepositoryParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
         }
       ]
     }

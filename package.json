@@ -19,7 +19,8 @@
     "benchmark:first-screen": "node scripts/benchmark-first-screen.mjs",
     "build:reader-bench": "cargo build --release --locked -p commitscope-daemon --example reader_bench",
     "benchmark:readers": "node scripts/benchmark-readers.mjs",
-    "test:readers": "node scripts/test-readers.mjs"
+    "test:readers": "node scripts/test-readers.mjs",
+    "test:sessions": "node scripts/test-sessions.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

@@ -1,7 +1,7 @@
-use crate::{framing, repository, runtime};
+use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
-    ClientMessage, CoreReady, Coverage, EmptyParams, ErrorCode, PROTOCOL_VERSION,
-    ReadRepositoryPreviewParams, ResponseData, ServerMessage,
+    ClientMessage, CoreReady, Coverage, EmptyParams, ErrorCode, OpenRepositoryParams,
+    PROTOCOL_VERSION, ReadRepositoryPreviewParams, ResponseData, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -11,7 +11,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, SyncSender, TrySendError},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -24,12 +24,30 @@ const PREVIEW_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMIT_CHUNK_SIZE: usize = 25;
 const RESPONSE_TARGET_BYTES: usize = 512 * 1024;
 
-type ActiveRequests = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+type ActiveRequests = Arc<Mutex<HashMap<String, ActiveRequest>>>;
+
+struct ActiveRequest {
+    cancelled: Arc<AtomicBool>,
+    repo_id: Option<String>,
+}
 
 #[derive(Debug)]
 enum RequestOperation {
     RuntimeInfo,
     RepositoryPreview(String),
+    OpenRepository(String),
+    GetRepositorySession,
+    ReadSessionPreview,
+    RecordRepositoryView,
+    CloseRepository,
+    ListRecentRepositories,
+}
+
+struct OpenCompletion {
+    request_id: String,
+    intent: u64,
+    cancelled: Arc<AtomicBool>,
+    result: Result<repository::DiscoveredRepository, repository::PreviewError>,
 }
 
 struct OutFrame {
@@ -174,6 +192,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let requests: ActiveRequests = Arc::default();
+    let mut sessions = session::SessionManager::new(session_store::SessionStore::from_env());
+    let (open_done_tx, open_done_rx) = mpsc::sync_channel::<OpenCompletion>(4);
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     let mut handshaken = true;
 
@@ -198,7 +218,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 break;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drain_open_completions(&open_done_rx, &mut sessions, &requests, &out_tx, &shutdown);
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         match decode_client_message(&message) {
@@ -239,6 +262,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         false,
                     );
                     handshaken = false;
+                    drain_open_completions(
+                        &open_done_rx,
+                        &mut sessions,
+                        &requests,
+                        &out_tx,
+                        &shutdown,
+                    );
                     continue;
                 }
                 match validate_request(
@@ -259,6 +289,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         false,
                     ),
                     Ok(operation) => {
+                        let bound_session = if operation_requires_session(&operation) {
+                            match (repo_id.as_deref(), generation.as_deref()) {
+                                (Some(repo_id), Some(generation)) => {
+                                    match sessions.require_current(repo_id, generation) {
+                                        Ok(session) => Some(session),
+                                        Err(error) => {
+                                            send_error(
+                                                &out_tx,
+                                                &shutdown,
+                                                Some(request_id),
+                                                Some(repo_id.to_owned()),
+                                                Some(generation.to_owned()),
+                                                error.code,
+                                                error.message,
+                                                false,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                _ => unreachable!("session methods require both context fields"),
+                            }
+                        } else {
+                            None
+                        };
+
                         let mut active = requests.lock().expect("request map poisoned");
                         if active.len() >= MAX_ACTIVE_REQUESTS {
                             drop(active);
@@ -272,41 +328,39 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 "核心正在处理其他请求".into(),
                                 true,
                             );
+                            drain_open_completions(
+                                &open_done_rx,
+                                &mut sessions,
+                                &requests,
+                                &out_tx,
+                                &shutdown,
+                            );
                             continue;
                         }
                         let cancelled = Arc::new(AtomicBool::new(false));
-                        active.insert(request_id.clone(), Arc::clone(&cancelled));
+                        active.insert(
+                            request_id.clone(),
+                            ActiveRequest {
+                                cancelled: Arc::clone(&cancelled),
+                                repo_id: repo_id.clone(),
+                            },
+                        );
                         drop(active);
-
-                        let request_map = Arc::clone(&requests);
-                        let sender = out_tx.clone();
-                        let stopping = Arc::clone(&shutdown);
-                        let git_path = git_path.clone();
-                        workers.push(thread::spawn(move || match operation {
-                            RequestOperation::RuntimeInfo => execute_runtime_info(
-                                &sender,
-                                &stopping,
-                                &request_map,
-                                &request_id,
-                                repo_id,
-                                generation,
-                                git_path.as_deref(),
-                                cancelled,
-                            ),
-                            RequestOperation::RepositoryPreview(path) => {
-                                execute_repository_preview(
-                                    &sender,
-                                    &stopping,
-                                    &request_map,
-                                    &request_id,
-                                    repo_id,
-                                    generation,
-                                    git_path.as_deref(),
-                                    &path,
-                                    cancelled,
-                                )
-                            }
-                        }));
+                        dispatch_request(
+                            operation,
+                            request_id,
+                            repo_id,
+                            generation,
+                            bound_session,
+                            cancelled,
+                            &requests,
+                            &shutdown,
+                            &out_tx,
+                            &open_done_tx,
+                            &mut sessions,
+                            &mut workers,
+                            git_path.as_deref(),
+                        );
                     }
                 }
             }
@@ -317,7 +371,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .expect("request map poisoned")
                         .get(&request_id)
                     {
-                        cancelled.store(true, Ordering::Release);
+                        cancelled.cancelled.store(true, Ordering::Release);
                     }
                 } else {
                     send_terminal_error(
@@ -347,16 +401,338 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 handshaken = false;
             }
         }
+        drain_open_completions(&open_done_rx, &mut sessions, &requests, &out_tx, &shutdown);
     }
 
     shutdown.store(true, Ordering::Release);
-    for cancelled in requests.lock().expect("request map poisoned").values() {
-        cancelled.store(true, Ordering::Release);
+    sessions.cancel_pending_opens();
+    for request in requests.lock().expect("request map poisoned").values() {
+        request.cancelled.store(true, Ordering::Release);
     }
     for worker in workers {
         let _ = worker.join();
     }
     Ok(())
+}
+
+fn operation_requires_session(operation: &RequestOperation) -> bool {
+    matches!(
+        operation,
+        RequestOperation::GetRepositorySession
+            | RequestOperation::ReadSessionPreview
+            | RequestOperation::RecordRepositoryView
+            | RequestOperation::CloseRepository
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_request(
+    operation: RequestOperation,
+    request_id: String,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    bound_session: Option<Arc<session::RepositorySession>>,
+    cancelled: Arc<AtomicBool>,
+    requests: &ActiveRequests,
+    shutdown: &Arc<AtomicBool>,
+    sender: &SyncSender<OutFrame>,
+    open_done: &mpsc::SyncSender<OpenCompletion>,
+    sessions: &mut session::SessionManager,
+    workers: &mut Vec<JoinHandle<()>>,
+    git_path: Option<&std::path::Path>,
+) {
+    match operation {
+        RequestOperation::RuntimeInfo => {
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            workers.push(thread::spawn(move || {
+                execute_runtime_info(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    cancelled_for_worker,
+                )
+            }));
+        }
+        RequestOperation::RepositoryPreview(path) => {
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            workers.push(thread::spawn(move || {
+                execute_repository_preview(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    &path,
+                    cancelled_for_worker,
+                )
+            }));
+        }
+        RequestOperation::OpenRepository(path) => {
+            let Some(git_path) = git_path.map(std::path::Path::to_path_buf) else {
+                send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.clone()),
+                    None,
+                    None,
+                    ErrorCode::GitUnavailable,
+                    "Git executable was not found".into(),
+                    false,
+                );
+                remove_request(requests, &request_id, &cancelled);
+                return;
+            };
+            let intent = sessions.begin_open(Arc::clone(&cancelled));
+            let open_done = open_done.clone();
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            workers.push(thread::spawn(move || {
+                let result = repository::discover_repository(
+                    &git_path,
+                    &path,
+                    &cancelled_for_worker,
+                    std::time::Instant::now() + PREVIEW_TIMEOUT,
+                );
+                let _ = open_done.send(OpenCompletion {
+                    request_id,
+                    intent,
+                    cancelled: cancelled_for_worker,
+                    result,
+                });
+            }));
+        }
+        RequestOperation::GetRepositorySession => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let message = session_response(
+                &request_id,
+                repo_id,
+                generation,
+                ResponseData::RepositorySession {
+                    session: session.info.clone(),
+                },
+                1,
+            );
+            send_main_message(sender, shutdown, &message);
+            remove_request(requests, &request_id, &cancelled);
+        }
+        RequestOperation::ReadSessionPreview => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            workers.push(thread::spawn(move || {
+                execute_session_preview(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    session,
+                    cancelled_for_worker,
+                )
+            }));
+        }
+        RequestOperation::RecordRepositoryView => {
+            let result = sessions.record_view(
+                repo_id.as_deref().expect("session context checked"),
+                generation.as_deref().expect("session context checked"),
+            );
+            match result {
+                Ok((saved, status)) => {
+                    let message = session_response(
+                        &request_id,
+                        repo_id,
+                        generation,
+                        ResponseData::RepositoryViewRecorded { saved, status },
+                        1,
+                    );
+                    send_main_message(sender, shutdown, &message);
+                }
+                Err(error) => send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    error.code,
+                    error.message,
+                    false,
+                ),
+            }
+            remove_request(requests, &request_id, &cancelled);
+        }
+        RequestOperation::CloseRepository => {
+            let result = sessions.close(
+                repo_id.as_deref().expect("session context checked"),
+                generation.as_deref().expect("session context checked"),
+            );
+            match result {
+                Ok(closed_repo_id) => {
+                    cancel_repository_requests(requests, &closed_repo_id);
+                    let message = session_response(
+                        &request_id,
+                        repo_id,
+                        generation,
+                        ResponseData::RepositoryClosed { closed: true },
+                        1,
+                    );
+                    send_main_message(sender, shutdown, &message);
+                }
+                Err(error) => send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    error.code,
+                    error.message,
+                    false,
+                ),
+            }
+            remove_request(requests, &request_id, &cancelled);
+        }
+        RequestOperation::ListRecentRepositories => {
+            let (repositories, status) = sessions.recent();
+            let processed = repositories.len() as u32;
+            let message = session_response(
+                &request_id,
+                None,
+                None,
+                ResponseData::RecentRepositories {
+                    repositories,
+                    status,
+                },
+                processed,
+            );
+            send_main_message(sender, shutdown, &message);
+            remove_request(requests, &request_id, &cancelled);
+        }
+    }
+}
+
+fn session_response(
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    data: ResponseData,
+    processed: u32,
+) -> ServerMessage {
+    ServerMessage::Response {
+        request_id: request_id.to_owned(),
+        repo_id,
+        generation,
+        sequence: 0,
+        done: true,
+        coverage: Coverage {
+            complete: true,
+            processed,
+        },
+        next_cursor: None,
+        data,
+    }
+}
+
+fn cancel_repository_requests(requests: &ActiveRequests, repo_id: &str) {
+    for request in requests.lock().expect("request map poisoned").values() {
+        if request.repo_id.as_deref() == Some(repo_id) {
+            request.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn drain_open_completions(
+    receiver: &Receiver<OpenCompletion>,
+    sessions: &mut session::SessionManager,
+    requests: &ActiveRequests,
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+) {
+    while let Ok(completion) = receiver.try_recv() {
+        let OpenCompletion {
+            request_id,
+            intent,
+            cancelled,
+            result,
+        } = completion;
+        match result {
+            Ok(discovered) => {
+                match sessions.commit_open(intent, &cancelled, Arc::new(discovered)) {
+                    Ok(commit) => {
+                        if let Some(old_repo_id) = commit.replaced_repo_id.as_deref() {
+                            cancel_repository_requests(requests, old_repo_id);
+                        }
+                        let message = session_response(
+                            &request_id,
+                            None,
+                            None,
+                            ResponseData::RepositorySession {
+                                session: commit.session.info.clone(),
+                            },
+                            1,
+                        );
+                        send_main_message(sender, shutdown, &message);
+                    }
+                    Err(error) => {
+                        sessions.finish_open_failure(intent);
+                        send_error(
+                            sender,
+                            shutdown,
+                            Some(request_id.clone()),
+                            None,
+                            None,
+                            error.code,
+                            error.message,
+                            false,
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                sessions.finish_open_failure(intent);
+                let was_cancelled =
+                    cancelled.load(Ordering::Acquire) || error.code == ErrorCode::Cancelled;
+                let code = if was_cancelled {
+                    ErrorCode::Cancelled
+                } else {
+                    error.code
+                };
+                let retryable = !was_cancelled && error.retryable;
+                let message = if was_cancelled {
+                    "Repository open was cancelled or superseded".to_owned()
+                } else {
+                    error.message
+                };
+                send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.clone()),
+                    None,
+                    None,
+                    code,
+                    message,
+                    retryable,
+                );
+            }
+        }
+        remove_request(requests, &request_id, &cancelled);
+    }
 }
 
 fn decode_client_message(frame: &[u8]) -> Result<ClientMessage, String> {
@@ -377,16 +753,14 @@ fn validate_request(
             "requestId 必须为 1 至 128 字符".into(),
         ));
     }
-    if repo_id.is_some_and(|id| id.is_empty() || id.chars().count() > MAX_OPAQUE_ID_BYTES)
-        || generation.is_some_and(|id| id.is_empty() || id.chars().count() > MAX_OPAQUE_ID_BYTES)
-    {
+    let valid_id = |id: &str| !id.is_empty() && id.chars().count() <= MAX_OPAQUE_ID_BYTES;
+    if repo_id.is_some_and(|id| !valid_id(id)) || generation.is_some_and(|id| !valid_id(id)) {
         return Err((ErrorCode::InvalidRequest, "仓库上下文标识长度无效".into()));
     }
-    if repo_id.is_some() || generation.is_some() {
-        return Err((ErrorCode::InvalidRequest, "本项请求不接受仓库上下文".into()));
-    }
+    let null_context = repo_id.is_none() && generation.is_none();
+    let session_context = repo_id.is_some() && generation.is_some();
     match method {
-        "getRuntimeInfo" => serde_json::from_value::<EmptyParams>(params.clone())
+        "getRuntimeInfo" if null_context => serde_json::from_value::<EmptyParams>(params.clone())
             .map(|_| RequestOperation::RuntimeInfo)
             .map_err(|_| {
                 (
@@ -394,7 +768,7 @@ fn validate_request(
                     "getRuntimeInfo params 必须为空对象".into(),
                 )
             }),
-        "readRepositoryPreview" => {
+        "readRepositoryPreview" if null_context => {
             serde_json::from_value::<ReadRepositoryPreviewParams>(params.clone())
                 .map(|params| RequestOperation::RepositoryPreview(params.path))
                 .map_err(|_| {
@@ -404,6 +778,68 @@ fn validate_request(
                     )
                 })
         }
+        "openRepository" | "listRecentRepositories" if null_context => {
+            if method == "openRepository" {
+                serde_json::from_value::<OpenRepositoryParams>(params.clone())
+                    .and_then(|params| {
+                        if params.path.len() <= 16 * 1024
+                            && !params.path.contains('\0')
+                            && std::path::Path::new(&params.path).is_absolute()
+                        {
+                            Ok(params)
+                        } else {
+                            Err(serde::de::Error::custom("invalid repository path"))
+                        }
+                    })
+                    .map(|params| RequestOperation::OpenRepository(params.path))
+                    .map_err(|_| {
+                        (
+                            ErrorCode::InvalidRequest,
+                            "openRepository params 必须包含绝对目录 path".into(),
+                        )
+                    })
+            } else {
+                serde_json::from_value::<EmptyParams>(params.clone())
+                    .map(|_| RequestOperation::ListRecentRepositories)
+                    .map_err(|_| {
+                        (
+                            ErrorCode::InvalidRequest,
+                            "listRecentRepositories params 必须为空对象".into(),
+                        )
+                    })
+            }
+        }
+        "getRepositorySession"
+        | "readSessionPreview"
+        | "recordRepositoryView"
+        | "closeRepository"
+            if session_context =>
+        {
+            serde_json::from_value::<EmptyParams>(params.clone())
+                .map(|_| match method {
+                    "getRepositorySession" => RequestOperation::GetRepositorySession,
+                    "readSessionPreview" => RequestOperation::ReadSessionPreview,
+                    "recordRepositoryView" => RequestOperation::RecordRepositoryView,
+                    _ => RequestOperation::CloseRepository,
+                })
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        format!("{method} params 必须为空对象"),
+                    )
+                })
+        }
+        "getRepositorySession"
+        | "readSessionPreview"
+        | "recordRepositoryView"
+        | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
+        "getRuntimeInfo"
+        | "readRepositoryPreview"
+        | "openRepository"
+        | "listRecentRepositories" => Err((
+            ErrorCode::InvalidRequest,
+            "该方法不接受仓库会话上下文".into(),
+        )),
         _ => Err((ErrorCode::UnknownMethod, "未知方法".into())),
     }
 }
@@ -549,62 +985,15 @@ fn execute_repository_preview(
         &cancelled,
         deadline,
         |repository, refs, refs_truncated| {
-            let mut selected_refs = Vec::with_capacity(refs.len());
-            let base = repository_response(
+            let message = bounded_repository_response(
                 request_id,
-                repo_id.clone(),
-                generation.clone(),
-                sequence,
-                repository.clone(),
-                Vec::new(),
-                false,
-            );
-            let base_size = serde_json::to_vec(&base)
-                .map_err(|_| repository::PreviewError {
-                    code: ErrorCode::GitError,
-                    message: "无法编码仓库预览响应".into(),
-                    retryable: false,
-                })?
-                .len();
-            let mut ref_bytes = 0usize;
-            let mut output_refs_truncated = refs_truncated;
-            for reference in refs {
-                let item_size = serde_json::to_vec(&reference)
-                    .map_err(|_| repository::PreviewError {
-                        code: ErrorCode::GitError,
-                        message: "无法编码仓库引用".into(),
-                        retryable: false,
-                    })?
-                    .len();
-                let candidate = base_size
-                    .saturating_add(ref_bytes)
-                    .saturating_add(item_size)
-                    .saturating_add(selected_refs.len());
-                if candidate > RESPONSE_TARGET_BYTES {
-                    output_refs_truncated = true;
-                    break;
-                }
-                ref_bytes += item_size;
-                selected_refs.push(reference);
-            }
-            let message = repository_response(
-                request_id,
-                repo_id.clone(),
-                generation.clone(),
+                repo_id.as_deref(),
+                generation.as_deref(),
                 sequence,
                 repository,
-                selected_refs,
-                output_refs_truncated,
-            );
-            if serde_json::to_vec(&message)
-                .map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES)
-            {
-                return Err(repository::PreviewError {
-                    code: ErrorCode::ResourceLimit,
-                    message: "仓库元数据响应超过大小限制".into(),
-                    retryable: false,
-                });
-            }
+                refs,
+                refs_truncated,
+            )?;
             if !send_task_message(sender, shutdown, &cancelled, &message) {
                 return Err(repository::PreviewError {
                     code: ErrorCode::Cancelled,
@@ -617,6 +1006,87 @@ fn execute_repository_preview(
         },
     );
 
+    finish_preview_tail(
+        sender, shutdown, requests, request_id, repo_id, generation, sequence, cancelled, result,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_session_preview(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let Some(git_path) = git_path else {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::GitUnavailable,
+            "Git executable was not found".into(),
+            false,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    };
+    let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
+    let repository_message = match bounded_repository_response(
+        request_id,
+        repo_id.as_deref(),
+        generation.as_deref(),
+        0,
+        session.info.repository.clone(),
+        session.discovered.refs.clone(),
+        session.discovered.refs_truncated,
+    ) {
+        Ok(message) => message,
+        Err(error) => {
+            send_terminal_error(
+                sender,
+                shutdown,
+                Some(request_id.to_owned()),
+                repo_id,
+                generation,
+                error.code,
+                error.message,
+                error.retryable,
+            );
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+    };
+    if !send_task_message(sender, shutdown, &cancelled, &repository_message) {
+        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    let result =
+        repository::read_discovered_preview(git_path, &session.discovered, &cancelled, deadline);
+    finish_preview_tail(
+        sender, shutdown, requests, request_id, repo_id, generation, 1, cancelled, result,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_preview_tail(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    mut sequence: u32,
+    cancelled: Arc<AtomicBool>,
+    result: Result<repository::PreviewTail, repository::PreviewError>,
+) {
     let tail = match result {
         Ok(tail) => tail,
         Err(error) => {
@@ -644,8 +1114,8 @@ fn execute_repository_preview(
     if total == 0 {
         let message = ServerMessage::Response {
             request_id: request_id.to_owned(),
-            repo_id,
-            generation,
+            repo_id: repo_id.clone(),
+            generation: generation.clone(),
             sequence,
             done: true,
             coverage: Coverage {
@@ -661,7 +1131,7 @@ fn execute_repository_preview(
         if !send_task_message(sender, shutdown, &cancelled, &message)
             && cancelled.load(Ordering::Acquire)
         {
-            finish_cancelled(sender, shutdown, request_id, None, None);
+            finish_cancelled(sender, shutdown, request_id, repo_id, generation);
         }
         remove_request(requests, request_id, &cancelled);
         return;
@@ -769,6 +1239,72 @@ fn repository_response(
     }
 }
 
+fn bounded_repository_response(
+    request_id: &str,
+    repo_id: Option<&str>,
+    generation: Option<&str>,
+    sequence: u32,
+    repository: commitscope_core::RepositoryInfo,
+    refs: Vec<commitscope_core::RefInfo>,
+    refs_truncated: bool,
+) -> Result<ServerMessage, repository::PreviewError> {
+    let mut selected_refs = Vec::with_capacity(refs.len());
+    let empty = repository_response(
+        request_id,
+        repo_id.map(str::to_owned),
+        generation.map(str::to_owned),
+        sequence,
+        repository.clone(),
+        Vec::new(),
+        false,
+    );
+    let base_size = serde_json::to_vec(&empty)
+        .map_err(|_| repository::PreviewError {
+            code: ErrorCode::GitError,
+            message: "无法编码仓库预览响应".into(),
+            retryable: false,
+        })?
+        .len();
+    let mut ref_bytes = 0usize;
+    let mut output_refs_truncated = refs_truncated;
+    for reference in refs {
+        let item_size = serde_json::to_vec(&reference)
+            .map_err(|_| repository::PreviewError {
+                code: ErrorCode::GitError,
+                message: "无法编码仓库引用".into(),
+                retryable: false,
+            })?
+            .len();
+        let candidate = base_size
+            .saturating_add(ref_bytes)
+            .saturating_add(item_size)
+            .saturating_add(selected_refs.len());
+        if candidate > RESPONSE_TARGET_BYTES {
+            output_refs_truncated = true;
+            break;
+        }
+        ref_bytes += item_size;
+        selected_refs.push(reference);
+    }
+    let message = repository_response(
+        request_id,
+        repo_id.map(str::to_owned),
+        generation.map(str::to_owned),
+        sequence,
+        repository,
+        selected_refs,
+        output_refs_truncated,
+    );
+    if serde_json::to_vec(&message).map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES) {
+        return Err(repository::PreviewError {
+            code: ErrorCode::ResourceLimit,
+            message: "仓库元数据响应超过大小限制".into(),
+            retryable: false,
+        });
+    }
+    Ok(message)
+}
+
 fn pack_commit_chunks(
     request_id: &str,
     repo_id: Option<&str>,
@@ -855,7 +1391,7 @@ fn remove_request(requests: &ActiveRequests, request_id: &str, cancelled: &Arc<A
     let mut requests = requests.lock().expect("request map poisoned");
     if requests
         .get(request_id)
-        .is_some_and(|current| Arc::ptr_eq(current, cancelled))
+        .is_some_and(|current| Arc::ptr_eq(&current.cancelled, cancelled))
     {
         requests.remove(request_id);
     }
@@ -908,6 +1444,16 @@ fn send_message(
             flushed: None,
         })
         .is_ok()
+}
+
+fn send_main_message(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    message: &ServerMessage,
+) {
+    if !send_message(sender, shutdown, message) {
+        shutdown.store(true, Ordering::Release);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

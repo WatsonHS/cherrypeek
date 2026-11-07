@@ -4,7 +4,8 @@
     "Capability": {
       "enum": [
         "getRuntimeInfo",
-        "readRepositoryPreview"
+        "readRepositoryPreview",
+        "repositorySessions"
       ],
       "type": "string"
     },
@@ -142,7 +143,8 @@
         "MISSING_OBJECT",
         "UNSUPPORTED_REPOSITORY",
         "RESOURCE_LIMIT",
-        "GIT_ERROR"
+        "GIT_ERROR",
+        "PERMISSION_DENIED"
       ],
       "type": "string"
     },
@@ -171,6 +173,87 @@
         "available",
         "version",
         "error"
+      ],
+      "type": "object"
+    },
+    "LastViewedSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "tips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "type": "array"
+        },
+        "viewedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tips",
+        "viewedAtUnixMs"
+      ],
+      "type": "object"
+    },
+    "RecentRepository": {
+      "additionalProperties": false,
+      "properties": {
+        "commonDir": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "gitDir": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "lastOpenedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objectFormat": {
+          "maxLength": 16,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "repositoryKey": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktreeId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktreePath": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "repositoryKey",
+        "worktreeId",
+        "path",
+        "gitDir",
+        "commonDir",
+        "worktreePath",
+        "objectFormat",
+        "lastOpenedAtUnixMs"
       ],
       "type": "object"
     },
@@ -269,6 +352,73 @@
       ],
       "type": "object"
     },
+    "RepositoryScope": {
+      "enum": [
+        "head"
+      ],
+      "type": "string"
+    },
+    "RepositorySessionInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "persistence": {
+          "$ref": "#/definitions/SessionPersistenceStatus"
+        },
+        "previousView": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LastViewedSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repoId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/definitions/RepositoryInfo"
+        },
+        "repositoryKey": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/RepositoryScope"
+        },
+        "worktreeId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "repoId",
+        "generation",
+        "repositoryKey",
+        "worktreeId",
+        "scope",
+        "observedAtUnixMs",
+        "repository",
+        "previousView",
+        "persistence"
+      ],
+      "type": "object"
+    },
     "ResponseData": {
       "oneOf": [
         {
@@ -362,8 +512,112 @@
             "hasMore"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "section": {
+              "const": "repositorySession",
+              "type": "string"
+            },
+            "session": {
+              "$ref": "#/definitions/RepositorySessionInfo"
+            }
+          },
+          "required": [
+            "section",
+            "session"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "saved": {
+              "type": "boolean"
+            },
+            "section": {
+              "const": "repositoryViewRecorded",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/StoreStatus"
+            }
+          },
+          "required": [
+            "section",
+            "saved",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "closed": {
+              "type": "boolean"
+            },
+            "section": {
+              "const": "repositoryClosed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "closed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "repositories": {
+              "items": {
+                "$ref": "#/definitions/RecentRepository"
+              },
+              "type": "array"
+            },
+            "section": {
+              "const": "recentRepositories",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/StoreStatus"
+            }
+          },
+          "required": [
+            "section",
+            "repositories",
+            "status"
+          ],
+          "type": "object"
         }
       ]
+    },
+    "SessionPersistenceStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "lastSeen": {
+          "$ref": "#/definitions/StoreStatus"
+        },
+        "recent": {
+          "$ref": "#/definitions/StoreStatus"
+        }
+      },
+      "required": [
+        "recent",
+        "lastSeen"
+      ],
+      "type": "object"
+    },
+    "StoreStatus": {
+      "enum": [
+        "ok",
+        "disabled",
+        "unavailable",
+        "corrupt"
+      ],
+      "type": "string"
     }
   },
   "oneOf": [

@@ -75,7 +75,11 @@ try {
   assert.equal(diagnostics.nodeProcess, "undefined");
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
-  assert.deepEqual(diagnostics.apiKeys, ["cancelRepositoryPreview", "chooseRepository", "getCoreStatus", "getRepositoryPreview", "onCoreStatusChanged", "onRepositoryPreviewChanged", "openRepositoryPreview"]);
+  assert.deepEqual(diagnostics.apiKeys, [
+    "cancelRepositoryPreview", "chooseRepository", "closeRepositorySession", "getCoreStatus",
+    "getRepositoryPreview", "getRepositorySession", "listRecentRepositories", "onCoreStatusChanged",
+    "onRepositoryPreviewChanged", "openRepositoryPreview", "openRepositorySession", "readSessionPreview", "recordRepositoryView",
+  ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");
   assert.match(diagnostics.csp ?? "", /default-src 'none'/);

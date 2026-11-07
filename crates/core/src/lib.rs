@@ -74,6 +74,7 @@ impl GitInfo {
 pub enum Capability {
     GetRuntimeInfo,
     ReadRepositoryPreview,
+    RepositorySessions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -100,6 +101,7 @@ impl CoreReady {
             capabilities: vec![
                 Capability::GetRuntimeInfo,
                 Capability::ReadRepositoryPreview,
+                Capability::RepositorySessions,
             ],
         }
     }
@@ -144,6 +146,12 @@ pub enum ClientMessage {
 pub enum RequestParams {
     RuntimeInfo(EmptyParams),
     RepositoryPreview(ReadRepositoryPreviewParams),
+    OpenRepository(OpenRepositoryParams),
+    GetRepositorySession(EmptyParams),
+    ReadSessionPreview(EmptyParams),
+    RecordRepositoryView(EmptyParams),
+    CloseRepository(EmptyParams),
+    ListRecentRepositories(EmptyParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -153,6 +161,13 @@ pub struct EmptyParams {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadRepositoryPreviewParams {
+    #[schemars(length(min = 1, max = 16384))]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenRepositoryParams {
     #[schemars(length(min = 1, max = 16384))]
     pub path: String,
 }
@@ -239,6 +254,113 @@ pub enum ResponseData {
         commits: Vec<CommitSummary>,
         has_more: bool,
     },
+    #[serde(rename = "repositorySession")]
+    RepositorySession { session: RepositorySessionInfo },
+    #[serde(rename = "repositoryViewRecorded")]
+    RepositoryViewRecorded { saved: bool, status: StoreStatus },
+    #[serde(rename = "repositoryClosed")]
+    RepositoryClosed { closed: bool },
+    #[serde(rename = "recentRepositories")]
+    RecentRepositories {
+        repositories: Vec<RecentRepository>,
+        status: StoreStatus,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositorySessionInfo {
+    #[schemars(length(min = 1, max = 256))]
+    pub repo_id: String,
+    #[schemars(length(min = 1, max = 256))]
+    pub generation: String,
+    #[schemars(length(min = 1, max = 128))]
+    pub repository_key: String,
+    #[schemars(length(min = 1, max = 128))]
+    pub worktree_id: String,
+    pub scope: RepositoryScope,
+    pub observed_at_unix_ms: u64,
+    pub repository: RepositoryInfo,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableLastViewedSnapshotSchema")]
+    pub previous_view: Option<LastViewedSnapshot>,
+    pub persistence: SessionPersistenceStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RepositoryScope {
+    Head,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LastViewedSnapshot {
+    #[schemars(length(max = 1))]
+    pub tips: Vec<String>,
+    pub viewed_at_unix_ms: u64,
+}
+
+struct NullableLastViewedSnapshotSchema;
+
+impl JsonSchema for NullableLastViewedSnapshotSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableLastViewedSnapshot".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let value_schema = generator.subschema_for::<LastViewedSnapshot>();
+        let value_schema =
+            serde_json::to_value(value_schema).expect("last viewed snapshot schema serializes");
+        Schema::try_from(serde_json::json!({
+            "anyOf": [value_schema, {"type": "null"}]
+        }))
+        .expect("valid nullable last viewed snapshot schema")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionPersistenceStatus {
+    pub recent: StoreStatus,
+    pub last_seen: StoreStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreStatus {
+    Ok,
+    Disabled,
+    Unavailable,
+    Corrupt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecentRepository {
+    #[schemars(length(min = 1, max = 128))]
+    pub repository_key: String,
+    #[schemars(length(min = 1, max = 128))]
+    pub worktree_id: String,
+    #[schemars(length(min = 1, max = 16384))]
+    pub path: String,
+    #[schemars(length(min = 1, max = 16384))]
+    pub git_dir: String,
+    #[schemars(length(min = 1, max = 16384))]
+    pub common_dir: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(min = 1, max = 16384))]
+    pub worktree_path: Option<String>,
+    #[schemars(length(min = 1, max = 16))]
+    pub object_format: String,
+    pub last_opened_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -328,6 +450,7 @@ pub enum ErrorCode {
     UnsupportedRepository,
     ResourceLimit,
     GitError,
+    PermissionDenied,
 }
 
 #[must_use]
@@ -447,6 +570,21 @@ mod tests {
                 ..
             }
         ));
+
+        let open_request: ClientMessage = serde_json::from_value(json!({
+            "type":"request",
+            "requestId":"open-1",
+            "method":"openRepository",
+            "repoId":null,
+            "generation":null,
+            "params":{"path":"/tmp/repo"}
+        }))
+        .expect("open request uses the generated path params");
+        assert!(matches!(open_request, ClientMessage::Request { .. }));
+        assert_eq!(
+            serde_json::to_value(ErrorCode::PermissionDenied).unwrap(),
+            json!("PERMISSION_DENIED")
+        );
     }
 
     #[test]
@@ -507,6 +645,22 @@ mod tests {
         }
         assert_eq!(
             error_schema["properties"]["requestId"]["type"],
+            json!(["string", "null"])
+        );
+        let session_schema = &server["definitions"]["RepositorySessionInfo"];
+        assert!(
+            session_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("previousView"))
+        );
+        assert_eq!(
+            session_schema["properties"]["previousView"]["anyOf"][1]["type"],
+            "null"
+        );
+        let recent_schema = &server["definitions"]["RecentRepository"];
+        assert_eq!(
+            recent_schema["properties"]["worktreePath"]["type"],
             json!(["string", "null"])
         );
     }

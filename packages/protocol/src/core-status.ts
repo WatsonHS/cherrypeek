@@ -1,5 +1,6 @@
 import type { CoreReady } from "./core-ready.js";
 import type { RepositoryPreviewState } from "./repository-preview.js";
+import type { RepositorySessionApi } from "./repository-session.js";
 
 export type CoreStatus =
   | { state: "starting"; revision: number }
@@ -7,7 +8,7 @@ export type CoreStatus =
   | { state: "error"; revision: number; message: string }
   | { state: "stopped"; revision: number };
 
-export interface CommitScopeApi {
+export interface CommitScopeApi extends RepositorySessionApi {
   getCoreStatus(): Promise<CoreStatus>;
   onCoreStatusChanged(listener: (status: CoreStatus) => void): () => void;
   chooseRepository(): Promise<string | null>;

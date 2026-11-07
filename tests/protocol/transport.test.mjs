@@ -111,16 +111,18 @@ test("current-view changes cancel only replaced requests; latest observation alo
     args: [peerPath, "context"],
     env: { ...process.env, COMMITSCOPE_PEER_COUNT_FILE: countFile },
   });
+  const older = { repoId: "repo-a", generation: "generation-1" };
   const newer = { repoId: "repo-a", generation: "generation-2" };
+  const sessionInfo = (target, options = {}) => core.request("getRepositorySession", {}, target, options);
   try {
     await core.start();
-    const observedOnly = runtimeInfo(core);
+    core.switchCurrentContext(older);
+    const observedOnly = sessionInfo(older);
     core.observeLatestContext(newer);
     assert.equal((await observedOnly).coverage.complete, true);
 
-    core.switchCurrentContext(context);
     const chunksDeliveredAfterSwitch = [];
-    const stale = runtimeInfo(core, { onChunk: chunk => chunksDeliveredAfterSwitch.push(chunk) });
+    const stale = sessionInfo(older, { onChunk: chunk => chunksDeliveredAfterSwitch.push(chunk) });
     const staleRejected = assert.rejects(stale, error => error.code === "STALE_CONTEXT");
     await waitFor(async () => Number((await readFile(countFile, "utf8")).trim()) === 2);
     core.switchCurrentContext(newer);
@@ -129,11 +131,11 @@ test("current-view changes cancel only replaced requests; latest observation alo
     assert.deepEqual(chunksDeliveredAfterSwitch, []);
     assert.equal(core.getStatus().state, "ready");
 
-    await assert.rejects(runtimeInfo(core), error => error.code === "STALE_CONTEXT");
+    await assert.rejects(sessionInfo(older), error => error.code === "STALE_CONTEXT");
     assert.equal(Number((await readFile(countFile, "utf8")).trim()), 2, "stale local request must not be written to stdin");
 
-    core.switchCurrentContext(context);
-    assert.equal((await runtimeInfo(core)).coverage.complete, true);
+    core.switchCurrentContext(older);
+    assert.equal((await sessionInfo(older)).coverage.complete, true);
     assert.equal(Number((await readFile(countFile, "utf8")).trim()), 3);
   } finally {
     await stopQuietly(core);

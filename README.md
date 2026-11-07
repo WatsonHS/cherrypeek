@@ -2,7 +2,7 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0 / P0-01 至 P0-04 已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、图与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：M0 及 P1-01 后端与非视觉接口已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；核心新增固定 HEAD 的仓库会话、最近打开与按 worktree 保存的上次查看记录，窄接口已提供，界面尚待接入。已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、图与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
@@ -37,8 +37,10 @@
 | [P0-04 验收记录](docs/validation/p0-04-readers.md) | 深页、原始字节、兼容性、只读与取消验证 |
 | [读取路线决策](docs/decisions/0001-git-reader.md) | 保留 Git CLI，gix 暂仅用于实验 |
 | [M0 汇总基线](docs/benchmarks/m0-baseline.md) | 180 项读取对比、参考硬件、冻结预算与限制 |
+| [P1-01 代码级计划](docs/implementation/p1-01-repository-sessions.md) | 固定 HEAD 会话、持久身份、查看记录与非视觉桥接契约 |
+| [P1-01 验收记录](docs/validation/p1-01-repository-sessions.md) | 真实会话、存储降级、取消竞态与双运行时协议验证 |
 
-建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M1 / P1-01` 仓库会话，再做固定快照与可续读历史分页；分页稳定后提前交付元数据搜索。UI 按 Claude 的设计推进，本次读取实验未修改桌面实现。
+建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M1 / P1-02` 固定快照与可续读历史分页；分页稳定后提前交付元数据搜索。UI 按 Claude 的设计推进，P1-01 仅接入后端与非视觉业务接口。
 
 ## 本地运行
 
@@ -58,6 +60,7 @@ pnpm protocol:check
 pnpm typecheck
 pnpm build
 pnpm test:protocol
+pnpm test:sessions
 pnpm test:repository
 pnpm test:smoke
 node --test tests/repository/benchmark-process-tree.test.mjs
@@ -67,6 +70,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 `pnpm protocol:generate` 从 Rust 类型导出三份 schema 和 TypeScript，`protocol:check` 只校验产物一致性。`test:protocol` 覆盖真实 daemon、受控故障协议和慢 Git 子进程回收。Smoke 会启动并关闭真实 Electron 窗口，覆盖正常启动、失败状态、隔离与进程退出；本地截图写入已忽略的 `output/playwright/`。`test:repository` 自动生成临时真实 Git 仓库，完成独立字段对照、只读快照与 Electron 界面验证。性能实测见首屏基线；发布预算尚未验收。
+
+`test:sessions` 只构建 daemon，使用临时 Git fixture 与独立应用数据目录验证会话 / 查看记录，不启动 UI。旧预览的纯 headless 回归可运行 `node scripts/test-repository.mjs`。应用通过 main 把 `userData/repository-state` 传给核心；直接运行 daemon 时，未配置 `COMMITSCOPE_APP_DATA_DIR` 会禁用持久化，仍可浏览。存储不会因打开仓库就标记已读，调用方需在真实内容展示后显式记录查看。
 
 ## 工程布局
 
@@ -78,6 +83,7 @@ packages/protocol/          生成的 schema / TypeScript、桌面状态接口
 scripts/                    协议生成、构建、启动、fixture 与测量脚本
 tests/smoke/                真实 Electron 集成检查
 tests/protocol/             客户端协议、判旧与生命周期测试
+tests/sessions/             仓库会话、查看记录、存储降级与取消集成测试
 tests/repository/           独立 Git 对照、只读快照和取消测试
 tests/readers/              CLI / gix 实验的 headless 正确性与取消测试
 tests/fixtures/             fixture 生成和使用说明
@@ -104,13 +110,13 @@ pnpm benchmark:readers --repository="$PWD/output/fixtures/local-100k/large" --ru
 
 测量前等待所有构建 / 测试结束；预检与正式结果分开保存。gix 仅为实验 dev-dependency，不进入生产 daemon 依赖。`test:readers` 要求一个已生成的 10 万提交 fixture，缺失时会提示生成命令。
 
-`build:release` 使用优化的 Rust 二进制和构建后的桌面资源，尚非安装包。生成数据、原始采样和截图保存在忽略目录；源码中保留生成器和验收报告。历史分页、图布局、索引和缓存尚未实现。当前仅验证本机 macOS；Windows 在跨平台阶段验收，Linux 后续评估。Electron 45.2.3 内置 Node 24.22.2，与用于构建的 Node 26 分开记录；锁文件已保留。
+`build:release` 使用优化的 Rust 二进制和构建后的桌面资源，尚非安装包。生成数据、原始采样和截图保存在忽略目录；源码中保留生成器和验收报告。历史分页、图布局、元数据索引和查询缓存尚未实现。当前仅验证本机 macOS；Windows 在跨平台阶段验收，Linux 后续评估。Electron 45.2.3 内置 Node 24.22.2，与用于构建的 Node 26 分开记录；锁文件已保留。
 
 ## 决策来源
 
 2026-11-07 根据[《Git客户端替代方案》对话](chatgpt-conversation://6aee1e91-eb04-83e9-b710-302e29850b14)及本次要求整理。以对话后半段对需求的收敛为准：历史和搜索优先，merge 与 review 次要。本次明确选择 Electron，并取消此前“评估复用 GitComet 后端”的候选路线。
 
-同日用户通过四项选择确认：固定快照并点击刷新、提前交付元数据搜索、消息搜索框配合明确字段筛选、部分结果自动合并并保持选择和滚动锚点。随后授权由主代理制定代码级计划与验收、轻量模型代理实现；P0-01 至 P0-04 已完成，后续任务按实施计划推进。
+同日用户通过四项选择确认：固定快照并点击刷新、提前交付元数据搜索、消息搜索框配合明确字段筛选、部分结果自动合并并保持选择和滚动锚点。随后授权由主代理制定代码级计划与验收、轻量模型代理实现；P0-01 至 P0-04、P1-01 后端与非视觉接口已完成，后续任务按实施计划推进。
 
 同日用户在设计画布上比较多个方向后确认界面 v3：提交列表 + 详情双栏，分支与 worktree 收进范围选择器，文件改动放到详情第二层；并新增分支合入状态（对比 origin/main，识别 squash / rebase 合并）、按需计算的包含分支和按 Author 的活动分布。随后补充上次查看后新增标记、更新明细、merge 带入的提交、trailer、宽分支图、窄窗口、筛选弹层、定位横幅与 ⌘K 命令面板。产品、架构、计划与验收文档已同步。
 

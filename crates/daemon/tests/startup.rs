@@ -284,7 +284,11 @@ fn handshake_and_runtime_info_are_real_two_chunk_response() {
     assert_eq!(handshake["core"]["pid"], daemon.child.0.id());
     assert_eq!(
         handshake["core"]["capabilities"],
-        json!(["getRuntimeInfo", "readRepositoryPreview"])
+        json!([
+            "getRuntimeInfo",
+            "readRepositoryPreview",
+            "repositorySessions"
+        ])
     );
     assert_eq!(handshake["core"]["git"]["available"], true);
     assert!(

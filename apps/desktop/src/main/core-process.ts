@@ -92,7 +92,7 @@ export class CoreProcess {
   }
 
   request(
-    method: "getRuntimeInfo" | "readRepositoryPreview",
+    method: ClientRequestMessage["method"],
     params: ClientRequestMessage["params"],
     context: RequestContext,
     options: RequestOptions = {},

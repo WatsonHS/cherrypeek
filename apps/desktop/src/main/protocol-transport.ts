@@ -55,6 +55,8 @@ export interface ProtocolTransportOptions {
 export interface RequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  retainResultAfterAbort?: boolean;
+  fatalOnTimeout?: boolean;
   onChunk?: (chunk: ServerResponseMessage) => void;
 }
 
@@ -62,6 +64,10 @@ export type RequestCompletion = Pick<ServerResponseMessage, "coverage" | "nextCu
 
 interface PendingRequest {
   context: RequestContext;
+  gateBound: boolean;
+  retainResultAfterAbort: boolean;
+  fatalOnTimeout: boolean;
+  cancelRequested: boolean;
   nextSequence: number;
   resolve: (completion: RequestCompletion) => void;
   reject: (error: ProtocolClientError) => void;
@@ -168,14 +174,27 @@ export class ProtocolTransport {
     if (!validRequestParams(method, params)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "请求方法或参数无效"));
     }
-    if (context.repoId !== null || context.generation !== null) {
-      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "getRuntimeInfo 不接受仓库上下文"));
+    const requestMode = requestModeFor(method);
+    if (!requestMode) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "请求方法不受支持"));
+    }
+    if (requestMode !== "session" && (context.repoId !== null || context.generation !== null)) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不接受仓库上下文"));
+    }
+    if (requestMode === "session" && (!context.repoId || !context.generation)) {
+      return Promise.reject(new ProtocolClientError("STALE_CONTEXT", "当前没有可用的仓库会话"));
     }
     if (this.pending.size >= this.maxPendingRequests) {
       return Promise.reject(new ProtocolClientError("BUSY", "交互请求已满", true));
     }
     if (options.signal?.aborted) {
       return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
+    }
+    if (options.retainResultAfterAbort && method !== "openRepository") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅 openRepository 可在取消后排空终态"));
+    }
+    if (options.fatalOnTimeout && method !== "openRepository" && method !== "closeRepository") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅会话变更请求可因超时关闭连接"));
     }
 
     const requestId = this.nextRequestId();
@@ -187,21 +206,34 @@ export class ProtocolTransport {
     return new Promise<RequestCompletion>((resolve, reject) => {
       const pending: PendingRequest = {
         context: { ...context },
+        gateBound: requestMode === "session",
+        retainResultAfterAbort: options.retainResultAfterAbort === true,
+        fatalOnTimeout: options.fatalOnTimeout === true,
+        cancelRequested: false,
         nextSequence: 0,
         resolve,
         reject,
         onChunk: options.onChunk,
-        timer: setTimeout(() => this.cancel(requestId, "TIMEOUT", `请求超时（${timeoutMs} ms）`), timeoutMs),
+        timer: setTimeout(() => {
+          const message = `请求超时（${timeoutMs} ms）`;
+          if (pending.fatalOnTimeout) this.fail(new ProtocolClientError("TIMEOUT", message, true));
+          else this.cancel(requestId, "TIMEOUT", message);
+        }, timeoutMs),
         signal: options.signal,
       };
       this.pending.set(requestId, pending);
       if (options.signal) {
-        pending.abortHandler = () => this.cancel(requestId, "CANCELLED", abortMessage(options.signal!));
+        pending.abortHandler = () => {
+          if (pending.retainResultAfterAbort) this.cancelAndDrain(requestId);
+          else this.cancel(requestId, "CANCELLED", abortMessage(options.signal!));
+        };
         options.signal.addEventListener("abort", pending.abortHandler, { once: true });
       }
-      pending.unregisterContext = this.contextGate.register(requestId, context, id => {
-        this.cancel(id, "STALE_CONTEXT", "请求所属的浏览上下文已切换");
-      });
+      if (pending.gateBound) {
+        pending.unregisterContext = this.contextGate.register(requestId, context, id => {
+          this.cancel(id, "STALE_CONTEXT", "请求所属的仓库会话已切换");
+        });
+      }
       if (!this.pending.has(requestId)) return;
 
       const message: ClientRequestMessage = {
@@ -289,7 +321,7 @@ export class ProtocolTransport {
       this.fail(new ProtocolClientError("PROTOCOL_ERROR", `请求 ${message.requestId} 分块序号错误：预期 ${pending.nextSequence}，收到 ${message.sequence}`));
       return;
     }
-    if (!this.contextGate.accepts(message.requestId, pending.context)) {
+    if (pending.gateBound && !this.contextGate.accepts(message.requestId, pending.context)) {
       this.cancel(message.requestId, "STALE_CONTEXT", "请求所属的浏览上下文已切换");
       return;
     }
@@ -319,8 +351,19 @@ export class ProtocolTransport {
   }
 
   private cancel(requestId: string, code: ProtocolErrorCode, message: string): void {
-    if (!this.pending.has(requestId)) return;
+    const pending = this.pending.get(requestId);
+    if (!pending) return;
     this.finishReject(requestId, new ProtocolClientError(code, message, code === "TIMEOUT" || code === "CANCELLED"));
+    if (pending.cancelRequested) return;
+    pending.cancelRequested = true;
+    const cancelMessage = { type: "cancel", requestId } as const;
+    void this.enqueue(cancelMessage).catch(error => this.fail(asProtocolError(error, "CORE_EXITED")));
+  }
+
+  private cancelAndDrain(requestId: string): void {
+    const pending = this.pending.get(requestId);
+    if (!pending || pending.cancelRequested) return;
+    pending.cancelRequested = true;
     const cancelMessage = { type: "cancel", requestId } as const;
     void this.enqueue(cancelMessage).catch(error => this.fail(asProtocolError(error, "CORE_EXITED")));
   }
@@ -464,7 +507,23 @@ function validRequestParams(method: string, params: unknown): boolean {
     return params.path.length > 0 && Buffer.byteLength(params.path, "utf8") <= 16 * 1024 &&
       !params.path.includes("\0") && isAbsolute(params.path);
   }
+  if (method === "openRepository" && isRecord(params) && typeof params.path === "string") {
+    return params.path.length > 0 && Buffer.byteLength(params.path, "utf8") <= 16 * 1024 &&
+      !params.path.includes("\0") && isAbsolute(params.path);
+  }
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
+    return isRecord(params) && Object.keys(params).length === 0;
+  }
   return false;
+}
+
+type RequestMode = "legacy" | "control" | "session";
+
+function requestModeFor(method: string): RequestMode | undefined {
+  if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
+  if (method === "openRepository" || method === "listRecentRepositories") return "control";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository"].includes(method)) return "session";
+  return undefined;
 }
 
 function asProtocolError(error: unknown, fallback: ProtocolErrorCode): ProtocolClientError {

@@ -1,6 +1,6 @@
 # 实施计划
 
-日期：2026-11-07。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；下一项为 P1-01 仓库会话。下面的目录和命令按各任务完成证据区分已实现与待交付，不据此提前声明后续能力。
+日期：2026-11-07。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话的后端与非视觉接口已通过[验收](validation/p1-01-repository-sessions.md)，下一项为 P1-02 历史分页与游标。下面的目录和命令按各任务完成证据区分已实现与待交付，不据此提前声明后续能力。
 
 执行顺序：P0-01 → P0-02 → P0-03 → P0-04 → M1 → M2 → M3 → M4。每项交付应能独立检查；任务记录包含完成条件的证据后再勾选。
 
@@ -19,7 +19,7 @@
 
 ## M1：历史浏览与元数据搜索
 
-- [ ] **P1-01 仓库会话。** 仓库发现、最近打开记录、规范化路径、worktree / commonDir 区分，提供 Git 不可用、空仓库、权限错误状态；在应用数据目录按仓库、worktree 与浏览范围记录上次查看的 tip 集合。依赖 M0。完成条件：切换仓库释放旧任务；同一对象库的两个 worktree 使用正确的各自 HEAD；上次查看记录不写入被查看仓库，损坏或缺失时只是不做“新增”标记。
+- [x] **P1-01 仓库会话。** 仓库发现、最近打开记录、规范化路径、worktree / commonDir 区分，提供 Git 不可用、空仓库、权限错误状态；在应用数据目录按仓库、worktree 与浏览范围记录上次查看的 tip 集合。依赖 M0。完成条件：切换仓库释放旧任务；同一对象库的两个 worktree 使用正确的各自 HEAD；上次查看记录不写入被查看仓库，损坏或缺失时只是不做“新增”标记。2026-11-07 后端与非视觉接口验收通过：Rust 30 项、双 Node 运行时协议各 27 项、真实会话 10 组、旧预览回归 7 组。当前范围为 head；菜单、记录查看的 UI 调用及新增标记待后续接入。见[代码级计划](implementation/p1-01-repository-sessions.md)与[验收记录](validation/p1-01-repository-sessions.md)。
 - [ ] **P1-02 历史查询与游标。** 固定 tip 快照，实现流式分页、有界缓存、游标失效与手动刷新接口；记录深页重读成本。依赖 P1-01。完成条件：固定 fixture 完整遍历无重复 / 遗漏；同时间戳和 merge 历史次序稳定，外部连续提交不改变当前遍历，主动刷新后不会拼接两个快照。
 - [ ] **P1-03 虚拟历史列表。** 显示摘要、Author（身份头像按 PRODUCT 配色规则）、时间、OID、引用标签，标出上次查看后新增的提交（连续时显示“上次看到这里”分隔线），支持键盘选择、复制、错误重试和有限预取。依赖 P1-02。完成条件：前端保留行数有界，快速切换范围不闪回旧数据；新增标记与独立 `git rev-list <当前 tips> --not <上次 tips>` 一致，首次打开不标记；10 万提交滚动记录满足已冻结预算或留下待修复测量。
 - [ ] **P1-04 分支与 worktree 导航。** 范围选择器列出 HEAD 可达历史、全部分支、worktree（主或 linked、HEAD 指向、路径）、本地分支、远端跟踪分支、标签与 detached HEAD；顶部显示本窗口 worktree 入口；分支与 worktree 点击仅切换范围，提供手动刷新入口；本地分支显示被哪个 worktree 检出，并通过 `refMergeStatus` 显示相对默认分支的合入状态（第一版只显示“已合入”）。依赖 P1-03。完成条件：浏览前后 worktree、index、HEAD、refs 均不变，界面分清当前工作区与查看范围；基准按 origin/HEAD → origin/main → origin/master 解析，没有远端跟踪分支时退回本地 main → master，都不存在时不显示；可达判断与独立 `git merge-base --is-ancestor` 一致；不可达时不显示标签，不给“未合入”结论（squash / rebase 识别见 P4-08）；刷新尽量保持所选 OID 与滚动锚点，引用或锚点已不存在时明确提示，不暗中替换选择。
