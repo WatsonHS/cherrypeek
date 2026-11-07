@@ -99,6 +99,7 @@ export class RepositorySessionController {
     }
     this.requireCapability("repositorySessions");
     this.requireCapability("repositoryScopes");
+    this.requireCapability("historyGraph");
 
     const operation = ++this.operation;
     ++this.pageIntent;
@@ -144,6 +145,7 @@ export class RepositorySessionController {
   }
 
   async get(): Promise<RepositorySessionInfo> {
+    this.requireCapability("historyGraph");
     const session = this.requireCurrent();
     const data = await this.singleSessionRequest("getRepositorySession", {}, session);
     if (data.section !== "repositorySession" || !sameSession(data.session, session)) {
@@ -740,6 +742,9 @@ export class RepositorySessionController {
         if (data.pageSize !== pageSize || data.commits.length + commits.length > pageSize) {
           throw invalidSessionResponse("历史页提交数量超过请求上限");
         }
+        if (!Array.isArray(data.commits) || !data.commits.every(commit => validHistoryGraphCommit(commit, session.repository.objectFormat))) {
+          throw invalidSessionResponse("历史页包含无效或缺失的图布局");
+        }
         if ((cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
           (cursor !== null && data.cursor !== cursor)) throw invalidSessionResponse("历史页游标与位置不一致");
         if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
@@ -813,6 +818,10 @@ export class RepositorySessionController {
         if (metadata && metadata !== currentMetadata) throw invalidSessionResponse("刷新历史页分块元数据不一致");
         metadata = currentMetadata;
         if (data.pageSize !== pageSize || commits.length + data.commits.length > pageSize) throw invalidSessionResponse("刷新历史页超过请求上限");
+        const pageObjectFormat = repository?.objectFormat;
+        if (!pageObjectFormat || !Array.isArray(data.commits) || !data.commits.every(commit => validHistoryGraphCommit(commit, pageObjectFormat))) {
+          throw invalidSessionResponse("刷新历史页包含无效或缺失的图布局");
+        }
         if (data.offset !== 0 || data.previousCursor !== null) throw invalidSessionResponse("刷新首屏位置无效");
         if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
           : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("刷新历史页 envelope 终态无效");
@@ -916,6 +925,7 @@ export class RepositorySessionController {
   private requireHistoryCapability(): RepositorySessionInfo {
     this.requireCapability("historyPagination");
     this.requireCapability("historyNewSinceLastSeen");
+    this.requireCapability("historyGraph");
     return this.requireCurrent();
   }
 
@@ -929,7 +939,8 @@ export class RepositorySessionController {
     if (!status.core.capabilities.includes(capability as typeof status.core.capabilities[number])) {
       throw new ProtocolClientError("UNKNOWN_METHOD", capability === "metadataIndex"
         ? "核心不支持元数据索引，请更新核心版本" : capability === "metadataSearch"
-          ? "核心不支持元数据搜索，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
+          ? "核心不支持元数据搜索，请更新核心版本" : capability === "historyGraph"
+            ? "核心不支持历史图布局，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -1060,6 +1071,64 @@ function validSearchPage(page: SearchPage, params: SearchCommitsParams, commits:
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean {
+  const oidLength = objectFormat === "sha256" ? 64 : 40;
+  const validOid = (oid: unknown): oid is string => typeof oid === "string" && oid.length === oidLength && /^[0-9a-f]+$/i.test(oid);
+  if (!isRecord(value) || !validOid(value.oid) || !Array.isArray(value.parents) || !value.parents.every(validOid)) return false;
+  const commit = value as unknown as HistoryCommit;
+  const graph = (value as Record<string, unknown>).graph;
+  if (!isRecord(graph) || !hasExactKeys(graph, ["lane", "color", "parents", "boundary", "above", "below", "hiddenLaneCount", "segments"])) return false;
+  if (!Number.isInteger(graph.lane) || (graph.lane as number) < 0 || (graph.lane as number) > 16_383 ||
+    graph.color !== (graph.lane as number) % 6 || typeof graph.boundary !== "boolean" ||
+    !Number.isInteger(graph.above) || (graph.above as number) < 0 || (graph.above as number) > 63 ||
+    !Number.isInteger(graph.below) || (graph.below as number) < 0 || (graph.below as number) > 63 ||
+    !Number.isInteger(graph.hiddenLaneCount) || (graph.hiddenLaneCount as number) < 0 || (graph.hiddenLaneCount as number) > 16_384 ||
+    !Array.isArray(graph.parents) || graph.parents.length > 128 || !graph.parents.every(validOid) ||
+    !Array.isArray(graph.segments) || graph.segments.length > 256) return false;
+  const parents = graph.parents as string[];
+  if (graph.boundary !== (parents.length !== commit.parents.length || parents.some((parent, index) => parent !== commit.parents[index]))) return false;
+  const lane = graph.lane as number;
+  const above = graph.above as number;
+  const below = graph.below as number;
+  const representedAbove = new Set<number>();
+  const representedBelow = new Set<number>();
+  const hiddenLanes = new Set<number>();
+  const segments = new Set<string>();
+  if (lane >= 6) hiddenLanes.add(lane);
+  for (const rawSegment of graph.segments) {
+    if (!isRecord(rawSegment) || !hasExactKeys(rawSegment, ["kind", "fromLane", "toLane", "color"])) return false;
+    const { kind, fromLane, toLane, color } = rawSegment;
+    if (!(kind === "through" || kind === "incoming" || kind === "outgoing") ||
+      !Number.isInteger(fromLane) || (fromLane as number) < 0 || (fromLane as number) > 16_383 ||
+      !Number.isInteger(toLane) || (toLane as number) < 0 || (toLane as number) > 16_383 ||
+      !Number.isInteger(color) || (color as number) < 0 || (color as number) >= 6 ||
+      (fromLane as number) >= 6 && (toLane as number) >= 6) return false;
+    const segmentKey = `${kind}:${fromLane}:${toLane}`;
+    if (segments.has(segmentKey) || kind === "through" && fromLane !== toLane) return false;
+    segments.add(segmentKey);
+    if (kind === "through" && (fromLane as number < 6 && !maskHasLane(above, fromLane as number) ||
+      (toLane as number) < 6 && !maskHasLane(below, toLane as number) || color !== (fromLane as number) % 6)) return false;
+    if (kind === "incoming" && ((fromLane as number) < 6 && !maskHasLane(above, fromLane as number) ||
+      toLane !== lane || color !== (fromLane as number) % 6)) return false;
+    if (kind === "outgoing" && (fromLane !== lane || (toLane as number) < 6 && !maskHasLane(below, toLane as number) ||
+      color !== (toLane as number) % 6)) return false;
+    if ((kind === "through" || kind === "incoming") && (fromLane as number) < 6) representedAbove.add(fromLane as number);
+    if ((kind === "through" || kind === "outgoing") && (toLane as number) < 6) representedBelow.add(toLane as number);
+    if ((fromLane as number) >= 6) hiddenLanes.add(fromLane as number);
+    if ((toLane as number) >= 6) hiddenLanes.add(toLane as number);
+  }
+  for (let visibleLane = 0; visibleLane < 6; visibleLane += 1) {
+    if (maskHasLane(above, visibleLane) !== representedAbove.has(visibleLane) ||
+      maskHasLane(below, visibleLane) !== representedBelow.has(visibleLane)) return false;
+  }
+  if ((graph.hiddenLaneCount as number) < hiddenLanes.size) return false;
+  return true;
+}
+
+function maskHasLane(mask: number, lane: number): boolean {
+  return lane < 6 && (mask & (1 << lane)) !== 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -93,13 +93,16 @@ function makePreview(session) {
 
 function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, previousCursor = null, nextCursor = null, count = 1, commits, status = "firstView", divider = null } = {}) {
   const preview = makePreview(session);
+  const pageCommits = commits ?? (offset === 0 && count === 1 ? preview.commits : Array.from({ length: count }, (_, index) => ({
+    ...preview.commits[0],
+    oid: `${(offset + index + 1).toString(16).padStart(2, "0")}`.repeat(20),
+    summary: `summary ${offset + index + 1}`,
+  })));
   return {
     ...preview,
-    commits: commits ?? (offset === 0 && count === 1 ? preview.commits : Array.from({ length: count }, (_, index) => ({
-      ...preview.commits[0],
-      oid: `${(offset + index + 1).toString(16).padStart(2, "0")}`.repeat(20),
-      summary: `summary ${offset + index + 1}`,
-    }))),
+    commits: pageCommits.map(commit => ({ ...commit, graph: commit.graph ?? {
+      lane: 0, color: 0, parents: commit.parents, boundary: false, above: 0, below: 0, hiddenLaneCount: 0, segments: [],
+    } })),
     offset,
     pageSize: 200,
     cursor,

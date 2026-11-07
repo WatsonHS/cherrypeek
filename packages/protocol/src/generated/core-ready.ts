@@ -8,7 +8,8 @@ export type Capability =
   | "historyNewSinceLastSeen"
   | "repositoryScopes"
   | "metadataIndex"
-  | "metadataSearch";
+  | "metadataSearch"
+  | "historyGraph";
 
 export interface CoreReady {
   capabilities: Capability[];

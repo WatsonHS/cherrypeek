@@ -2,7 +2,7 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0、M1（P1-01 至 P1-06）已完成本机 macOS 技术验收，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条、最多保留 2000 条摘要；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局、完整详情、diff、路径搜索等尚未完成，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：M0、M1（P1-01 至 P1-06）及 P2-01 已完成本机 macOS 技术验收，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条、最多保留 2000 条摘要；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，固定六列并提示隐藏数量，明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整详情、diff、路径搜索等尚未完成，当前不是 MVP。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
@@ -54,8 +54,11 @@
 | [P1-05 验收记录](docs/validation/p1-05-metadata-index.md) | SQLite 数据对照、恢复与安全边界、桌面控制和故障重建验证 |
 | [P1-06 代码级计划](docs/implementation/p1-06-metadata-search.md) | 字面搜索语义、组合筛选、版本化结果分页与锚点保持 |
 | [P1-06 验收记录](docs/validation/p1-06-metadata-search.md) | 搜索的数据对照、动态分页、桌面试用及当前验证状态 |
+| [P2-01 代码级计划](docs/implementation/p2-01-history-graph.md) | Rust 图布局、有效父关系、跨页检查点与可见图绘制 |
+| [P2-01 验收记录](docs/validation/p2-01-history-graph.md) | 跨页确定性、边界、取消与实窗恢复验证 |
+| [P2-01 宽图滚动基线](docs/benchmarks/p2-01-history-graph-scroll.md) | 十万提交、千条引用的图滚动与全进程树测量 |
 
-建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M2 / P2-01` Rust 图布局与跨页检查点，继续沿用 Claude 的界面设计。
+建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M2 / P2-02` 提交详情与文件列表，继续沿用 Claude 的界面设计。
 
 ## 本地运行
 
@@ -88,6 +91,8 @@ pnpm test:smoke:scope-navigation
 pnpm test:smoke:metadata-index
 pnpm test:search
 pnpm test:smoke:metadata-search
+pnpm test:graph
+pnpm test:smoke:history-graph
 node --test tests/repository/benchmark-process-tree.test.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
@@ -102,6 +107,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 `test:search` 对照真实 Git fixture 验证完整消息、Unicode 大小写、身份组合、日期、OID、部分结果版本和双向分页；实际项目仓库试用通过显式 `pnpm test:search -- --real-repository` 运行。`test:smoke:metadata-search` 检查真实窗口中的搜索和筛选流程。大仓搜索延迟仍需后续测量，每页扫描当前已索引前缀。
 
+`test:graph` 对照独立 Git 验证有效父关系、六列连接、跨页大小与检查点淘汰重放、浅克隆 / grafts / SHA-256、取消和只读边界；`test:smoke:history-graph` 验证真实图、分隔线桥接、搜索返回、虚拟窗口淘汰与缩放主题。宽图 fixture 生成与串行 release 测量命令见 [P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)。
+
 ## 工程布局
 
 ```text
@@ -114,6 +121,7 @@ tests/smoke/                真实 Electron 集成检查
 tests/protocol/             客户端协议、判旧与生命周期测试
 tests/sessions/             仓库会话、查看记录、存储降级与取消集成测试
 tests/history/              固定快照分页、游标、刷新与流回收集成测试
+tests/graph/                图布局、有效父关系、检查点恢复与取消集成测试
 tests/navigation/           多范围 / worktree、合入状态、只读与失败恢复集成测试
 tests/indexing/             SQLite 元数据、快照成员、恢复、配额和安全路径集成测试
 tests/renderer/             界面会话状态的单元测试（假接口，不启动 Electron）
@@ -150,7 +158,7 @@ cargo build --release --locked -p commitscope-daemon
 pnpm benchmark:history --repository="$PWD/output/fixtures/local-100k/large" --runs=3 --output=output/benchmarks/local-history.json
 ```
 
-`build:release` 使用优化的 Rust 二进制和构建后的桌面资源，尚非安装包。生成数据、原始采样和截图保存在忽略目录；源码中保留生成器和验收报告。当前支持多范围固定快照分页、有界内存页缓存及可恢复 SQLite 元数据索引；图布局和搜索查询缓存尚未实现。当前仅验证本机 macOS；Windows 在跨平台阶段验收，Linux 后续评估。Electron 45.2.3 内置 Node 24.22.2，与用于构建的 Node 26 分开记录；锁文件已保留。
+`build:release` 使用优化的 Rust 二进制和构建后的桌面资源，尚非安装包。生成数据、原始采样和截图保存在忽略目录；源码中保留生成器和验收报告。当前支持多范围固定快照分页、有界页缓存、Rust 图布局与内存检查点，以及可恢复 SQLite 元数据索引；持久搜索结果缓存尚未实现。当前仅验证本机 macOS；Windows 在跨平台阶段验收，Linux 后续评估。Electron 45.2.3 内置 Node 24.22.2，与用于构建的 Node 26 分开记录；锁文件已保留。
 
 ## 决策来源
 

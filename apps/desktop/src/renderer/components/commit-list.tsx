@@ -4,7 +4,7 @@ import type { RepositoryView } from "../lib/repository-session-store.js";
 import { TriangleAlert } from "lucide-react";
 import { clock, dayKey, dayLabel, parseGitTime, refTarget, repositoryName, shortRefName } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
-import { laneX, layoutGraph, MAX_VISIBLE_LANES, type GraphGeometry, type GraphRow } from "../lib/graph.js";
+import { graphPaths, graphWidth as measureGraphWidth, laneX, lanesInMask, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
 import { cn } from "../lib/utils.js";
 import { IdentityAvatar } from "./identity-avatar.js";
 import { ActivityPlaceholder } from "./placeholder-widgets.js";
@@ -19,10 +19,10 @@ const DAY_ROW_HEIGHT = 34;
 
 type ListEntry =
   | { kind: "day"; key: string; dayKey: string; label: string; count: number; lanes: number[]; height: number }
-  | { kind: "divider"; key: string; height: number }
-  | { kind: "commit"; key: string; commit: HistoryCommit; graph: GraphRow | undefined; height: number };
+  | { kind: "divider"; key: string; lanes: number[]; height: number }
+  | { kind: "commit"; key: string; commit: HistoryCommit; height: number };
 
-function buildEntries(commits: HistoryCommit[], rows: Map<string, GraphRow>, dividerOid: string | null): ListEntry[] {
+function buildEntries(commits: HistoryCommit[], dividerOid: string | null): ListEntry[] {
   const entries: ListEntry[] = [];
   const dividerIndex = dividerOid ? commits.findIndex(commit => commit.oid === dividerOid) : -1;
   const hasProvenPrefix = dividerIndex > 0 && !commits[dividerIndex]!.isNewSinceLastSeen &&
@@ -30,8 +30,8 @@ function buildEntries(commits: HistoryCommit[], rows: Map<string, GraphRow>, div
   const visibleDividerOid = hasProvenPrefix ? dividerOid : null;
   const now = new Date();
   let current: Extract<ListEntry, { kind: "day" }> | undefined;
-  let lanesAbove: number[] = [];
   for (const commit of commits) {
+    const lanesAbove = lanesInMask(commit.graph.above);
     const date = parseGitTime(commit.committer.timestamp);
     const key = date ? dayKey(date) : "unknown";
     if (!current || current.dayKey !== key) {
@@ -39,10 +39,8 @@ function buildEntries(commits: HistoryCommit[], rows: Map<string, GraphRow>, div
       entries.push(current);
     }
     current.count += 1;
-    if (commit.oid === visibleDividerOid) entries.push({ kind: "divider", key: `last-seen-${commit.oid}`, height: DAY_ROW_HEIGHT });
-    const graph = rows.get(commit.oid);
-    entries.push({ kind: "commit", key: commit.oid, commit, graph, height: ROW.rowHeight });
-    lanesAbove = graph?.activeBelow ?? [];
+    if (commit.oid === visibleDividerOid) entries.push({ kind: "divider", key: `last-seen-${commit.oid}`, lanes: lanesAbove, height: DAY_ROW_HEIGHT });
+    entries.push({ kind: "commit", key: commit.oid, commit, height: ROW.rowHeight });
   }
   return entries;
 }
@@ -82,19 +80,16 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const programmaticScrollTop = React.useRef<number | null>(null);
   const cancelingPrefetch = React.useRef(false);
   const pendingAnchor = React.useRef<{ oid: string; offset: number; repoId: string; generation: string } | undefined>(undefined);
-  const layout = React.useMemo(() => layoutGraph(preview.commits, ROW), [preview.commits]);
-  const entries = React.useMemo(() => buildEntries(preview.commits, layout.rows,
+  const entries = React.useMemo(() => buildEntries(preview.commits,
     preview.newSinceLastSeenStatus === "ready" ? preview.lastSeenDividerOid : null),
-  [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus, layout]);
+  [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus]);
   const virtual = React.useMemo(() => createVirtualLayout(entries), [entries]);
   const latestScrollModel = React.useRef({ preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor });
   latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
   const lastRestoredPageRevision = React.useRef(0);
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
-  const visibleLanes = Math.min(Math.max(layout.laneCount, 1), MAX_VISIBLE_LANES);
-  const graphWidth = laneX(visibleLanes - 1, ROW) + ROW.x0;
-  const hiddenLanes = Math.max(0, layout.laneCount - MAX_VISIBLE_LANES);
+  const graphColumnWidthWithOverflow = measureGraphWidth(ROW);
   const headReference = preview.repository?.headReference ?? null;
   const headOid = preview.repository?.headOid ?? null;
   const otherWorktreesByHead = React.useMemo(() => {
@@ -290,7 +285,6 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     <div className="flex h-[46px] shrink-0 items-center justify-between gap-2 pr-3.5 pl-1.5 text-xs text-fg3">
       <ActivityPlaceholder />
       <span className="flex items-center gap-2">
-        {hiddenLanes ? <span title={`另有 ${hiddenLanes} 条分支线未画出`} className="rounded-full bg-sunken px-1.5 font-mono text-[11px] text-fg2">+{hiddenLanes}</span> : null}
       <span>{preview.scopeSwitching ? "正在准备范围…" : preview.pageLoading ? "正在读取历史页…" : preview.refreshing ? "正在刷新快照…" : `${scopeDescription} · 固定快照 · 已载入 ${preview.commits.length} 条`}</span>
       </span>
     </div>
@@ -308,6 +302,7 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     </div> : null}
 
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
+      data-visible-graph-lanes={MAX_VISIBLE_LANES}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}
       data-loaded-count={preview.commits.length} data-window-pages={preview.windowPageCount}
       className="min-h-0 flex-1 overflow-auto px-2 pb-6 outline-none" style={{ overflowAnchor: "none" }} onScroll={handleScroll}
@@ -323,9 +318,9 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {finishedEmpty ? <p className="m-0 px-3 py-10 text-center text-[13px] text-fg3">当前 HEAD 尚无提交。</p> : null}
       <div aria-hidden="true" style={{ height: range.top }} />
       {visibleEntries.map(entry => entry.kind === "day"
-        ? <DayRow key={entry.key} entry={entry} width={graphWidth} />
-        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} />
-        : <CommitRow key={entry.commit.oid} commit={entry.commit} graph={entry.graph} graphWidth={graphWidth}
+        ? <DayRow key={entry.key} entry={entry} width={graphColumnWidthWithOverflow} />
+        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} lanes={entry.lanes} width={graphColumnWidthWithOverflow} />
+        : <CommitRow key={entry.commit.oid} commit={entry.commit} graphWidth={graphColumnWidthWithOverflow}
           refs={refIndex.get(entry.commit.oid) ?? []} headReference={headReference} headOid={headOid}
           otherWorktrees={otherWorktreesByHead.get(entry.commit.oid) ?? []}
           selected={entry.commit.oid === selectedOid} onSelect={() => { onSelect(entry.commit.oid); listRef.current?.focus(); }} />)}
@@ -377,21 +372,50 @@ function captureWindowAnchor(
   return { oid: lastCommit.commit.oid, offset: offset - scrollTop, repoId: session.repoId, generation: session.generation };
 }
 
-function GraphLanes({ graph, width, height, lanes }: { graph?: GraphRow; width: number; height: number; lanes?: number[] }): React.JSX.Element {
-  const visible = (lane: number) => lane < MAX_VISIBLE_LANES;
-  return <svg width={width} height={height} aria-hidden="true" className="shrink-0">
-    {lanes?.filter(visible).map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
-    {graph?.paths.filter(path => visible(path.lane)).map((path, index) => <path key={index} d={path.d} style={{ stroke: `var(--l${path.lane % 6})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
-    {graph && visible(graph.lane) ? <circle cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={graph.isMerge ? 3.5 : 3.5}
-      style={graph.isMerge
-        ? { fill: "var(--bg)", stroke: `var(--l${graph.lane % 6})`, strokeWidth: 1.5 }
-        : { fill: `var(--l${graph.lane % 6})` }} /> : null}
+function GraphLanes({ graph, width, height, lanes, testId = "commit-graph" }: {
+  graph?: HistoryCommit["graph"];
+  width: number;
+  height: number;
+  lanes?: number[];
+  testId?: string;
+}): React.JSX.Element {
+  const paths = React.useMemo(() => graph ? graphPaths(graph, ROW) : [], [graph]);
+  const hiddenNode = graph ? graph.lane >= MAX_VISIBLE_LANES : false;
+  const hiddenCount = graph?.hiddenLaneCount ?? 0;
+  const overflowX = graphColumnX();
+  const aboveMask = graph?.above ?? (lanes ?? []).reduce((mask, lane) => mask | (1 << lane), 0);
+  const belowMask = graph?.below ?? 0;
+  const signature = graph
+    ? `${graph.lane}/${graph.color}/${graph.above}/${graph.below}/${graph.hiddenLaneCount}/${graph.boundary ? 1 : 0}/${graph.segments.map(segment => `${segment.kind}:${segment.fromLane}-${segment.toLane}:${segment.color}`).join(",")}`
+    : `above:${aboveMask}`;
+  return <svg width={width} height={height} aria-hidden="true" className="shrink-0"
+    data-testid={testId} data-graph-signature={signature} data-graph-lane={graph?.lane}
+    data-graph-visible-lanes={MAX_VISIBLE_LANES} data-graph-hidden-count={hiddenCount}
+    data-graph-boundary={graph?.boundary ? "true" : "false"} data-graph-above-mask={aboveMask} data-graph-below-mask={belowMask}>
+    <svg x={0} y={0} width={overflowX} height={height} viewBox={`0 0 ${overflowX} ${height}`} className="overflow-hidden">
+      {lanes?.map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
+      {paths.map((path, index) => <path key={index} d={path.d} style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
+      {graph && !hiddenNode ? <circle cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={3.5}
+        style={graph.boundary
+          ? { fill: "var(--bg)", stroke: "var(--warn)", strokeWidth: 1.8 }
+          : graph.parents.length > 1
+            ? { fill: "var(--bg)", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }
+            : { fill: `var(--l${graph.color})` }} /> : null}
+    </svg>
+    {hiddenCount > 0 ? <>
+      {hiddenNode ? <circle cx={overflowX + 3} cy={ROW.mid} r={2.5} className="fill-fg3" /> : null}
+      <text x={overflowX + (hiddenNode ? 8 : 2)} y={ROW.mid + 3} className="fill-fg3 font-mono text-[9px]">+{hiddenCount}</text>
+    </> : null}
   </svg>;
+}
+
+function graphColumnX(): number {
+  return laneX(MAX_VISIBLE_LANES - 1, ROW) + ROW.x0;
 }
 
 function DayRow({ entry, width }: { entry: Extract<ListEntry, { kind: "day" }>; width: number }): React.JSX.Element {
   return <div role="presentation" className="flex items-stretch gap-2 pr-3 pl-2" style={{ height: DAY_ROW_HEIGHT }}>
-    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={entry.lanes} />
+    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={entry.lanes} testId="graph-day-bridge" />
     <span className="flex flex-1 items-end justify-between pb-1.5 text-xs">
       <span className="font-semibold text-fg2">{entry.label}</span>
       <span className="text-fg3">窗口内本组 {entry.count} 条</span>
@@ -399,18 +423,18 @@ function DayRow({ entry, width }: { entry: Extract<ListEntry, { kind: "day" }>; 
   </div>;
 }
 
-function LastSeenDivider(): React.JSX.Element {
+function LastSeenDivider({ lanes, width }: { lanes: number[]; width: number }): React.JSX.Element {
   return <div role="separator" aria-label="上次看到这里" data-testid="history-divider" data-marker-kind="last-seen"
-    className="flex items-center gap-2 px-3 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT }}>
+    className="flex items-center gap-2 pr-3 pl-2 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT }}>
+    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} testId="graph-last-seen-bridge" />
     <span className="h-px flex-1 bg-line" />
     <span>上次看到这里</span>
     <span className="h-px flex-1 bg-line" />
   </div>;
 }
 
-function CommitRow({ commit, graph, graphWidth, refs, headReference, headOid, otherWorktrees, selected, onSelect }: {
+function CommitRow({ commit, graphWidth, refs, headReference, headOid, otherWorktrees, selected, onSelect }: {
   commit: HistoryCommit;
-  graph: GraphRow | undefined;
   graphWidth: number;
   refs: RefInfo[];
   headReference: string | null;
@@ -423,17 +447,26 @@ function CommitRow({ commit, graph, graphWidth, refs, headReference, headOid, ot
   const date = parseGitTime(commit.committer.timestamp);
   return <div id={rowId(commit.oid)} role="option" aria-selected={selected} tabIndex={-1}
     data-testid="commit-row" data-oid={commit.oid}
+    title={[
+      commit.graph.boundary ? "历史边界（浅克隆或父关系调整）" : undefined,
+      commit.graph.lane >= MAX_VISIBLE_LANES ? "此提交位于未显示的图线中" : undefined,
+      commit.graph.hiddenLaneCount > 0 ? `另有 ${commit.graph.hiddenLaneCount} 条图线未显示` : undefined,
+    ].filter(Boolean).join("；") || undefined}
     onClick={onSelect}
     className={cn(
       "flex h-[60px] cursor-default items-stretch gap-2 rounded-[10px] pr-3 pl-2 outline-none",
       "hover:bg-hover focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]",
       selected && "bg-panel shadow-selected hover:bg-panel",
     )}>
-    <GraphLanes graph={graph} width={graphWidth} height={ROW.rowHeight} />
+    <GraphLanes graph={commit.graph} width={graphWidth} height={ROW.rowHeight} />
     <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
       <span className="flex min-w-0 items-center gap-1.5">
         {commit.isNewSinceLastSeen ? <span aria-label="上次查看后新增" data-testid="history-marker" data-marker-kind="new"
           title="上次查看后新增" className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
+        {commit.graph.boundary ? <span title="历史边界（浅克隆或父关系调整）" className="shrink-0 rounded bg-sunken px-1 text-[10px] text-warn">边界</span> : null}
+        {commit.graph.boundary ? <span className="sr-only">历史边界（浅克隆或父关系调整）。</span> : null}
+        {commit.graph.lane >= MAX_VISIBLE_LANES ? <span className="sr-only">此提交位于未显示的图线中。</span> : null}
+        {commit.graph.hiddenLaneCount > 0 ? <span className="sr-only">另有 {commit.graph.hiddenLaneCount} 条图线未显示。</span> : null}
         <span className={cn("truncate text-sm", isMerge ? "font-normal text-fg3" : "font-medium text-fg")}>{commit.summary}</span>
       </span>
       <span className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-fg3">

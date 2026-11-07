@@ -11,7 +11,8 @@
         "historyNewSinceLastSeen",
         "repositoryScopes",
         "metadataIndex",
-        "metadataSearch"
+        "metadataSearch",
+        "historyGraph"
       ],
       "type": "string"
     },

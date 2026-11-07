@@ -33,7 +33,8 @@ export type Capability =
   | "historyNewSinceLastSeen"
   | "repositoryScopes"
   | "metadataIndex"
-  | "metadataSearch";
+  | "metadataSearch"
+  | "historyGraph";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -144,6 +145,7 @@ export type RepositoryScope =
   | {
       worktree: string;
     };
+export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
 export type MergeStatus = "merged" | "notMerged" | "unavailable";
 
@@ -281,12 +283,35 @@ export interface RecentRepository {
 export interface HistoryCommit {
   author: CommitIdentity;
   committer: CommitIdentity;
+  graph: HistoryGraph;
   isNewSinceLastSeen: boolean;
   oid: string;
   parents: string[];
   summary: string;
   summaryTruncated: boolean;
   textLossy: boolean;
+}
+export interface HistoryGraph {
+  above: number;
+  below: number;
+  boundary: boolean;
+  color: number;
+  hiddenLaneCount: number;
+  lane: number;
+  /**
+   * @maxItems 128
+   */
+  parents: string[];
+  /**
+   * @maxItems 256
+   */
+  segments: HistoryGraphSegment[];
+}
+export interface HistoryGraphSegment {
+  color: number;
+  fromLane: number;
+  kind: HistoryGraphSegmentKind;
+  toLane: number;
 }
 export interface RepositoryNavigation {
   defaultBase: DefaultBase | null;

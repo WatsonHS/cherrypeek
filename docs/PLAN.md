@@ -1,6 +1,6 @@
 # 实施计划
 
-日期：2026-11-08。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话已通过[验收](validation/p1-01-repository-sessions.md)，P1-02 已按[代码级计划](implementation/p1-02-history-pagination.md)完成固定快照分页与手动刷新，见[验收记录](validation/p1-02-history-pagination.md)和[分页基线](benchmarks/p1-02-history-pagination.md)。P1-03 的虚拟历史、新增标记和滚动测量已完成，见[验收记录](validation/p1-03-virtual-history.md)及[滚动基线](benchmarks/p1-03-history-scroll.md)。P1-04 的分支与 worktree 导航已完成[验收](validation/p1-04-scope-navigation.md)，P1-05 可恢复元数据索引也已完成[验收](validation/p1-05-metadata-index.md)，P1-06 元数据搜索已完成[验收](validation/p1-06-metadata-search.md)，M1 主流程通过；下一项为 P2-01 图布局与跨页检查点。下面按完成证据区分已实现与待交付，不据此提前声明后续能力。
+日期：2026-11-08。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话已通过[验收](validation/p1-01-repository-sessions.md)，P1-02 已按[代码级计划](implementation/p1-02-history-pagination.md)完成固定快照分页与手动刷新，见[验收记录](validation/p1-02-history-pagination.md)和[分页基线](benchmarks/p1-02-history-pagination.md)。P1-03 的虚拟历史、新增标记和滚动测量已完成，见[验收记录](validation/p1-03-virtual-history.md)及[滚动基线](benchmarks/p1-03-history-scroll.md)。P1-04 的分支与 worktree 导航已完成[验收](validation/p1-04-scope-navigation.md)，P1-05 可恢复元数据索引也已完成[验收](validation/p1-05-metadata-index.md)，P1-06 元数据搜索已完成[验收](validation/p1-06-metadata-search.md)，M1 主流程通过；P2-01 图布局与跨页检查点也已完成[验收](validation/p2-01-history-graph.md)及[宽图测量](benchmarks/p2-01-history-graph-scroll.md)，下一项为 P2-02 提交详情与文件列表。下面按完成证据区分已实现与待交付，不据此提前声明后续能力。
 
 执行顺序：P0-01 → P0-02 → P0-03 → P0-04 → M1 → M2 → M3 → M4。每项交付应能独立检查；任务记录包含完成条件的证据后再勾选。
 
@@ -21,7 +21,7 @@
 
 - [x] **UI-03 隐藏系统标题栏。** 2026-11-07 按用户要求，将原生窗口按钮嵌入顶部工具栏，隐藏系统白色顶栏；保留拖动区和控件点击，打开 / 错误页也避让窗口按钮。本机深浅色、默认与 850px 宽度验证见[验收记录](validation/ui-03-window-chrome.md)。
 
-- [x] **UI-01 界面基础与 v3 外壳。** 引入 Tailwind CSS 4 与 shadcn 风格组件（Radix），按 [DESIGN](DESIGN.md) 实现颜色 token（跟随系统深浅色）、顶部栏、提交列表、详情与状态栏，接入 P0-03 已有的真实数据：仓库信息、引用、HEAD 前 200 个提交及其元数据；新增 `copyText` 窄接口供复制 OID。后端未接入的区域按 AGENTS.md 显示带“占位 · 任务编号”的示例内容。分支图暂由前端按已加载提交的父关系临时布局，P2-01 完成后由 Rust 布局替换。2026-11-07 本机验证见 [验收记录](validation/ui-01-foundation.md)；CSP 未放宽。
+- [x] **UI-01 界面基础与 v3 外壳。** 引入 Tailwind CSS 4 与 shadcn 风格组件（Radix），按 [DESIGN](DESIGN.md) 实现颜色 token（跟随系统深浅色）、顶部栏、提交列表、详情与状态栏，接入 P0-03 已有的真实数据：仓库信息、引用、HEAD 前 200 个提交及其元数据；新增 `copyText` 窄接口供复制 OID。后端未接入的区域按 AGENTS.md 显示带“占位 · 任务编号”的示例内容。初版分支图由前端临时布局；P2-01 已将其替换为 Rust 布局。2026-11-07 本机验证见 [验收记录](validation/ui-01-foundation.md)；CSP 未放宽。
 
 - [x] **P1-01 仓库会话。** 仓库发现、最近打开记录、规范化路径、worktree / commonDir 区分，提供 Git 不可用、空仓库、权限错误状态；在应用数据目录按仓库、worktree 与浏览范围记录上次查看的 tip 集合。依赖 M0。完成条件：切换仓库释放旧任务；同一对象库的两个 worktree 使用正确的各自 HEAD；上次查看记录不写入被查看仓库，损坏或缺失时只是不做“新增”标记。2026-11-07 后端与非视觉接口验收通过：Rust 30 项、双 Node 运行时协议各 27 项、真实会话 10 组、旧预览回归 7 组。当前范围为 head；最近打开与记录查看已由 UI-02 接入界面，新增标记随 P1-03。见[代码级计划](implementation/p1-01-repository-sessions.md)与[验收记录](validation/p1-01-repository-sessions.md)。
 - [x] **UI-02 界面接入仓库会话。** 界面改用会话接口打开与读取首屏，renderer 的会话状态独立成可测模块，过期结果不覆盖当前视图；打开失败保留原仓库，取消即关闭会话；内容显示后及失焦 / 隐藏 / 切换前记录查看；打开页与切换弹层显示最近打开（按对象库分组 worktree）和上次查看事实。移除旧的 renderer 预览接口，`--repository=` 改经 `getLaunchRepository` 由 renderer 打开。2026-11-07 本机验证见[验收记录](validation/ui-02-sessions.md)。
@@ -35,7 +35,7 @@
 
 ## M2：分支图与提交详情
 
-- [ ] **P2-01 图布局与跨页检查点。** Rust 生成 lane / edge 信息，前端按可见区域绘制，并替换 UI-01 的前端临时布局（`apps/desktop/src/renderer/lib/graph.ts`）；图区固定最多显示 6 条线，超出的线不画，在图区右侧显示“+n”（拖宽、展开与悬停高亮见 P4-05）。依赖 P1-02。完成条件：线性、merge、octopus、长边、浅克隆边界、跨页返回的布局验证通过；线条与表格缩放 / 行高一致；隐藏的线不改变 lane 分配和颜色，10 万提交、约 1,000 refs 场景下滚动仍满足预算或留下测量。
+- [x] **P2-01 图布局与跨页检查点。** 2026-11-08 已按[代码级计划](implementation/p2-01-history-graph.md)完成本机验收：Rust 64 项、双 Node 协议各 41 项、renderer 51 项、独立 Git 图对照 7 组及 2217 条实窗遍历通过。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，DOM 峰值 35 行；暂停索引时短时空闲整树 RSS 为 580–583 MiB，不构成索引完成后的内存验收。见[验收记录](validation/p2-01-history-graph.md)与[宽图基线](benchmarks/p2-01-history-graph-scroll.md)。Rust 生成 lane / edge 信息，前端按可见区域绘制，并替换 UI-01 的前端临时布局（`apps/desktop/src/renderer/lib/graph.ts`）；图区固定最多显示 6 条线，超出的线不画，在图区右侧显示“+n”（拖宽、展开与悬停高亮见 P4-05）。依赖 P1-02。完成条件：线性、merge、octopus、长边、浅克隆边界、跨页返回的布局验证通过；线条与表格缩放 / 行高一致；隐藏的线不改变 lane 分配和颜色，10 万提交、约 1,000 refs 场景下滚动仍满足预算或留下测量。
 - [ ] **P2-02 提交详情与文件列表。** 详情「概览」按 OID 加载完整消息与解析出的 trailer、双身份、双时间、父提交、引用与 worktree 位置和改动概览（数量、类型、按目录汇总），所选提交受未载入的更新影响时在详情头部提示一行（用时间表述）；merge 提交的概览列出带入的提交及其作者分布；“包含它的分支”点击后经 `branchesContaining` 计算；「文件改动」标签页列出文件，以选定父提交为基准。依赖 P1-03、P1-04。完成条件：root、merge、重命名、删除、非 ASCII / 含换行路径、gitlink 正确；包含分支与独立 `git branch --contains` / `git branch -r --contains` 一致；trailer 与 `git interpret-trailers --parse` 一致；带入的提交与独立 `git rev-list <第 N 父> --not <第一父>` 一致，octopus 按父提交分组；切换选中项不被旧响应覆盖。
 - [ ] **P2-03 按需只读 diff。** 仅请求选中文件；支持父提交切换、二进制提示、大小限制和截断说明。依赖 P2-02。完成条件：大 patch 不冻结窗口；无隐式 textconv / 外部 diff / 网络请求；字节异常不导致协议损坏。
 - [ ] **P2-04 历史定位与交互。** 将 M1 搜索接入 locateCommit、返回位置锚点和详情面板，定位后显示说明横幅与“返回 N 个结果”；加入快捷键说明（⌘K 命令面板见 P4-07，窄窗口布局见 P4-06）；验证中文输入、键盘、缩放和深浅主题。依赖 P1-06、P2-01、P2-03。完成条件：定位时暂时移除全部字段筛选，在原范围和快照显示图形上下文；深历史定位可取消，查询范围外的 OID 有明确提示，返回后保留原查询、选择和滚动锚点；输入法组词期间快捷键不触发。M3 加入路径筛选后复验相同返回行为。
@@ -54,7 +54,7 @@
 
 ## M4：日用稳定性和平台分发
 
-- [ ] **P4-01 性能达标与边界恢复。** 根据实际瓶颈优化读取、序列化、图布局或缓存；覆盖仓库被移动、GC、数据库损坏、睡眠恢复与核心重启。依赖 M3。完成条件：VALIDATION 的发布预算及正确性关卡通过，30 分钟长时运行不出现持续资源增长。 P1-03 已留待修项：全进程树短时空闲 RSS 实测 540–541 MiB，高于 500 MiB 目标；需定位资源占用并按同口径复验，另补精确翻页到绘制、反向深页、1 分钟空闲 CPU 与长时测量，见[滚动基线](benchmarks/p1-03-history-scroll.md)。
+- [ ] **P4-01 性能达标与边界恢复。** 根据实际瓶颈优化读取、序列化、图布局或缓存；覆盖仓库被移动、GC、数据库损坏、睡眠恢复与核心重启。依赖 M3。完成条件：VALIDATION 的发布预算及正确性关卡通过，30 分钟长时运行不出现持续资源增长。 P1-03 已留待修项：全进程树短时空闲 RSS 实测 540–541 MiB，高于 500 MiB 目标；需定位资源占用并按同口径复验，另补精确翻页到绘制、反向深页、1 分钟空闲 CPU 与长时测量，见[滚动基线](benchmarks/p1-03-history-scroll.md)。 P2-01 宽图的暂停索引短时空闲整树 RSS 为 580–583 MiB，需继续定位资源并补索引完成后同口径测量；该值与 P1-03 的数据形状 / 索引状态不同，不直接归因于图布局，见[宽图基线](benchmarks/p2-01-history-graph-scroll.md)。
 - [ ] **P4-02 macOS 包与真实试用。** 固定打包链，随包带 Rust 二进制，检测系统 Git；验证从 Finder 启动的 PATH / 权限行为。依赖 P4-01。完成条件：本机可安装与运行，至少三个有代表性的本地仓库完成五个使用日试用记录；公开分发前再完成签名 / 公证与干净系统安装验证。
 - [ ] **P4-03 Windows 兼容与安装。** 适配 Git 发现、路径编码、文件通知、子进程树回收与二进制打包。依赖 P4-01。完成条件：目标 Windows 机器通过相同核心场景与单独性能预算；未验证前只声明计划支持，不阻塞 macOS 单平台候选版。
 - [ ] **P4-04 发行记录。** 汇总版本、依赖来源 / 许可证、测试平台、性能报告、已知限制和数据清理方式。依赖对应平台验收。完成条件：候选版本可以复现构建，能力声明与证据一致。正式项目许可证和公开发布渠道另行决定。

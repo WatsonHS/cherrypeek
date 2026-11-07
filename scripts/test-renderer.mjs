@@ -15,6 +15,7 @@ try {
       "search-date": resolve(root, "apps/desktop/src/renderer/lib/search-date.ts"),
       "selection-intent": resolve(root, "apps/desktop/src/renderer/lib/selection-intent.ts"),
       "virtual-window": resolve(root, "apps/desktop/src/renderer/lib/virtual-window.ts"),
+      "graph": resolve(root, "apps/desktop/src/renderer/lib/graph.ts"),
     },
     outdir: buildDir,
     bundle: true,

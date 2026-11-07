@@ -10,7 +10,8 @@
         "historyNewSinceLastSeen",
         "repositoryScopes",
         "metadataIndex",
-        "metadataSearch"
+        "metadataSearch",
+        "historyGraph"
       ],
       "type": "string"
     },
@@ -212,6 +213,9 @@
         "committer": {
           "$ref": "#/definitions/CommitIdentity"
         },
+        "graph": {
+          "$ref": "#/definitions/HistoryGraph"
+        },
         "isNewSinceLastSeen": {
           "type": "boolean"
         },
@@ -242,9 +246,114 @@
         "author",
         "committer",
         "textLossy",
-        "isNewSinceLastSeen"
+        "isNewSinceLastSeen",
+        "graph"
       ],
       "type": "object"
+    },
+    "HistoryGraph": {
+      "additionalProperties": false,
+      "properties": {
+        "above": {
+          "format": "uint8",
+          "maximum": 63,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "below": {
+          "format": "uint8",
+          "maximum": 63,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "boundary": {
+          "type": "boolean"
+        },
+        "color": {
+          "format": "uint8",
+          "maximum": 5,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hiddenLaneCount": {
+          "format": "uint16",
+          "maximum": 16384,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lane": {
+          "format": "uint16",
+          "maximum": 16383,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parents": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "segments": {
+          "items": {
+            "$ref": "#/definitions/HistoryGraphSegment"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": [
+        "lane",
+        "color",
+        "parents",
+        "boundary",
+        "above",
+        "below",
+        "hiddenLaneCount",
+        "segments"
+      ],
+      "type": "object"
+    },
+    "HistoryGraphSegment": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "format": "uint8",
+          "maximum": 5,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fromLane": {
+          "format": "uint16",
+          "maximum": 16383,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/definitions/HistoryGraphSegmentKind"
+        },
+        "toLane": {
+          "format": "uint16",
+          "maximum": 16383,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fromLane",
+        "toLane",
+        "color",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "HistoryGraphSegmentKind": {
+      "enum": [
+        "through",
+        "incoming",
+        "outgoing"
+      ],
+      "type": "string"
     },
     "LastViewedSnapshot": {
       "additionalProperties": false,

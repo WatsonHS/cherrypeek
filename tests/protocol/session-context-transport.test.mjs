@@ -17,7 +17,7 @@ test("control and legacy null-context requests bypass the session gate; session 
     coreVersion: "0.1.0-test",
     pid: 8123,
     git: { available: true, version: "git version fixture", error: null },
-      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination", "historyNewSinceLastSeen"],
+      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination", "historyNewSinceLastSeen", "historyGraph"],
   };
   stdin.on("data", bytes => {
     for (const line of bytes.toString("utf8").trim().split("\n")) {
@@ -202,7 +202,7 @@ test("history page cancellation drains; scope transport validates requests and r
   const ready = {
     protocolVersion: 1, coreVersion: "0.1.0-test", pid: 8126,
     git: { available: true, version: "git version fixture", error: null },
-      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen"],
+      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph"],
   };
   stdin.on("data", bytes => {
     for (const line of bytes.toString("utf8").trim().split("\n")) {

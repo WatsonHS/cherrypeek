@@ -1,5 +1,6 @@
 mod framing;
 mod git_command;
+mod graph;
 mod history;
 mod metadata_index;
 mod navigation;

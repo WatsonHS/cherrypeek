@@ -31,6 +31,10 @@
     "test:search:project": "node scripts/test-search.mjs --real-repository",
     "test:smoke:metadata-index": "node tests/smoke/metadata-index-smoke.mjs",
     "test:smoke:metadata-search": "node tests/smoke/metadata-search-smoke.mjs",
+    "test:graph": "node scripts/test-graph.mjs",
+    "test:smoke:history-graph": "node tests/smoke/history-graph-smoke.mjs",
+    "fixtures:graph-benchmark": "node scripts/generate-graph-benchmark-fixture.mjs",
+    "benchmark:history-scroll:graph": "node scripts/benchmark-history-scroll.mjs",
     "benchmark:history": "node scripts/benchmark-history.mjs",
     "benchmark:history-scroll": "node scripts/benchmark-history-scroll.mjs",
     "test:renderer": "node scripts/test-renderer.mjs"

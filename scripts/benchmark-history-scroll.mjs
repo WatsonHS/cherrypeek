@@ -28,9 +28,12 @@ if (process.platform !== "darwin") throw new Error("benchmark:history-scroll cur
 if (args.runs < 1 || args.runs > 10) throw new Error("--runs must be between 1 and 10");
 await Promise.all([access(appEntry), access(rendererRoot), access(daemonPath), access(args.repository)]);
 await ensureMissing(outputPath);
-const repository = await describeRepository(resolve(args.repository));
+const graphManifest = args.graphManifest ? JSON.parse(await readFile(args.graphManifest, "utf8")) : null;
+const repository = graphManifest
+  ? await describeGraphRepository(resolve(args.repository), resolve(args.graphManifest), graphManifest)
+  : await describeRepository(resolve(args.repository));
 if (repository.commitCount !== 100_000) throw new Error(`Expected the fixed 100000-commit fixture, got ${repository.commitCount}`);
-if (repository.headOid !== args.expectedHead) throw new Error(`Fixture HEAD mismatch: expected ${args.expectedHead}, got ${repository.headOid}`);
+if (!graphManifest && repository.headOid !== args.expectedHead) throw new Error(`Fixture HEAD mismatch: expected ${args.expectedHead}, got ${repository.headOid}`);
 const artifacts = {
   appEntry,
   appEntrySha256: await sha256File(appEntry),
@@ -46,9 +49,11 @@ const artifacts = {
 artifacts.buildProfile = artifacts.daemonSha256 === artifacts.releaseDaemonSha256 ? "release" : "not-confirmed-release";
 const output = {
   schemaVersion: 1,
-  benchmark: "p1-03-history-scroll",
+  benchmark: graphManifest ? "p2-01-history-graph-scroll" : "p1-03-history-scroll",
+  measurementProfile: graphManifest ? "graph scroll with metadata index paused or complete" : "p1-03 legacy scroll profile",
   startedAt: new Date().toISOString(),
   repository,
+  graphFixtureManifest: graphManifest,
   artifacts,
   requestedRuns: args.runs,
   trajectory: {
@@ -67,6 +72,8 @@ const output = {
     idleWindow: "two second stable foreground window before the scroll trajectory; sampled process-tree RSS peak and cumulative ps CPU estimate for this short interval only",
     notMeasured: "The separate one minute idle CPU budget is not measured by this run.",
     retainedData: "data-loaded-count and data-window-pages on the real listbox; these describe the bounded summary window, not total repository history",
+    graph: graphManifest ? "sampled per-row graph lanes, hidden-lane markers, path segments and rendered graph rows at 100 ms; includes only virtual DOM rows observed during scrolling" : "not collected by the P1-03 profile",
+    indexState: graphManifest ? "automatic indexing is paused before any idle/RSS or scroll sample; if it completes first, the actual complete state is recorded. Paused-index RSS is not complete-index idle RSS acceptance evidence." : "not controlled by the P1-03 legacy profile",
     processTree: "100 ms macOS ps samples rooted at the Electron process and all observed descendants, including renderer, GPU, daemon and Git when captured; RSS sum can double-count shared pages",
     limitations: [
       "OS page cache is uncontrolled and is not cleared.",
@@ -118,6 +125,7 @@ try {
 function parseArgs(argv) {
   let repository;
   let output;
+  let graphManifest;
   let runs = 3;
   let expectedHead = "91081e9df378d40ab325f9c04b9cc4774b2c33ee";
   for (const argument of argv) {
@@ -125,12 +133,14 @@ function parseArgs(argv) {
     else if (argument.startsWith("--output=")) output = argument.slice("--output=".length);
     else if (argument.startsWith("--runs=")) runs = Number(argument.slice("--runs=".length));
     else if (argument.startsWith("--expected-head=")) expectedHead = argument.slice("--expected-head=".length);
+    else if (argument.startsWith("--graph-manifest=")) graphManifest = argument.slice("--graph-manifest=".length);
     else throw new Error(`Unknown argument: ${argument}`);
   }
   if (!repository || !repository.startsWith("/")) throw new Error("--repository must be an absolute path");
-  if (!output) throw new Error("Usage: pnpm benchmark:history-scroll --repository=<fixed-100k> --output=<new-json> [--runs=3|10]");
+  if (!output) throw new Error("Usage: pnpm benchmark:history-scroll --repository=<fixed-100k> --output=<new-json> [--runs=3|10] [--graph-manifest=<P2-01 manifest.json>]");
+  if (graphManifest && !graphManifest.startsWith("/")) throw new Error("--graph-manifest must be an absolute path");
   if (!Number.isInteger(runs)) throw new Error("--runs must be an integer");
-  return { repository, output, runs, expectedHead };
+  return { repository, output, runs, expectedHead, graphManifest };
 }
 
 async function runOne(runIndex, temporaryRootPath) {
@@ -147,6 +157,7 @@ async function runOne(runIndex, temporaryRootPath) {
   let displayState;
   let displayStateEnd;
   let idleTreeSnapshot;
+  let indexStatus;
   let executionError;
   let forcedCleanup = false;
   try {
@@ -164,9 +175,10 @@ async function runOne(runIndex, temporaryRootPath) {
     await page.bringToFront();
     await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"][data-state="ready"]'), null, { timeout: 60_000 });
     await page.waitForFunction(() => {
-      const list = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+      const list = document.querySelector('[aria-label="提交"]') ?? document.querySelector('[aria-label="提交列表"] [role="listbox"]');
       return list && Number(list.getAttribute("data-loaded-count")) > 0 && list.querySelector('[data-testid="commit-row"]');
     }, null, { timeout: 20_000 });
+    if (graphManifest) indexStatus = await stabilizeGraphIndex(page);
     displayState = await app.evaluate(({ BrowserWindow, screen }) => {
       const active = BrowserWindow.getAllWindows().find(candidate => candidate.isVisible());
       if (!active) return { visible: false, focused: false, displayFrequencyHz: null, displays: [] };
@@ -216,6 +228,7 @@ async function runOne(runIndex, temporaryRootPath) {
     await page.waitForTimeout(2_000);
     await sampler.sample();
     idleTreeSnapshot = sampler.summarizeWindow(idleWindowStart);
+    idleTreeSnapshot.indexState = indexStatus ? { state: indexStatus.state, processed: indexStatus.coverage?.processed ?? null } : null;
     uiState = await page.evaluate(installTrajectory, scrollDurationMs);
     if (uiState.listSelectorMissing) throw new Error("Could not locate the listbox for scrolling");
     if (uiState.offsetAttributesMissing) throw new Error("The listbox must expose data-loaded-offset/count/window-pages for P1-03 measurement");
@@ -250,6 +263,7 @@ async function runOne(runIndex, temporaryRootPath) {
     runIndex,
     startedAtMs: startedAt,
     runtime: runtime ?? null,
+    indexStatus: indexStatus ? { state: indexStatus.state, processed: indexStatus.coverage?.processed ?? null, error: indexStatus.error ?? null } : null,
     foregroundState: foregroundState ?? null,
     displayState: displayState ?? null,
     displayStateEnd: displayStateEnd ?? null,
@@ -299,7 +313,9 @@ async function runOne(runIndex, temporaryRootPath) {
     frameP95AtMost20Ms: record.sixtyHzModeConfirmed && record.frameSummary.p95Ms !== null && record.frameSummary.p95Ms <= 20,
     noFrameIntervalOver100Ms: record.frameSummary.maxMs !== null && record.frameSummary.maxMs <= 100,
     loadingToWindowP95AtMost200Ms: record.loadingToWindowSummary.p95Ms !== null && record.loadingToWindowSummary.p95Ms <= 200,
-    wholeTreePeakRssAtMost500MiB: record.peakTreeRssKB <= 500 * 1024,
+    wholeTreePeakRssAtMost500MiB: graphManifest && indexStatus?.state !== "complete" ? null : record.peakTreeRssKB <= 500 * 1024,
+    completeIndexRssBudgetApplicable: !graphManifest || indexStatus?.state === "complete",
+    graphOverflowObserved: graphManifest ? (uiState?.maxGraphOverflowRows ?? 0) > 0 : null,
     retainedWindowAtMost2000: uiState?.maxLoadedCount <= 2_000,
     virtualDomRowsBounded: uiState?.maxDomRows <= 60,
     continuousForeground: record.visibilitySummary?.hiddenSamples === 0 && record.visibilitySummary?.unfocusedSamples === 0,
@@ -308,8 +324,62 @@ async function runOne(runIndex, temporaryRootPath) {
   return record;
 }
 
+async function stabilizeGraphIndex(page) {
+  const deadline = Date.now() + 60_000;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    const result = await page.evaluate(() => window.commitScope.getMetadataIndexStatus());
+    if (!result?.ok) {
+      const code = result?.error?.code;
+      if (["BUSY", "CANCELLED", "STALE_CONTEXT"].includes(code)) {
+        await page.waitForTimeout(100);
+        continue;
+      }
+      throw new Error(`Could not establish metadata index state before graph benchmark: ${JSON.stringify(result?.error ?? result)}`);
+    }
+    const status = result.value;
+    lastState = status.state;
+    if (status.state === "complete" || status.state === "paused") {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.locator('[aria-label="提交"] , [aria-label="提交列表"] [role="listbox"]').first().focus().catch(() => {});
+      return status;
+    }
+    if (["cancelled", "failed", "unavailable", "quotaLimited"].includes(status.state)) {
+      throw new Error(`Cannot sample a stable graph while metadata index is ${status.state}: ${JSON.stringify(status.error)}`);
+    }
+    if (status.state === "queued" || status.state === "running") {
+      const statusLabel = page.getByTestId("index-status-label");
+      if (!(await statusLabel.count())) await page.getByTestId("index-status-trigger").click();
+      const pause = page.getByTestId("index-action-pause");
+      if (await pause.count() && await pause.isEnabled()) {
+        await pause.click();
+        const pauseDeadline = Date.now() + 30_000;
+        while (Date.now() < pauseDeadline) {
+          const paused = await page.evaluate(() => window.commitScope.getMetadataIndexStatus());
+          if (paused?.ok && paused.value.state === "complete") {
+            await page.keyboard.press("Escape").catch(() => {});
+            return paused.value;
+          }
+          if (paused?.ok && paused.value.state === "paused") {
+            await page.keyboard.press("Escape").catch(() => {});
+            await page.locator('[aria-label="提交"], [aria-label="提交列表"] [role="listbox"]').first().focus().catch(() => {});
+            return paused.value;
+          }
+          if (!paused?.ok && !["BUSY", "CANCELLED", "STALE_CONTEXT"].includes(paused?.error?.code)) {
+            throw new Error(`Index pause failed before graph sampling: ${JSON.stringify(paused?.error ?? paused)}`);
+          }
+          await page.waitForTimeout(100);
+        }
+        throw new Error(`Index did not pause or complete before graph sampling; last state=${lastState}`);
+      }
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`Could not establish an idle index state before graph sampling; last state=${lastState}`);
+}
+
 function installTrajectory(durationMs) {
-  const list = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+  const list = document.querySelector('[aria-label="提交"]') ?? document.querySelector('[aria-label="提交列表"] [role="listbox"]');
   if (!list) return { listSelectorMissing: true };
   const offsetAttributesMissing = !list.hasAttribute("data-loaded-offset") || !list.hasAttribute("data-loaded-count") || !list.hasAttribute("data-window-pages");
   const frameIntervalsMs = [];
@@ -367,6 +437,8 @@ function installTrajectory(durationMs) {
   };
   const stateTimer = setInterval(() => {
     if (!active) return;
+    const graphRows = [...list.querySelectorAll('[data-testid="commit-row"] [data-testid="commit-graph"]')];
+    const graphLanes = graphRows.map(graph => Number(graph.getAttribute("data-graph-lane"))).filter(Number.isFinite);
     stateSamples.push({
       elapsedMs: performance.now() - trajectoryStart,
       scrollTop: list.scrollTop,
@@ -374,6 +446,11 @@ function installTrajectory(durationMs) {
       loadedCount: Number(list.getAttribute("data-loaded-count")),
       windowPages: Number(list.getAttribute("data-window-pages")),
       domRows: list.querySelectorAll('[data-testid="commit-row"]').length,
+      graphRows: graphRows.length,
+      graphHiddenLaneRows: graphLanes.filter(lane => lane >= Number(list.getAttribute("data-visible-graph-lanes") ?? 6)).length,
+      graphOverflowRows: graphRows.filter(graph => Number(graph.getAttribute("data-graph-hidden-count")) > 0 && graph.querySelector("text")?.textContent?.startsWith("+")).length,
+      graphMaxLane: Math.max(-1, ...graphLanes),
+      graphPathCount: graphRows.reduce((sum, graph) => sum + graph.querySelectorAll("path").length, 0),
       jsHeapUsedBytes: performance.memory?.usedJSHeapSize ?? null,
       visibilityState: document.visibilityState,
       hasFocus: document.hasFocus(),
@@ -401,6 +478,11 @@ function installTrajectory(durationMs) {
         maxDomRows: Math.max(0, ...stateSamples.map(sample => sample.domRows)),
         maxLoadedCount: Math.max(0, ...stateSamples.map(sample => sample.loadedCount)),
         maxWindowPages: Math.max(0, ...stateSamples.map(sample => sample.windowPages)),
+        maxGraphRows: Math.max(0, ...stateSamples.map(sample => sample.graphRows)),
+        maxGraphHiddenLaneRows: Math.max(0, ...stateSamples.map(sample => sample.graphHiddenLaneRows)),
+        maxGraphOverflowRows: Math.max(0, ...stateSamples.map(sample => sample.graphOverflowRows)),
+        maxGraphLane: Math.max(-1, ...stateSamples.map(sample => sample.graphMaxLane)),
+        maxGraphPathCount: Math.max(0, ...stateSamples.map(sample => sample.graphPathCount)),
         maxJsHeapUsedBytes: Math.max(0, ...stateSamples.map(sample => sample.jsHeapUsedBytes ?? 0)) || null,
         scrollDirection: "down 23s then up 7s, 8k CSS px/s",
         pageLatencyStart: "observed aria-busy/data-page-loading transition to loaded offset/count change plus following requestAnimationFrame; not an RPC hook",
@@ -561,6 +643,74 @@ async function describeRepository(path) {
   const commitCount = Number((await execFileAsync("git", ["-C", path, "rev-list", "--count", "HEAD"], { timeout: 30_000, env: cleanGitEnvironment() })).stdout.trim());
   if (expected?.headOid !== headOid || expected?.commitCount !== commitCount) throw new Error("Repository does not match its fixture manifest");
   return { path, manifestPath, manifestSha256: await sha256File(manifestPath), headOid, commitCount, objectFormat: expected.objectFormat ?? null, fixedFixture: "p0-03 seed 20261107; read-only" };
+}
+
+async function describeGraphRepository(path, manifestPath, manifest) {
+  if (manifest.fixture !== "p2-01-wide-graph-scroll") throw new Error(`Unexpected graph benchmark fixture manifest: ${manifest.fixture}`);
+  const git = async args => (await execFileAsync("git", ["-C", path, ...args], { timeout: 120_000, maxBuffer: 32 * 1024 * 1024, env: cleanGitEnvironment() })).stdout;
+  const [headOid, countText, objectFormat, refText, graphText] = await Promise.all([
+    git(["rev-parse", "HEAD"]),
+    git(["rev-list", "--count", "HEAD"]),
+    git(["rev-parse", "--show-object-format"]),
+    git(["for-each-ref", "--sort=refname", "--format=%(refname)%00%(objectname)", "refs/heads"]),
+    git(["rev-list", "--topo-order", "--parents", "HEAD"]),
+  ]);
+  const resolvedHead = headOid.trim();
+  const commitCount = Number(countText.trim());
+  const refs = refText.trim().split("\n").filter(Boolean).map(line => {
+    const [name, oid] = line.split("\0");
+    return { name, oid };
+  });
+  if (resolvedHead !== manifest.headOid) throw new Error(`Graph fixture HEAD differs from its manifest: ${resolvedHead}`);
+  if (commitCount !== manifest.expectedCommitCount || commitCount !== 100_000) throw new Error(`Graph fixture commit count differs from manifest: ${commitCount}`);
+  if (refs.length !== manifest.expectedRefCount || refs.length !== 1000) throw new Error(`Graph fixture ref count differs from manifest: ${refs.length}`);
+  if (JSON.stringify(refs) !== JSON.stringify(manifest.refs)) throw new Error("Graph fixture local branch refs differ from the recorded manifest");
+
+  const graphRows = graphText.trim().split("\n").filter(Boolean).map(line => {
+    const [oid, ...parents] = line.trim().split(/\s+/);
+    return { oid, parents };
+  });
+  if (graphRows.length !== 100_000) throw new Error(`Graph fixture parent traversal returned ${graphRows.length} rows`);
+  const rowIndex = new Map(graphRows.map((row, index) => [row.oid, index]));
+  const processed = new Set();
+  const parentsSeen = new Set();
+  let mergeCount = 0;
+  let maxParentCount = 0;
+  let maxParentSpan = 0;
+  let maxFrontierInFirst2000Rows = 0;
+  for (let index = 0; index < graphRows.length; index += 1) {
+    const row = graphRows[index];
+    if (row.parents.length > 1) mergeCount += 1;
+    maxParentCount = Math.max(maxParentCount, row.parents.length);
+    for (const parent of row.parents) {
+      const parentIndex = rowIndex.get(parent);
+      if (parentIndex === undefined || parentIndex <= index) throw new Error(`Graph fixture has an invalid parent edge ${row.oid} -> ${parent}`);
+      maxParentSpan = Math.max(maxParentSpan, parentIndex - index);
+      parentsSeen.add(parent);
+    }
+    processed.add(row.oid);
+    if (index < 2000) maxFrontierInFirst2000Rows = Math.max(maxFrontierInFirst2000Rows, [...parentsSeen].filter(oid => !processed.has(oid)).length);
+  }
+  for (const [key, actual] of Object.entries({ mergeCount, maxParentCount, maxParentSpan, maxFrontierInFirst2000Rows })) {
+    if (actual !== manifest[key]) throw new Error(`Graph fixture ${key} differs from manifest: ${actual} vs ${manifest[key]}`);
+  }
+  if (maxFrontierInFirst2000Rows < 7) throw new Error(`Graph fixture is not wide near HEAD: frontier ${maxFrontierInFirst2000Rows}`);
+  return {
+    path,
+    manifestPath,
+    manifestSha256: await sha256File(manifestPath),
+    headOid: resolvedHead,
+    commitCount,
+    refCount: refs.length,
+    refs,
+    objectFormat: objectFormat.trim(),
+    mergeCount,
+    maxParentCount,
+    maxParentSpan,
+    maxFrontierInFirst2000Rows,
+    fixture: manifest.fixture,
+    fixedFixture: "P2-01 generated graph fixture; independent rev-list verification passed",
+  };
 }
 
 async function collectEnvironment() {

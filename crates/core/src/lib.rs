@@ -154,6 +154,7 @@ pub enum Capability {
     RepositoryScopes,
     MetadataIndex,
     MetadataSearch,
+    HistoryGraph,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -186,6 +187,7 @@ impl CoreReady {
                 Capability::RepositoryScopes,
                 Capability::MetadataIndex,
                 Capability::MetadataSearch,
+                Capability::HistoryGraph,
             ],
         }
     }
@@ -602,6 +604,47 @@ pub struct HistoryCommit {
     #[schemars(flatten)]
     pub commit: CommitSummary,
     pub is_new_since_last_seen: bool,
+    pub graph: HistoryGraph,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryGraph {
+    #[schemars(range(max = 16383))]
+    pub lane: u16,
+    #[schemars(range(max = 5))]
+    pub color: u8,
+    #[schemars(length(max = 128))]
+    pub parents: Vec<String>,
+    pub boundary: bool,
+    #[schemars(range(max = 63))]
+    pub above: u8,
+    #[schemars(range(max = 63))]
+    pub below: u8,
+    #[schemars(range(max = 16384))]
+    pub hidden_lane_count: u16,
+    #[schemars(length(max = 256))]
+    pub segments: Vec<HistoryGraphSegment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum HistoryGraphSegmentKind {
+    Through,
+    Incoming,
+    Outgoing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryGraphSegment {
+    #[schemars(range(max = 16383))]
+    pub from_lane: u16,
+    #[schemars(range(max = 16383))]
+    pub to_lane: u16,
+    #[schemars(range(max = 5))]
+    pub color: u8,
+    pub kind: HistoryGraphSegmentKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1153,7 +1196,8 @@ mod tests {
             "author":{"name":"A","email":"a@example.test","timestamp":"1","offset":"+0000"},
             "committer":{"name":"A","email":"a@example.test","timestamp":"1","offset":"+0000"},
             "textLossy":false,
-            "isNewSinceLastSeen":true
+            "isNewSinceLastSeen":true,
+            "graph":{"lane":0,"color":0,"parents":[],"boundary":false,"above":0,"below":0,"hiddenLaneCount":0,"segments":[]}
         });
         let decoded: HistoryCommit = serde_json::from_value(wire.clone()).unwrap();
         assert!(decoded.is_new_since_last_seen);

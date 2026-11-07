@@ -1,5 +1,6 @@
 use crate::{
     git_command::{GitFailure, GitLineStream, ReadOnlyGit, string_arg},
+    graph::{self, Checkpoint, LayoutState},
     repository::{self, DiscoveredRepository, PreviewError},
 };
 use commitscope_core::{
@@ -15,6 +16,7 @@ use std::{
 const CACHE_PAGE_LIMIT: usize = 8;
 const CACHE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const OID_LINE_LIMIT: usize = 80;
+const TOPOLOGY_LINE_LIMIT: usize = 9 * 1024;
 
 pub struct HistoryState {
     query: Mutex<Option<Query>>,
@@ -35,7 +37,10 @@ struct Query {
     cached_bytes: usize,
     cached_pages: VecDeque<Page>,
     stream: Option<GitLineStream>,
-    pending_oid: Option<String>,
+    pending_entry: Option<TopologyEntry>,
+    layout: LayoutState,
+    checkpoints: VecDeque<Checkpoint>,
+    checkpoint_bytes: usize,
     baseline: Baseline,
     marker_status: NewSinceLastSeenStatus,
     total_new_count: Option<u64>,
@@ -50,6 +55,28 @@ struct Page {
     commits: Vec<HistoryCommit>,
     has_more: bool,
     bytes: usize,
+}
+
+#[derive(Default)]
+struct LayoutWork {
+    state: LayoutState,
+    checkpoints: Vec<Checkpoint>,
+}
+
+#[derive(Clone)]
+struct MarkerState {
+    status: NewSinceLastSeenStatus,
+    total_new_count: Option<u64>,
+    prefix_offset: u32,
+    prefix_count: u64,
+    prefix_open: bool,
+    divider_oid: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TopologyEntry {
+    oid: String,
+    parents: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -154,90 +181,110 @@ impl HistoryState {
         }
 
         if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
-            query.reset_stream();
-            query.pending_oid = None;
-            query.stream_position = 0;
+            query.reset_walk();
+            if error.code == ErrorCode::SnapshotChanged {
+                query.clear_graph_cache();
+            }
             return Err(error);
         }
         if let Some(page) = query.cached_pages.iter().find(|page| page.offset == offset) {
             let result = make_page(query, page);
             if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
-                query.reset_stream();
-                query.pending_oid = None;
-                query.stream_position = 0;
+                query.reset_walk();
+                if error.code == ErrorCode::SnapshotChanged {
+                    query.clear_graph_cache();
+                }
                 return Err(error);
             }
             check_page_active(query, cancelled, deadline)?;
             return emit_page(query, &result, &mut emit);
         }
 
-        if query.stream.is_none() && query.stream_position > 0 {
-            query.stream_position = 0;
-            query.pending_oid = None;
-        }
-        if offset != query.stream_position {
-            query.reset_stream();
-            query.stream_position = 0;
-            query.pending_oid = None;
-        }
-        if query.stream.is_none() && !discovered.scope_tips.is_empty() {
-            query.stream = Some(start_stream(executable, discovered)?);
-        }
-
-        while query.stream_position < offset {
-            let skipped = next_oid(query, discovered, cancelled, deadline)
-                .and_then(|oid| oid.ok_or_else(invalid_cursor));
-            match skipped {
-                Ok(_) => query.stream_position = query.stream_position.saturating_add(1),
+        let mut layout_work = if discovered.scope_tips.is_empty() {
+            LayoutWork::default()
+        } else {
+            match prepare_layout_at_offset(
+                query, executable, discovered, offset, cancelled, deadline,
+            ) {
+                Ok(layout) => layout,
                 Err(error) => {
-                    query.reset_stream();
-                    query.pending_oid = None;
-                    query.stream_position = 0;
+                    query.reset_walk();
                     return Err(error);
                 }
             }
-        }
-
-        let mut page = if discovered.scope_tips.is_empty() {
+        };
+        let (mut page, topology) = if discovered.scope_tips.is_empty() {
             if offset != 0 {
                 return Err(invalid_cursor());
             }
-            Page {
-                offset: 0,
-                commits: Vec::new(),
-                has_more: false,
-                bytes: 0,
-            }
+            (
+                Page {
+                    offset: 0,
+                    commits: Vec::new(),
+                    has_more: false,
+                    bytes: 0,
+                },
+                Vec::new(),
+            )
         } else {
             match read_page_from_stream(query, executable, discovered, offset, cancelled, deadline)
             {
                 Ok(page) => page,
                 Err(error) => {
-                    query.reset_stream();
-                    query.pending_oid = None;
-                    query.stream_position = 0;
+                    query.reset_walk();
                     return Err(error);
                 }
             }
         };
+        if let Err(error) = layout_page(
+            &mut page,
+            &topology,
+            &mut layout_work,
+            query.checkpoint_bytes,
+            query.checkpoints.len(),
+            cancelled,
+            deadline,
+        ) {
+            query.reset_walk();
+            return Err(error);
+        }
+        let marker_state = query.marker_state();
         if let Err(error) = mark_page(
             query, &mut page, executable, discovered, cancelled, deadline,
         ) {
-            query.reset_stream();
-            query.pending_oid = None;
-            query.stream_position = 0;
+            query.restore_marker_state(marker_state);
+            query.reset_walk();
             return Err(error);
         }
         if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
-            disable_markers(query, &mut page);
-            query.reset_stream();
-            query.pending_oid = None;
-            query.stream_position = 0;
+            query.restore_marker_state(marker_state);
+            query.reset_walk();
             return Err(error);
         }
-        query.stream_position = offset.saturating_add(page.commits.len() as u32);
-        query.issued_frontier = query.issued_frontier.max(query.stream_position);
+        if !page.has_more && !layout_work.state.active_slots.is_empty() {
+            query.reset_walk();
+            return Err(repository::git_error(
+                "Git history ended with unresolved graph lanes",
+            ));
+        }
+        let next_position = offset.saturating_add(page.commits.len() as u32);
         let result = make_page(query, &page);
+        if let Err(error) = check_page_active(query, cancelled, deadline) {
+            query.restore_marker_state(marker_state);
+            return Err(error);
+        }
+        let emitted = match emit_page(query, &result, &mut emit) {
+            Ok(emitted) => emitted,
+            Err(error) => {
+                query.restore_marker_state(marker_state);
+                query.reset_walk();
+                return Err(error);
+            }
+        };
+        query.stream_position = next_position;
+        query.layout = layout_work.state;
+        query.issued_frontier = query.issued_frontier.max(query.stream_position);
+        commit_checkpoints(query, &layout_work.checkpoints);
         if page.bytes <= CACHE_BYTES_LIMIT {
             while query.cached_pages.len() >= CACHE_PAGE_LIMIT
                 || query.cached_bytes.saturating_add(page.bytes) > CACHE_BYTES_LIMIT
@@ -251,8 +298,7 @@ impl HistoryState {
             query.cached_bytes = query.cached_bytes.saturating_add(page.bytes);
             query.cached_pages.push_back(page);
         }
-        check_page_active(query, cancelled, deadline)?;
-        emit_page(query, &result, &mut emit)
+        Ok(emitted)
     }
 }
 
@@ -269,9 +315,7 @@ fn check_page_active(
         None
     };
     if let Some(error) = error {
-        query.reset_stream();
-        query.pending_oid = None;
-        query.stream_position = 0;
+        query.reset_walk();
         return Err(error);
     }
     Ok(())
@@ -284,9 +328,7 @@ fn emit_page<T>(
 ) -> Result<T, PreviewError> {
     let result = emit.take().expect("history page callback used once")(page);
     if result.is_err() {
-        query.reset_stream();
-        query.pending_oid = None;
-        query.stream_position = 0;
+        query.reset_walk();
     }
     result
 }
@@ -314,7 +356,10 @@ impl Query {
             cached_bytes: 0,
             cached_pages: VecDeque::new(),
             stream: None,
-            pending_oid: None,
+            pending_entry: None,
+            layout: LayoutState::default(),
+            checkpoints: VecDeque::new(),
+            checkpoint_bytes: 0,
             baseline,
             marker_status,
             total_new_count: None,
@@ -327,6 +372,41 @@ impl Query {
 
     fn reset_stream(&mut self) {
         self.stream.take();
+    }
+
+    fn reset_walk(&mut self) {
+        self.reset_stream();
+        self.pending_entry = None;
+        self.stream_position = 0;
+        self.layout = LayoutState::default();
+    }
+
+    fn clear_graph_cache(&mut self) {
+        self.checkpoints.clear();
+        self.checkpoint_bytes = 0;
+        self.cached_pages.clear();
+        self.cached_bytes = 0;
+        self.issued_frontier = 0;
+    }
+
+    fn marker_state(&self) -> MarkerState {
+        MarkerState {
+            status: self.marker_status,
+            total_new_count: self.total_new_count,
+            prefix_offset: self.prefix_offset,
+            prefix_count: self.prefix_count,
+            prefix_open: self.prefix_open,
+            divider_oid: self.divider_oid.clone(),
+        }
+    }
+
+    fn restore_marker_state(&mut self, state: MarkerState) {
+        self.marker_status = state.status;
+        self.total_new_count = state.total_new_count;
+        self.prefix_offset = state.prefix_offset;
+        self.prefix_count = state.prefix_count;
+        self.prefix_open = state.prefix_open;
+        self.divider_oid = state.divider_oid;
     }
 }
 
@@ -557,15 +637,6 @@ fn clear_markers(query: &mut Query, page: &mut Page) {
     query.divider_oid = None;
 }
 
-fn disable_markers(query: &mut Query, page: &mut Page) {
-    query.marker_status = NewSinceLastSeenStatus::Unavailable;
-    query.total_new_count = None;
-    query.prefix_offset = 0;
-    query.prefix_count = 0;
-    query.prefix_open = false;
-    clear_markers(query, page);
-}
-
 fn read_page_from_stream(
     query: &mut Query,
     executable: &Path,
@@ -573,54 +644,85 @@ fn read_page_from_stream(
     offset: u32,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<Page, PreviewError> {
+) -> Result<(Page, Vec<TopologyEntry>), PreviewError> {
     if discovered.scope_tips.is_empty() {
-        return Ok(Page {
-            offset,
-            commits: Vec::new(),
-            has_more: false,
-            bytes: 0,
-        });
+        return Ok((
+            Page {
+                offset,
+                commits: Vec::new(),
+                has_more: false,
+                bytes: 0,
+            },
+            Vec::new(),
+        ));
     }
-    let mut oids = Vec::with_capacity(query.page_size as usize + 1);
-    while oids.len() <= query.page_size as usize {
-        let Some(oid) = next_oid(query, discovered, cancelled, deadline)? else {
+    let mut entries = Vec::with_capacity(query.page_size as usize + 1);
+    while entries.len() <= query.page_size as usize {
+        let Some(entry) = next_topology_entry(query, discovered, cancelled, deadline)? else {
             break;
         };
-        oids.push(oid);
+        entries.push(entry);
     }
-    let has_more = oids.len() > query.page_size as usize;
+    let has_more = entries.len() > query.page_size as usize;
     if has_more {
-        query.pending_oid = oids.pop();
+        query.pending_entry = entries.pop();
     }
-    let commits =
-        repository::read_commit_summaries(executable, discovered, &oids, cancelled, deadline)?
-            .into_iter()
-            .map(|commit| HistoryCommit {
-                commit,
-                is_new_since_last_seen: false,
-            })
-            .collect::<Vec<_>>();
+    let oids = entries
+        .iter()
+        .map(|entry| entry.oid.clone())
+        .collect::<Vec<_>>();
+    let summaries =
+        repository::read_commit_summaries(executable, discovered, &oids, cancelled, deadline)?;
+    if summaries.len() != entries.len()
+        || summaries
+            .iter()
+            .zip(&entries)
+            .any(|(summary, entry)| summary.oid != entry.oid)
+    {
+        return Err(repository::git_error(
+            "Git topology stream did not match commit summary objects",
+        ));
+    }
+    let commits = summaries
+        .into_iter()
+        .map(|commit| HistoryCommit {
+            commit,
+            is_new_since_last_seen: false,
+            graph: commitscope_core::HistoryGraph {
+                lane: 0,
+                color: 0,
+                parents: Vec::new(),
+                boundary: false,
+                above: 0,
+                below: 0,
+                hidden_lane_count: 0,
+                segments: Vec::new(),
+            },
+        })
+        .collect::<Vec<_>>();
     let bytes = commits
         .iter()
         .map(|item| serde_json::to_vec(item).map_or(0, |v| v.len()))
         .sum();
-    Ok(Page {
-        offset,
-        commits,
-        has_more,
-        bytes,
-    })
+    Ok((
+        Page {
+            offset,
+            commits,
+            has_more,
+            bytes,
+        },
+        entries,
+    ))
 }
 
-fn next_oid(
+fn next_topology_entry(
     query: &mut Query,
     discovered: &DiscoveredRepository,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<Option<String>, PreviewError> {
-    if let Some(oid) = query.pending_oid.take() {
-        return Ok(Some(oid));
+) -> Result<Option<TopologyEntry>, PreviewError> {
+    if let Some(entry) = query.pending_entry.take() {
+        return Ok(Some(entry));
     }
     let Some(stream) = query.stream.as_mut() else {
         return Ok(None);
@@ -629,12 +731,236 @@ fn next_oid(
         .next_line(cancelled, deadline)
         .map_err(map_git_failure)?;
     let Some(line) = line else { return Ok(None) };
-    let oid = std::str::from_utf8(&line)
-        .map_err(|_| repository::git_error("Git returned a non-UTF-8 object ID"))?;
-    if oid.len() != discovered.oid_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(repository::git_error("Git returned an invalid object ID"));
+    let text = std::str::from_utf8(&line)
+        .map_err(|_| repository::git_error("Git returned a non-UTF-8 topology record"))?;
+    let mut fields = text.split_ascii_whitespace();
+    let oid = fields
+        .next()
+        .ok_or_else(|| repository::git_error("Git returned an empty topology record"))?;
+    let mut parents = Vec::new();
+    for parent in fields {
+        if parents.len() >= 128 {
+            return Err(repository::resource_limit(
+                "A history commit has more than 128 effective parents",
+            ));
+        }
+        validate_topology_oid(parent, discovered.oid_length)?;
+        parents.push(parent.to_ascii_lowercase());
     }
-    Ok(Some(oid.to_ascii_lowercase()))
+    validate_topology_oid(oid, discovered.oid_length)?;
+    Ok(Some(TopologyEntry {
+        oid: oid.to_ascii_lowercase(),
+        parents,
+    }))
+}
+
+fn validate_topology_oid(oid: &str, oid_length: usize) -> Result<(), PreviewError> {
+    if oid.len() != oid_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(repository::git_error(
+            "Git returned an invalid topology object ID",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_layout_at_offset(
+    query: &mut Query,
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    offset: u32,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<LayoutWork, PreviewError> {
+    if query.stream.is_some()
+        && query.stream_position == offset
+        && query.layout.next_ordinal == offset
+    {
+        return Ok(LayoutWork {
+            state: query.layout.clone(),
+            checkpoints: Vec::new(),
+        });
+    }
+
+    let mut best = LayoutState::default();
+    if query.layout.next_ordinal <= offset {
+        best = query.layout.clone();
+    }
+    for checkpoint in &query.checkpoints {
+        if checkpoint.next_ordinal > offset || checkpoint.next_ordinal <= best.next_ordinal {
+            continue;
+        }
+        best = LayoutState {
+            next_ordinal: checkpoint.next_ordinal,
+            active_slots: checkpoint.active_slots.clone(),
+            boundary_oid: Some(checkpoint.boundary_oid.clone()),
+        };
+    }
+
+    query.reset_stream();
+    query.pending_entry = None;
+    query.stream_position = 0;
+    query.stream = Some(start_stream(executable, discovered)?);
+    let mut work = LayoutWork {
+        state: best,
+        checkpoints: Vec::new(),
+    };
+
+    for ordinal in 0..work.state.next_ordinal {
+        check_active(cancelled, deadline)?;
+        let entry = next_topology_entry(query, discovered, cancelled, deadline)?
+            .ok_or_else(snapshot_changed_error)?;
+        if ordinal + 1 == work.state.next_ordinal
+            && work.state.boundary_oid.as_deref() != Some(entry.oid.as_str())
+        {
+            return Err(snapshot_changed_error());
+        }
+    }
+    while work.state.next_ordinal < offset {
+        check_active(cancelled, deadline)?;
+        let entry = next_topology_entry(query, discovered, cancelled, deadline)?
+            .ok_or_else(invalid_cursor)?;
+        let _ = work
+            .state
+            .advance(&entry.oid, &entry.parents, &entry.parents)
+            .map_err(map_layout_error)?;
+        stage_checkpoint(
+            &mut work.checkpoints,
+            work.state.checkpoint(),
+            query.checkpoint_bytes,
+            query.checkpoints.len(),
+        );
+    }
+    query.stream_position = offset;
+    Ok(work)
+}
+
+fn layout_page(
+    page: &mut Page,
+    entries: &[TopologyEntry],
+    work: &mut LayoutWork,
+    checkpoint_bytes_used: usize,
+    checkpoint_count_used: usize,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), PreviewError> {
+    if page.commits.len() != entries.len() {
+        return Err(repository::git_error(
+            "History summaries and topology rows have different lengths",
+        ));
+    }
+    for (commit, entry) in page.commits.iter_mut().zip(entries) {
+        check_active(cancelled, deadline)?;
+        if commit.commit.oid != entry.oid {
+            return Err(repository::git_error(
+                "History summary and topology object IDs do not match",
+            ));
+        }
+        commit.graph = work
+            .state
+            .advance(&entry.oid, &entry.parents, &commit.commit.parents)
+            .map_err(map_layout_error)?;
+        if work
+            .state
+            .next_ordinal
+            .is_multiple_of(graph::CHECKPOINT_INTERVAL)
+        {
+            stage_checkpoint(
+                &mut work.checkpoints,
+                work.state.checkpoint(),
+                checkpoint_bytes_used,
+                checkpoint_count_used,
+            );
+        }
+    }
+    page.bytes = page
+        .commits
+        .iter()
+        .map(|item| serde_json::to_vec(item).map_or(0, |v| v.len()))
+        .sum();
+    Ok(())
+}
+
+fn stage_checkpoint(
+    staged: &mut Vec<Checkpoint>,
+    checkpoint: Option<Checkpoint>,
+    reserved_bytes: usize,
+    reserved_count: usize,
+) {
+    let Some(checkpoint) = checkpoint else { return };
+    if reserved_count >= graph::CHECKPOINT_LIMIT
+        || checkpoint.estimated_bytes > graph::CHECKPOINT_BYTES_LIMIT.saturating_sub(reserved_bytes)
+    {
+        return;
+    }
+    staged.push(checkpoint);
+    let mut total = staged
+        .iter()
+        .map(|point| point.estimated_bytes)
+        .sum::<usize>();
+    while staged.len() + reserved_count > graph::CHECKPOINT_LIMIT
+        || total.saturating_add(reserved_bytes) > graph::CHECKPOINT_BYTES_LIMIT
+    {
+        let removed = staged.remove(0);
+        total = total.saturating_sub(removed.estimated_bytes);
+    }
+}
+
+fn commit_checkpoints(query: &mut Query, staged: &[Checkpoint]) {
+    for checkpoint in staged {
+        if let Some(index) = query
+            .checkpoints
+            .iter()
+            .position(|saved| saved.next_ordinal == checkpoint.next_ordinal)
+        {
+            query.checkpoint_bytes = query
+                .checkpoint_bytes
+                .saturating_sub(query.checkpoints.remove(index).unwrap().estimated_bytes);
+        }
+        query.checkpoint_bytes = query
+            .checkpoint_bytes
+            .saturating_add(checkpoint.estimated_bytes);
+        query.checkpoints.push_back(checkpoint.clone());
+    }
+    let mut ordered = query.checkpoints.drain(..).collect::<Vec<_>>();
+    ordered.sort_by_key(|checkpoint| checkpoint.next_ordinal);
+    query.checkpoints = ordered.into();
+    while query.checkpoints.len() > graph::CHECKPOINT_LIMIT
+        || query.checkpoint_bytes > graph::CHECKPOINT_BYTES_LIMIT
+    {
+        if let Some(removed) = query.checkpoints.pop_front() {
+            query.checkpoint_bytes = query
+                .checkpoint_bytes
+                .saturating_sub(removed.estimated_bytes);
+        } else {
+            break;
+        }
+    }
+}
+
+fn map_layout_error(error: graph::LayoutError) -> PreviewError {
+    match error {
+        graph::LayoutError::ResourceLimit => {
+            repository::resource_limit("History graph layout exceeded its state limit")
+        }
+    }
+}
+
+fn check_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), PreviewError> {
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(repository::cancelled_error());
+    }
+    if Instant::now() >= deadline {
+        return Err(repository::timeout_error());
+    }
+    Ok(())
+}
+
+fn snapshot_changed_error() -> PreviewError {
+    PreviewError {
+        code: ErrorCode::SnapshotChanged,
+        message: "The frozen history order changed; refresh the repository".into(),
+        retryable: false,
+    }
 }
 
 fn start_stream(
@@ -647,10 +973,11 @@ fn start_stream(
         string_arg("core.commitGraph=false"),
         string_arg("rev-list"),
         string_arg("--topo-order"),
+        string_arg("--parents"),
     ];
     args.extend(discovered.scope_tips.iter().map(string_arg));
     args.push(string_arg("--"));
-    git.stream_lines(Path::new(&discovered.info.path), &args, OID_LINE_LIMIT)
+    git.stream_lines(Path::new(&discovered.info.path), &args, TOPOLOGY_LINE_LIMIT)
         .map_err(map_git_failure)
 }
 
@@ -824,7 +1151,8 @@ mod tests {
             .expect("run fixture git");
         assert!(
             output.status.success(),
-            "git failed: {}",
+            "git {args:?} failed in {}: {}",
+            path.display(),
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
@@ -878,6 +1206,7 @@ mod tests {
         let replay =
             read_page(&state, &discovered, Some(&cursor_zero), 1).expect("replay evicted page");
         assert_eq!(replay.commits[0].commit.oid, oids[0]);
+        assert_eq!(replay.commits[0].graph.lane, 0);
         assert_eq!(
             state
                 .read_page(
@@ -908,6 +1237,151 @@ mod tests {
                 .code,
             ErrorCode::InvalidCursor
         );
+    }
+
+    #[test]
+    fn graph_layout_is_identical_across_page_sizes_and_evicted_page_replay() {
+        let (_repo, path) = make_repo(18);
+        let discovered = discover(&path);
+        let mut baseline = None;
+        for page_size in [1, 2, 7, 200, 500] {
+            let state = HistoryState::new();
+            let mut cursor = None;
+            let mut graph_by_oid = std::collections::HashMap::new();
+            let mut first_cursor = None;
+            loop {
+                let page = read_page(&state, &discovered, cursor.as_deref(), page_size)
+                    .expect("read graph page");
+                first_cursor.get_or_insert_with(|| page.cursor.clone());
+                for commit in &page.commits {
+                    graph_by_oid.insert(commit.commit.oid.clone(), commit.graph.clone());
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            let replay = read_page(&state, &discovered, first_cursor.as_deref(), page_size)
+                .expect("replay first graph page");
+            for commit in replay.commits {
+                assert_eq!(graph_by_oid.get(&commit.commit.oid), Some(&commit.graph));
+            }
+            if let Some(expected) = &baseline {
+                assert_eq!(expected, &graph_by_oid);
+            } else {
+                baseline = Some(graph_by_oid);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_page_emit_does_not_publish_frontier_page_or_pending_checkpoint() {
+        let (_repo, path) = make_repo(450);
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        let first = read_page(&state, &discovered, None, 200).expect("first page");
+        let cursor = first.next_cursor.clone().expect("second page cursor");
+        let error = state
+            .with_page(
+                &git_executable(),
+                &discovered,
+                Some(&cursor),
+                200,
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(10),
+                |_| Err::<(), _>(repository::cancelled_error()),
+            )
+            .expect_err("failed response callback must fail the page");
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        {
+            let guard = state.query.lock().unwrap();
+            let query = guard.as_ref().unwrap();
+            assert_eq!(query.issued_frontier, 200);
+            assert_eq!(query.cached_pages.len(), 1);
+            assert_eq!(query.layout.next_ordinal, 0);
+            assert_eq!(query.checkpoints.len(), 1);
+            assert_eq!(query.checkpoints[0].next_ordinal, 200);
+        }
+
+        let retried = read_page(&state, &discovered, Some(&cursor), 200)
+            .expect("retry from completed checkpoint");
+        let reference_state = HistoryState::new();
+        let reference_first = read_page(&reference_state, &discovered, None, 200).unwrap();
+        let reference = read_page(
+            &reference_state,
+            &discovered,
+            reference_first.next_cursor.as_deref(),
+            200,
+        )
+        .unwrap();
+        assert_eq!(retried.commits, reference.commits);
+        let guard = state.query.lock().unwrap();
+        let query = guard.as_ref().unwrap();
+        assert_eq!(query.issued_frontier, 400);
+        assert_eq!(query.cached_pages.len(), 2);
+        assert!(
+            query
+                .checkpoints
+                .iter()
+                .any(|point| point.next_ordinal == 400)
+        );
+    }
+
+    #[test]
+    fn graph_parents_follow_git_effective_graft_and_shallow_boundaries() {
+        let (_repo, path) = make_repo(4);
+        let commits = run_git(&path, &["rev-list", "--reverse", "HEAD"])
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let head = commits.last().unwrap();
+        let root = commits.first().unwrap();
+        let raw_parent = &commits[commits.len() - 2];
+        let grafts = path.join(".git/info/grafts");
+        fs::write(&grafts, format!("{head} {root}\n")).expect("write graft boundary");
+        let discovered = discover(&path);
+        let page =
+            read_page(&HistoryState::new(), &discovered, None, 20).expect("read grafted graph");
+        let expected = run_git(&path, &["rev-list", "--topo-order", "--parents", "HEAD"])
+            .lines()
+            .map(|line| {
+                let mut fields = line.split_ascii_whitespace();
+                let oid = fields.next().unwrap().to_owned();
+                let parents = fields.map(str::to_owned).collect::<Vec<_>>();
+                (oid, parents)
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(page.commits.len(), expected.len());
+        for commit in &page.commits {
+            assert_eq!(commit.graph.parents, expected[&commit.commit.oid]);
+        }
+        let grafted_head = page
+            .commits
+            .iter()
+            .find(|commit| commit.commit.oid == *head)
+            .unwrap();
+        assert_eq!(
+            grafted_head.graph.parents.as_slice(),
+            std::slice::from_ref(root)
+        );
+        assert_eq!(
+            grafted_head.commit.parents.as_slice(),
+            std::slice::from_ref(raw_parent)
+        );
+        assert!(grafted_head.graph.boundary);
+        assert!(page.commits.last().unwrap().graph.below == 0);
+
+        fs::remove_file(&grafts).expect("remove graft boundary");
+        let shallow_file = path.join(".git/shallow");
+        fs::write(&shallow_file, format!("{head}\n")).expect("write shallow boundary");
+        let shallow = discover(&path);
+        let page = read_page(&HistoryState::new(), &shallow, None, 20).expect("read shallow graph");
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].commit.oid, *head);
+        assert!(page.commits[0].commit.parents.len() == 1);
+        assert!(page.commits[0].graph.parents.is_empty());
+        assert!(page.commits[0].graph.boundary);
+        assert_eq!(page.commits[0].graph.below, 0);
     }
 
     #[test]

@@ -20,6 +20,7 @@ import type { MetadataIndexAction } from "./generated/client-message.js";
 import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
+export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
 export type { MetadataIndexAction } from "./generated/client-message.js";
 export type { MetadataIndexStatus } from "./generated/server-message.js";
 export type { SearchPage, SearchIdentities, SearchIdentity } from "./generated/server-message.js";

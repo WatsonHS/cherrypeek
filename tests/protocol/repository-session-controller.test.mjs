@@ -44,6 +44,7 @@ function makeCommit(sessionInfo) {
     oid: sessionInfo.repository.headOid,
     parents: [], summary: "summary", summaryTruncated: false, textLossy: false,
     isNewSinceLastSeen: false,
+    graph: { lane: 0, color: 0, parents: [], boundary: false, above: 0, below: 0, hiddenLaneCount: 0, segments: [] },
     author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
     committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" },
   };
@@ -53,7 +54,7 @@ function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "metadataIndex"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -352,6 +353,15 @@ test("a core without repositoryScopes is rejected before opening a session", asy
   controller.dispose();
 });
 
+test("a core without historyGraph is rejected before opening a session", async () => {
+  const core = makeCore();
+  core.status.core.capabilities = ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen"];
+  const controller = new RepositorySessionController(core);
+  await assert.rejects(controller.open("/tmp/repo-a"), error => error.code === "UNKNOWN_METHOD" && /历史图布局/.test(error.message));
+  assert.equal(core.requests.length, 0);
+  controller.dispose();
+});
+
 test("merge-status generations cancel and drain superseded and explicitly cancelled requests", async () => {
   const core = makeCore();
   const controller = new RepositorySessionController(core);
@@ -476,6 +486,47 @@ test("history pages validate headers, cursor metadata, and page-local coverage",
   assert.equal(page.nextCursor, "cursor-1");
   assert.equal(page.newSinceLastSeenStatus, "firstView");
   assert.equal(page.lastSeenDividerOid, null);
+  controller.dispose();
+});
+
+test("history pages reject missing graphs and graph fields inconsistent with masks or parent boundaries", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  for (const mutate of [
+    commit => { delete commit.graph; },
+    commit => { commit.graph.above = 1; },
+    commit => { commit.graph.boundary = true; },
+    commit => { commit.graph.segments = [{ kind: "through", fromLane: 6, toLane: 7, color: 0 }]; },
+    commit => { commit.graph.above = 1; commit.graph.below = 2; commit.graph.segments = [{ kind: "through", fromLane: 0, toLane: 1, color: 0 }]; },
+    commit => { commit.graph.above = 1; commit.graph.below = 1; commit.graph.segments = [
+      { kind: "through", fromLane: 0, toLane: 0, color: 0 }, { kind: "through", fromLane: 0, toLane: 0, color: 0 },
+    ]; },
+  ]) {
+    const requestStart = core.requests.length;
+    const rejected = assert.rejects(controller.readHistoryPage(null, 100), error => error.code === "PROTOCOL_ERROR");
+    const request = await waitFor(() => core.requests.slice(requestStart).find(item => item.method === "readHistoryPage"));
+    request.options.onChunk({ data: { section: "repository", repository: opened.repository, refs: [], refsTruncated: false },
+      done: false, sequence: 0, repoId: opened.repoId, generation: opened.generation,
+      coverage: { complete: false, processed: 0 }, nextCursor: null });
+    const commit = makeCommit(opened);
+    mutate(commit);
+    let thrown;
+    try {
+      request.options.onChunk({ data: { section: "historyPage", commits: [commit], offset: 0, pageSize: 100,
+        cursor: "cursor-0", previousCursor: null, hasMore: false, newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null },
+      done: true, sequence: 1, repoId: opened.repoId, generation: opened.generation,
+      coverage: { complete: true, processed: 1 }, nextCursor: null });
+    } catch (error) { thrown = error; }
+    assert.equal(thrown?.code, "PROTOCOL_ERROR");
+    request.reject(thrown);
+    await rejected;
+  }
   controller.dispose();
 });
 
