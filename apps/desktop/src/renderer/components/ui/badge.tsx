@@ -8,7 +8,7 @@ const badgeVariants = cva("inline-flex min-w-0 items-center gap-1 whitespace-now
     variant: {
       default: "bg-sunken text-fg2",
       browse: "bg-accent-soft text-accent-fg",
-      head: "bg-fg text-panel",
+      head: "bg-accent-soft font-semibold text-accent-fg",
       ok: "bg-ok-bg text-ok",
       outline: "text-fg2 shadow-[inset_0_0_0_1px_var(--line2)]",
       warn: "bg-warn-bg text-warn",

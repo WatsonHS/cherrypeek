@@ -505,8 +505,8 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
       <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg3">
         <IdentityAvatar identity={commit.author} />
         <span className="min-w-0 flex-1 truncate">{commit.author.name}</span>
-        {labels.length ? <span data-testid="commit-ref-tags" className="flex max-w-[72%] min-w-0 shrink-0 items-center justify-end gap-1">
-          <RefChips labels={labels} limit={1} chipClassName={() => "max-w-[170px] shrink"} />
+        {labels.length ? <span data-testid="commit-ref-tags" className="flex max-w-[65%] min-w-0 shrink-0 items-center justify-end gap-1">
+          <RefChips labels={labels} limit={1} chipClassName={() => "max-w-[150px] shrink"} />
         </span> : null}
       </span>
     </span>
