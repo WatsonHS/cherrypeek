@@ -8,8 +8,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 /* Top-bar and list-header widgets whose backends are not implemented yet. All content is sample data. */
 
 export function SearchPlaceholder(): React.JSX.Element {
-  return <div className="flex items-center gap-2">
-    <label className="flex h-[34px] w-[280px] max-w-full items-center gap-2 rounded-lg bg-sunken px-2.5 text-fg3" title="元数据搜索尚未接入（P1-06）">
+  return <div className="flex min-w-[200px] flex-[0_1_280px] items-center gap-2">
+    <label className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-lg bg-sunken px-2.5 text-fg3" title="元数据搜索尚未接入（P1-06）">
       <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
       <span className="sr-only">搜索提交消息</span>
       <input disabled placeholder="搜索提交消息" className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-fg3" />

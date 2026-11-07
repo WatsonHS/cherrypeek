@@ -6,7 +6,9 @@
         "getRuntimeInfo",
         "readRepositoryPreview",
         "repositorySessions",
-        "historyPagination"
+        "historyPagination",
+        "historyNewSinceLastSeen",
+        "repositoryScopes"
       ],
       "type": "string"
     },
@@ -127,6 +129,22 @@
       ],
       "type": "object"
     },
+    "DefaultBase": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "oid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "oid"
+      ],
+      "type": "object"
+    },
     "ErrorCode": {
       "enum": [
         "PROTOCOL_MISMATCH",
@@ -147,7 +165,8 @@
         "GIT_ERROR",
         "PERMISSION_DENIED",
         "INVALID_CURSOR",
-        "SNAPSHOT_CHANGED"
+        "SNAPSHOT_CHANGED",
+        "SCOPE_UNAVAILABLE"
       ],
       "type": "string"
     },
@@ -179,6 +198,49 @@
       ],
       "type": "object"
     },
+    "HistoryCommit": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/CommitIdentity"
+        },
+        "committer": {
+          "$ref": "#/definitions/CommitIdentity"
+        },
+        "isNewSinceLastSeen": {
+          "type": "boolean"
+        },
+        "oid": {
+          "type": "string"
+        },
+        "parents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "summaryTruncated": {
+          "type": "boolean"
+        },
+        "textLossy": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oid",
+        "parents",
+        "summary",
+        "summaryTruncated",
+        "author",
+        "committer",
+        "textLossy",
+        "isNewSinceLastSeen"
+      ],
+      "type": "object"
+    },
     "LastViewedSnapshot": {
       "additionalProperties": false,
       "properties": {
@@ -186,7 +248,7 @@
           "items": {
             "type": "string"
           },
-          "maxItems": 1,
+          "maxItems": 2000,
           "type": "array"
         },
         "viewedAtUnixMs": {
@@ -200,6 +262,22 @@
         "viewedAtUnixMs"
       ],
       "type": "object"
+    },
+    "MergeStatus": {
+      "enum": [
+        "merged",
+        "notMerged",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "NewSinceLastSeenStatus": {
+      "enum": [
+        "ready",
+        "firstView",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "RecentRepository": {
       "additionalProperties": false,
@@ -302,6 +380,53 @@
       ],
       "type": "string"
     },
+    "RefMergeStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "oid": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/MergeStatus"
+        }
+      },
+      "required": [
+        "name",
+        "oid",
+        "status"
+      ],
+      "type": "object"
+    },
+    "RefMergeStatusResult": {
+      "additionalProperties": false,
+      "properties": {
+        "defaultBase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DefaultBase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "statuses": {
+          "items": {
+            "$ref": "#/definitions/RefMergeStatus"
+          },
+          "maxItems": 50,
+          "type": "array"
+        }
+      },
+      "required": [
+        "defaultBase",
+        "statuses"
+      ],
+      "type": "object"
+    },
     "RepositoryInfo": {
       "additionalProperties": false,
       "properties": {
@@ -355,11 +480,93 @@
       ],
       "type": "object"
     },
-    "RepositoryScope": {
-      "enum": [
-        "head"
+    "RepositoryNavigation": {
+      "additionalProperties": false,
+      "properties": {
+        "defaultBase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DefaultBase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refs": {
+          "items": {
+            "$ref": "#/definitions/RefInfo"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "refsTruncated": {
+          "type": "boolean"
+        },
+        "worktrees": {
+          "items": {
+            "$ref": "#/definitions/WorktreeInfo"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "worktreesTruncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "refs",
+        "refsTruncated",
+        "worktrees",
+        "worktreesTruncated",
+        "defaultBase",
+        "observedAtUnixMs"
       ],
-      "type": "string"
+      "type": "object"
+    },
+    "RepositoryScope": {
+      "oneOf": [
+        {
+          "enum": [
+            "head",
+            "allBranches"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ref": {
+              "maxLength": 16384,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "worktree": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "worktree"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RepositorySessionInfo": {
       "additionalProperties": false,
@@ -403,6 +610,13 @@
         "scope": {
           "$ref": "#/definitions/RepositoryScope"
         },
+        "tips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
         "worktreeId": {
           "maxLength": 128,
           "minLength": 1,
@@ -415,6 +629,7 @@
         "repositoryKey",
         "worktreeId",
         "scope",
+        "tips",
         "observedAtUnixMs",
         "repository",
         "previousView",
@@ -600,7 +815,7 @@
           "properties": {
             "commits": {
               "items": {
-                "$ref": "#/definitions/CommitSummary"
+                "$ref": "#/definitions/HistoryCommit"
               },
               "maxItems": 500,
               "type": "array"
@@ -612,6 +827,20 @@
             },
             "hasMore": {
               "type": "boolean"
+            },
+            "lastSeenDividerOid": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "newSinceLastSeenStatus": {
+              "$ref": "#/definitions/NewSinceLastSeenStatus"
             },
             "offset": {
               "format": "uint32",
@@ -642,7 +871,43 @@
             "pageSize",
             "cursor",
             "previousCursor",
-            "hasMore"
+            "hasMore",
+            "newSinceLastSeenStatus",
+            "lastSeenDividerOid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "navigation": {
+              "$ref": "#/definitions/RepositoryNavigation"
+            },
+            "section": {
+              "const": "repositoryNavigation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "navigation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/RefMergeStatusResult"
+            },
+            "section": {
+              "const": "refMergeStatus",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
           ],
           "type": "object"
         }
@@ -672,6 +937,79 @@
         "corrupt"
       ],
       "type": "string"
+    },
+    "WorktreeInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "headOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headReference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "isBare": {
+          "type": "boolean"
+        },
+        "isCurrent": {
+          "type": "boolean"
+        },
+        "isDetached": {
+          "type": "boolean"
+        },
+        "isMain": {
+          "type": "boolean"
+        },
+        "lockedReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prunableReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "headOid",
+        "headReference",
+        "isMain",
+        "isCurrent",
+        "isBare",
+        "isDetached",
+        "lockedReason",
+        "prunableReason",
+        "available"
+      ],
+      "type": "object"
     }
   },
   "oneOf": [

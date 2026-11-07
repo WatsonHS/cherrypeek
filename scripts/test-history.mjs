@@ -1,23 +1,37 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+const includeLargeMarkerLatency = process.argv.slice(2).includes("--include-large-marker");
+const releaseMarkerOnly = process.argv.slice(2).includes("--release-marker-only");
+const requestedPattern = process.argv.slice(2).find(argument => argument.startsWith("--test-name-pattern="))?.slice("--test-name-pattern=".length);
+const testNamePattern = releaseMarkerOnly
+  ? "100k synthetic saved-tip marker count is independently checked"
+  : requestedPattern;
+const selectedTestOnly = Boolean(testNamePattern);
 const temporaryRoot = await mkdtemp(join(tmpdir(), "commitscope-history-test-"));
 const fixtureRoot = join(temporaryRoot, "fixtures");
 const helperDirectory = join(temporaryRoot, "helpers", "bin");
 const cacheRepository = join(temporaryRoot, "cache-history");
 const longRepository = join(temporaryRoot, "long-history");
-const daemonBinary = join(root, "target", "debug", process.platform === "win32" ? "commitscope-daemon.exe" : "commitscope-daemon");
+const daemonBinary = join(root, "target", releaseMarkerOnly ? "release" : "debug", process.platform === "win32" ? "commitscope-daemon.exe" : "commitscope-daemon");
+const fixedLargeRepository = join(root, "output/fixtures/p0-03-seed-20261107/large");
 let failed = false;
 
 try {
-  await run(process.execPath, [join(root, "scripts/generate-fixtures.mjs"), "--output", fixtureRoot], { cwd: root, timeoutMs: 120_000 });
-  await createCacheRepository(cacheRepository);
-  await createLongRepository(longRepository);
-  await run("cargo", ["build", "--locked", "-p", "commitscope-daemon"], { cwd: root, timeoutMs: 300_000 });
+  if (selectedTestOnly) {
+    await access(daemonBinary);
+    await run(process.execPath, [join(root, "scripts/generate-fixtures.mjs"), "--output", fixtureRoot], { cwd: root, timeoutMs: 120_000 });
+    if (releaseMarkerOnly) await access(join(fixedLargeRepository, ".git"));
+  } else {
+    await run(process.execPath, [join(root, "scripts/generate-fixtures.mjs"), "--output", fixtureRoot], { cwd: root, timeoutMs: 120_000 });
+    await createCacheRepository(cacheRepository);
+    await createLongRepository(longRepository);
+    await run("cargo", ["build", "--locked", "-p", "commitscope-daemon"], { cwd: root, timeoutMs: 300_000 });
+  }
   const realGit = await findGitExecutable();
   await createGitWrapper(helperDirectory, realGit);
   const testEnv = cleanEnvironment({
@@ -37,7 +51,18 @@ try {
     COMMITSCOPE_HISTORY_SLOW_PID_FILE: join(temporaryRoot, "history-slow-git.pid"),
     COMMITSCOPE_HISTORY_BLOCK_GATE_FILE: join(temporaryRoot, "block-git.gate"),
   });
-  await run(process.execPath, ["--test", "--test-timeout=45000", join(root, "tests/history/history-pagination.test.mjs")], {
+  if (releaseMarkerOnly || includeLargeMarkerLatency) {
+    try {
+      await access(join(fixedLargeRepository, ".git"));
+      testEnv.COMMITSCOPE_HISTORY_LARGE_REPOSITORY = fixedLargeRepository;
+    } catch {
+      process.stderr.write("Skipping the optional fixed 100k marker latency observation; P0-03 fixture is unavailable.\n");
+    }
+  }
+  const testArgs = ["--test", "--test-timeout=45000"];
+  if (testNamePattern) testArgs.push(`--test-name-pattern=${testNamePattern}`);
+  testArgs.push(join(root, "tests/history/history-pagination.test.mjs"));
+  await run(process.execPath, testArgs, {
     cwd: root, env: testEnv, timeoutMs: 420_000, inherit: true,
   });
   process.stdout.write("History pagination tests passed; temporary fixtures and app data were removed.\n");
@@ -58,8 +83,12 @@ async function createGitWrapper(directory, realGit) {
 command_name=''
 target=''
 previous=''
+marker_compare='false'
+old_stream='false'
 for argument in "$@"; do
   if [ "$previous" = '-C' ]; then target="$argument"; fi
+  if [ "$argument" = '--not' ]; then marker_compare='true'; fi
+  if [ -n "$COMMITSCOPE_HISTORY_BLOCK_OID" ] && [ "$argument" = "$COMMITSCOPE_HISTORY_BLOCK_OID" ]; then old_stream='true'; fi
   case "$argument" in rev-list|cat-file) command_name="$argument" ;; esac
   previous="$argument"
 done
@@ -68,7 +97,7 @@ if [ -n "$COMMITSCOPE_HISTORY_LOG_FILE" ] && { [ "$command_name" = 'rev-list' ] 
   printf '<%s> ' "$@" >> "$COMMITSCOPE_HISTORY_LOG_FILE"
   printf '\\n' >> "$COMMITSCOPE_HISTORY_LOG_FILE"
 fi
-if [ "$command_name" = "$COMMITSCOPE_HISTORY_BLOCK_COMMAND" ] && [ -n "$COMMITSCOPE_HISTORY_BLOCK_GATE_FILE" ] && [ -e "$COMMITSCOPE_HISTORY_BLOCK_GATE_FILE" ]; then
+if [ "$command_name" = "$COMMITSCOPE_HISTORY_BLOCK_COMMAND" ] && { [ "$COMMITSCOPE_HISTORY_BLOCK_MARKER_ONLY" != '1' ] || [ "$marker_compare" = 'true' ]; } && { [ "$COMMITSCOPE_HISTORY_BLOCK_OLD_STREAM" != '1' ] || { [ "$old_stream" = 'true' ] && [ "$marker_compare" = 'false' ]; }; } && [ -n "$COMMITSCOPE_HISTORY_BLOCK_GATE_FILE" ] && [ -e "$COMMITSCOPE_HISTORY_BLOCK_GATE_FILE" ]; then
   if [ "$command_name" = 'cat-file' ]; then IFS= read -r consumed || true; fi
   printf '%s\\n' "$$" > "$COMMITSCOPE_HISTORY_PID_FILE"
   exec /bin/sleep 30

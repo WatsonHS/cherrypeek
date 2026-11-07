@@ -8,6 +8,7 @@ export function errorTitle(code: string): string {
     case "MISSING_OBJECT": return "仓库里缺少需要的对象";
     case "UNSUPPORTED_REPOSITORY": return "暂不支持这种仓库";
     case "RESOURCE_LIMIT": return "内容超出读取上限";
+    case "SCOPE_UNAVAILABLE": return "所选范围已不存在或不可用";
     case "TIMEOUT": return "读取超时";
     case "CANCELLED": return "读取已取消";
     case "INVALID_REQUEST": return "路径无效";

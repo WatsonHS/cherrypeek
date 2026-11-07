@@ -11,6 +11,8 @@ try {
   await build({
     entryPoints: {
       "repository-session-store": resolve(root, "apps/desktop/src/renderer/lib/repository-session-store.ts"),
+      "selection-intent": resolve(root, "apps/desktop/src/renderer/lib/selection-intent.ts"),
+      "virtual-window": resolve(root, "apps/desktop/src/renderer/lib/virtual-window.ts"),
     },
     outdir: buildDir,
     bundle: true,

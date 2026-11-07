@@ -1,13 +1,19 @@
 import type {
   CommitSummary,
   ErrorCode,
+  HistoryCommit,
   RecentRepository,
   RefInfo,
   RepositoryInfo,
   RepositorySessionInfo,
+  RepositoryScope,
+  RepositoryNavigation,
+  RefMergeStatusResult,
   ResponseData,
   StoreStatus,
 } from "./generated/server-message.js";
+
+export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -37,13 +43,15 @@ export interface HistoryPage {
   repository: RepositoryInfo;
   refs: RefInfo[];
   refsTruncated: boolean;
-  commits: CommitSummary[];
+  commits: HistoryCommit[];
   offset: HistoryPageData["offset"];
   pageSize: HistoryPageData["pageSize"];
   cursor: HistoryPageData["cursor"];
   previousCursor: HistoryPageData["previousCursor"];
   nextCursor: string | null;
   hasMore: HistoryPageData["hasMore"];
+  newSinceLastSeenStatus: HistoryPageData["newSinceLastSeenStatus"];
+  lastSeenDividerOid: HistoryPageData["lastSeenDividerOid"];
 }
 
 export interface RefreshedRepository {
@@ -61,4 +69,8 @@ export interface RepositorySessionApi {
   recordRepositoryView(expectedGeneration: string): Promise<RepositorySessionResult<RepositoryViewRecorded>>;
   closeRepositorySession(): Promise<RepositorySessionResult<{ closed: true }>>;
   listRecentRepositories(): Promise<RepositorySessionResult<RecentRepositoriesResult>>;
+  getRepositoryNavigation(): Promise<RepositorySessionResult<RepositoryNavigation>>;
+  selectRepositoryScope(scope: RepositoryScope, pageSize?: number): Promise<RepositorySessionResult<RefreshedRepository>>;
+  getRefMergeStatus(refNames: string[]): Promise<RepositorySessionResult<RefMergeStatusResult>>;
+  cancelRefMergeStatus(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
 }

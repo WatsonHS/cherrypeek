@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { loadBuilt, waitFor } from "./test-utils.mjs";
+import { daemonPath, loadBuilt, waitFor } from "./test-utils.mjs";
 
 const { RepositorySessionController } = await loadBuilt("repository-session-controller");
+const { CoreProcess } = await loadBuilt("core-process");
+const execFileAsync = promisify(execFile);
 
 const NULL_CONTEXT = { repoId: null, generation: null };
 
@@ -14,6 +21,7 @@ function session(path, suffix) {
     repositoryKey: `key-${suffix}`,
     worktreeId: `worktree-${suffix}`,
     scope: "head",
+    tips: [oid],
     observedAtUnixMs: 100,
     repository: {
       path,
@@ -35,6 +43,7 @@ function makeCommit(sessionInfo) {
   return {
     oid: sessionInfo.repository.headOid,
     parents: [], summary: "summary", summaryTruncated: false, textLossy: false,
+    isNewSinceLastSeen: false,
     author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
     committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" },
   };
@@ -44,7 +53,7 @@ function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "historyPagination"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -70,10 +79,23 @@ function makeCore({ rejectOnAbort = false } = {}) {
 }
 
 function send(request, data, { done = true } = {}) {
-  const processed = data.section === "historyPage" ? data.commits.length : data.section === "commits" ? data.commits.length : 1;
+  const processed = data.section === "historyPage" ? data.commits.length : data.section === "commits" ? data.commits.length
+    : data.section === "repositoryNavigation" ? data.navigation.refs.length + data.navigation.worktrees.length
+      : data.section === "refMergeStatus" ? data.result.statuses.length : 1;
   request.options.onChunk?.({ data, done, sequence: 0, repoId: request.context.repoId, generation: request.context.generation,
     coverage: { complete: done, processed }, nextCursor: null });
   request.resolve({ coverage: { complete: true, processed }, nextCursor: null });
+}
+
+function sendScopeTransaction(request, nextSession, page) {
+  request.options.onChunk?.({ data: { section: "repositorySession", session: nextSession }, done: false, sequence: 0,
+    coverage: { complete: false, processed: 0 }, nextCursor: null });
+  request.options.onChunk?.({ data: { section: "repository", repository: page.repository, refs: page.refs, refsTruncated: page.refsTruncated },
+    done: false, sequence: 1, coverage: { complete: false, processed: 0 }, nextCursor: null });
+  request.options.onChunk?.({ data: { section: "historyPage", commits: page.commits, offset: 0, pageSize: page.pageSize,
+    cursor: page.cursor, previousCursor: null, hasMore: false, newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null },
+  done: true, sequence: 2, coverage: { complete: true, processed: page.commits.length }, nextCursor: null });
+  request.resolve({ coverage: { complete: true, processed: page.commits.length }, nextCursor: null });
 }
 
 test("open binds the session context; get, preview, record, and close use it", async () => {
@@ -182,6 +204,142 @@ test("a committed open terminal is reconciled before a later open failure", asyn
   controller.dispose();
 });
 
+test("scope selection uses the current window session and commits only after the first page", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const scope = { ref: "refs/heads/dev" };
+  const switching = controller.selectScope(scope, 200);
+  const request = await waitFor(() => core.requests[1]);
+  assert.equal(request.method, "selectRepositoryScope");
+  assert.deepEqual(request.params, { pageSize: 200, scope });
+  assert.deepEqual(request.context, { repoId: opened.repoId, generation: opened.generation });
+  const next = { ...opened, repoId: "repo-a-next", generation: "generation-a-next", scope, tips: [opened.repository.headOid] };
+  const page = { repository: opened.repository, refs: [], refsTruncated: false, commits: [], offset: 0, pageSize: 200,
+    cursor: "scope-cursor", previousCursor: null, nextCursor: null, hasMore: false,
+    newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null };
+  sendScopeTransaction(request, next, page);
+  assert.deepEqual(await switching, { session: next, page });
+  assert.deepEqual(core.currentContext, { repoId: next.repoId, generation: next.generation });
+  controller.dispose();
+});
+
+test("navigation and merge status are bound to the current session and bounded", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const navigationPromise = controller.getNavigation();
+  const navigationRequest = await waitFor(() => core.requests[1]);
+  assert.equal(navigationRequest.method, "getRepositoryNavigation");
+  assert.deepEqual(navigationRequest.context, { repoId: opened.repoId, generation: opened.generation });
+  const navigation = { refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 100 };
+  send(navigationRequest, { section: "repositoryNavigation", navigation });
+  assert.deepEqual(await navigationPromise, navigation);
+
+  const names = ["refs/heads/main"];
+  const statusPromise = controller.getRefMergeStatus(names);
+  const statusRequest = await waitFor(() => core.requests[2]);
+  assert.equal(statusRequest.method, "refMergeStatus");
+  assert.deepEqual(statusRequest.params, { refNames: names });
+  assert.deepEqual(statusRequest.context, { repoId: opened.repoId, generation: opened.generation });
+  const result = { defaultBase: null, statuses: [{ name: names[0], oid: opened.repository.headOid, status: "unavailable" }] };
+  send(statusRequest, { section: "refMergeStatus", result });
+  assert.deepEqual(await statusPromise, result);
+  await assert.rejects(controller.getRefMergeStatus([names[0], names[0]]), error => error.code === "INVALID_REQUEST");
+  await assert.rejects(controller.getRefMergeStatus(Array.from({ length: 51 }, (_, index) => `refs/heads/b${index}`)), error => error.code === "INVALID_REQUEST");
+  controller.dispose();
+});
+
+test("the real controller accepts daemon navigation and merge-status coverage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "commitscope-controller-navigation-"));
+  const repository = join(root, "repo");
+  const core = new CoreProcess(daemonPath, {
+    env: { ...process.env, COMMITSCOPE_APP_DATA_DIR: join(root, "app-data"), GIT_OPTIONAL_LOCKS: "0" },
+  });
+  const controller = new RepositorySessionController(core);
+  const git = args => execFileAsync("git", args, { cwd: repository, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+  try {
+    await execFileAsync("git", ["init", "-b", "main", repository]);
+    await git(["config", "user.name", "Controller Test"]);
+    await git(["config", "user.email", "controller@example.invalid"]);
+    await writeFile(join(repository, "README.txt"), "scope navigation fixture\n");
+    await git(["add", "README.txt"]);
+    await git(["commit", "-m", "initial"]);
+    await git(["branch", "feature/merged"]);
+    await core.start();
+
+    const opened = await controller.open(repository);
+    assert.ok(opened.tips.length > 0);
+    const navigation = await controller.getNavigation();
+    assert.ok(navigation.refs.length >= 2);
+    assert.ok(navigation.worktrees.length >= 1);
+    assert.equal(navigation.defaultBase?.name, "refs/heads/main");
+
+    const localBranchNames = navigation.refs.filter(ref => ref.kind === "localBranch").map(ref => ref.name);
+    const result = await controller.getRefMergeStatus(localBranchNames);
+    assert.deepEqual(result.statuses.map(status => status.name).sort(), [...localBranchNames].sort());
+    assert.ok(result.statuses.length >= 2);
+
+    const selected = await controller.selectScope({ ref: "refs/heads/feature/merged" }, 50);
+    assert.equal(selected.session.scope.ref, "refs/heads/feature/merged");
+    assert.deepEqual(selected.session.tips, [selected.page.commits[0]?.oid].filter(Boolean));
+    const current = await controller.get();
+    assert.equal(current.scope.ref, "refs/heads/feature/merged", "the committed scope is now the context for later session reads");
+  } finally {
+    controller.dispose();
+    await core.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a core without repositoryScopes is rejected before opening a session", async () => {
+  const core = makeCore();
+  core.status.core.capabilities = ["repositorySessions", "historyPagination", "historyNewSinceLastSeen"];
+  const controller = new RepositorySessionController(core);
+  await assert.rejects(controller.open("/tmp/repo-a"), error => error.code === "UNKNOWN_METHOD" && /只读范围导航/.test(error.message));
+  assert.equal(core.requests.length, 0);
+  controller.dispose();
+});
+
+test("merge-status generations cancel and drain superseded and explicitly cancelled requests", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const first = assert.rejects(controller.getRefMergeStatus(["refs/heads/first"]), error => error.code === "CANCELLED");
+  const firstRequest = await waitFor(() => core.requests[1]);
+  const second = assert.rejects(controller.getRefMergeStatus(["refs/heads/second"]), error => error.code === "CANCELLED");
+  assert.equal(firstRequest.options.signal.aborted, true);
+  send(firstRequest, { section: "refMergeStatus", result: { defaultBase: null, statuses: [
+    { name: "refs/heads/first", oid: opened.repository.headOid, status: "unavailable" },
+  ] } });
+  await first;
+  const secondRequest = await waitFor(() => core.requests[2]);
+  assert.deepEqual(secondRequest.params, { refNames: ["refs/heads/second"] });
+  const cancelling = controller.cancelRefMergeStatus();
+  assert.equal(secondRequest.options.signal.aborted, true);
+  send(secondRequest, { section: "refMergeStatus", result: { defaultBase: null, statuses: [
+    { name: "refs/heads/second", oid: opened.repository.headOid, status: "unavailable" },
+  ] } });
+  await second;
+  assert.deepEqual(await cancelling, { cancelled: true });
+  controller.dispose();
+});
+
 test("late close cannot clear a newer session; daemon exit clears the current gate", async () => {
   const core = makeCore();
   const controller = new RepositorySessionController(core);
@@ -268,13 +426,48 @@ test("history pages validate headers, cursor metadata, and page-local coverage",
     coverage: { complete: false, processed: 0 }, nextCursor: null });
   const commit = makeCommit(opened);
   request.options.onChunk({ data: { section: "historyPage", commits: [commit], offset: 0, pageSize: 100,
-    cursor: "cursor-0", previousCursor: null, hasMore: true }, done: true, sequence: 1,
+    cursor: "cursor-0", previousCursor: null, hasMore: true, newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null }, done: true, sequence: 1,
     repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 1 }, nextCursor: "cursor-1" });
   request.resolve({ coverage: { complete: true, processed: 1 }, nextCursor: "cursor-1" });
   const page = await read;
   assert.deepEqual(page.commits, [commit]);
   assert.equal(page.cursor, "cursor-0");
   assert.equal(page.nextCursor, "cursor-1");
+  assert.equal(page.newSinceLastSeenStatus, "firstView");
+  assert.equal(page.lastSeenDividerOid, null);
+  controller.dispose();
+});
+
+test("history page rejects marker metadata that changes within one chunked page", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  const read = controller.readHistoryPage(null, 100);
+  const rejected = assert.rejects(read, error => error.code === "PROTOCOL_ERROR");
+  const request = await waitFor(() => core.requests[1]);
+  request.options.onChunk({ data: { section: "repository", repository: opened.repository, refs: [], refsTruncated: false },
+    done: false, sequence: 0, repoId: opened.repoId, generation: opened.generation,
+    coverage: { complete: false, processed: 0 }, nextCursor: null });
+  request.options.onChunk({ data: { section: "historyPage", commits: [], offset: 0, pageSize: 100, cursor: "cursor-0",
+    previousCursor: null, hasMore: false, newSinceLastSeenStatus: "ready", lastSeenDividerOid: null },
+  done: false, sequence: 1, repoId: opened.repoId, generation: opened.generation,
+  coverage: { complete: false, processed: 0 }, nextCursor: null });
+  let thrown;
+  try {
+    request.options.onChunk({ data: { section: "historyPage", commits: [], offset: 0,
+      pageSize: 100, cursor: "cursor-0", previousCursor: null, hasMore: false,
+      newSinceLastSeenStatus: "unavailable", lastSeenDividerOid: null }, done: true, sequence: 2,
+    repoId: opened.repoId, generation: opened.generation,
+    coverage: { complete: true, processed: 0 }, nextCursor: null });
+  } catch (error) { thrown = error; }
+  assert.equal(thrown?.code, "PROTOCOL_ERROR");
+  request.reject(thrown);
+  await rejected;
   controller.dispose();
 });
 
@@ -296,7 +489,8 @@ test("refresh publishes only a complete first page and switches context after te
   const chunks = [
     { section: "repositorySession", session: refreshed },
     { section: "repository", repository: refreshed.repository, refs: [], refsTruncated: false },
-    { section: "historyPage", commits: [commit], offset: 0, pageSize: 100, cursor: "fresh-0", previousCursor: null, hasMore: false },
+    { section: "historyPage", commits: [commit], offset: 0, pageSize: 100, cursor: "fresh-0", previousCursor: null, hasMore: false,
+      newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null },
   ];
   chunks.forEach((data, sequence) => request.options.onChunk({ data, sequence, done: sequence === 2,
     repoId: oldSession.repoId, generation: oldSession.generation,
@@ -305,6 +499,8 @@ test("refresh publishes only a complete first page and switches context after te
   const value = await refreshing;
   assert.equal(value.session, refreshed);
   assert.deepEqual(value.page.commits, [commit]);
+  assert.equal(value.page.newSinceLastSeenStatus, "firstView");
+  assert.equal(value.page.lastSeenDividerOid, null);
   assert.deepEqual(core.currentContext, { repoId: refreshed.repoId, generation: refreshed.generation });
   controller.dispose();
 });

@@ -20,7 +20,7 @@ const SCHEMA_VERSION: u32 = 1;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_RECENT_REPOSITORIES: usize = 20;
 const MAX_LAST_VIEWED_ENTRIES: usize = 100;
-const MAX_TIPS: usize = 1;
+const MAX_TIPS: usize = 2_000;
 const MAX_IDENTITY_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 16 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -101,6 +101,7 @@ impl SessionStore {
         repository: &RepositoryInfo,
         repository_key: &str,
         worktree_id: &str,
+        scope: &RepositoryScope,
         observed_at_unix_ms: u64,
     ) -> OpenRepositoryStoreResult {
         let Some(data_dir) = &self.data_dir else {
@@ -111,7 +112,7 @@ impl SessionStore {
             };
         };
 
-        if !valid_identity(repository_key) || !valid_identity(worktree_id) {
+        if !valid_identity(repository_key) || !valid_identity(worktree_id) || !valid_scope(scope) {
             return OpenRepositoryStoreResult {
                 previous_view: None,
                 recent_status: StoreStatus::Unavailable,
@@ -132,7 +133,7 @@ impl SessionStore {
                 let found = document.entries.iter().find(|entry| {
                     entry.repository_key == repository_key
                         && entry.worktree_id == worktree_id
-                        && entry.scope == RepositoryScope::Head
+                        && &entry.scope == scope
                 });
                 match found {
                     Some(entry) if valid_snapshot(repository, &entry.snapshot) => {
@@ -163,6 +164,41 @@ impl SessionStore {
         }
     }
 
+    pub fn capture_previous_view(
+        &self,
+        repository: &RepositoryInfo,
+        repository_key: &str,
+        worktree_id: &str,
+        scope: &RepositoryScope,
+    ) -> (Option<LastViewedSnapshot>, StoreStatus) {
+        let Some(data_dir) = &self.data_dir else {
+            return (None, self.initial_status);
+        };
+        if !valid_identity(repository_key) || !valid_identity(worktree_id) || !valid_scope(scope) {
+            return (None, StoreStatus::Unavailable);
+        }
+        let Ok(safe_dir) = safe_data_dir(data_dir, repository) else {
+            return (None, StoreStatus::Unavailable);
+        };
+        match self.read_last_viewed(&safe_dir) {
+            Ok(document) => {
+                let found = document.entries.iter().find(|entry| {
+                    entry.repository_key == repository_key
+                        && entry.worktree_id == worktree_id
+                        && &entry.scope == scope
+                });
+                match found {
+                    Some(entry) if valid_snapshot(repository, &entry.snapshot) => {
+                        (Some(entry.snapshot.clone()), StoreStatus::Ok)
+                    }
+                    Some(_) => (None, StoreStatus::Corrupt),
+                    None => (None, StoreStatus::Ok),
+                }
+            }
+            Err(status) => (None, status),
+        }
+    }
+
     pub fn record_view(&self, session: &RepositorySessionInfo) -> RecordViewStoreResult {
         let Some(data_dir) = &self.data_dir else {
             return RecordViewStoreResult {
@@ -170,9 +206,9 @@ impl SessionStore {
                 status: self.initial_status,
             };
         };
-        if session.scope != RepositoryScope::Head
-            || !valid_identity(&session.repository_key)
+        if !valid_identity(&session.repository_key)
             || !valid_identity(&session.worktree_id)
+            || !valid_scope(&session.scope)
         {
             return RecordViewStoreResult {
                 saved: false,
@@ -192,14 +228,8 @@ impl SessionStore {
                 status: self.last_viewed_read_status(&safe_dir),
             };
         };
-        let tips = session
-            .repository
-            .head_oid
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
         let snapshot = LastViewedSnapshot {
-            tips,
+            tips: session.tips.clone(),
             viewed_at_unix_ms: now_unix_ms(),
         };
         if !valid_snapshot(&session.repository, &snapshot) {
@@ -216,7 +246,7 @@ impl SessionStore {
         document.entries.push(LastViewedRecord {
             repository_key: session.repository_key.clone(),
             worktree_id: session.worktree_id.clone(),
-            scope: session.scope,
+            scope: session.scope.clone(),
             snapshot,
         });
         document
@@ -301,7 +331,7 @@ impl SessionStore {
                     || document.entries.iter().any(|entry| {
                         !valid_identity(&entry.repository_key)
                             || !valid_identity(&entry.worktree_id)
-                            || entry.scope != RepositoryScope::Head
+                            || !valid_scope(&entry.scope)
                             || entry.snapshot.tips.len() > MAX_TIPS
                             || entry.snapshot.tips.iter().any(|oid| !valid_oid(oid))
                     })
@@ -378,11 +408,30 @@ fn valid_recent(entry: &RecentRepository) -> bool {
 }
 
 fn valid_snapshot(repository: &RepositoryInfo, snapshot: &LastViewedSnapshot) -> bool {
+    let unique_tips = snapshot
+        .tips
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
     snapshot.tips.len() <= MAX_TIPS
+        && unique_tips.len() == snapshot.tips.len()
         && snapshot.tips.iter().all(|oid| {
             oid_length(&repository.object_format).is_some_and(|length| oid.len() == length)
                 && valid_oid(oid)
         })
+}
+
+fn valid_scope(scope: &RepositoryScope) -> bool {
+    match scope {
+        RepositoryScope::Head | RepositoryScope::AllBranches => true,
+        RepositoryScope::Ref(name) => {
+            name.len() <= MAX_PATH_BYTES
+                && (name.starts_with("refs/heads/")
+                    || name.starts_with("refs/remotes/")
+                    || name.starts_with("refs/tags/"))
+                && !name.contains('\0')
+        }
+        RepositoryScope::Worktree(id) => valid_identity(id),
+    }
 }
 
 fn valid_oid(value: &str) -> bool {
@@ -645,12 +694,14 @@ mod tests {
     }
 
     fn test_session(repository: RepositoryInfo) -> RepositorySessionInfo {
+        let tips = repository.head_oid.iter().cloned().collect();
         RepositorySessionInfo {
             repo_id: "repo-1".into(),
             generation: "generation-1".into(),
             repository_key: "repository-key".into(),
             worktree_id: "worktree-id".into(),
             scope: RepositoryScope::Head,
+            tips,
             observed_at_unix_ms: 100,
             repository,
             previous_view: None,
@@ -692,7 +743,13 @@ mod tests {
             initial_status: StoreStatus::Ok,
         };
 
-        let opened = store.open_repository(&repository, "repository-key", "worktree-id", 123);
+        let opened = store.open_repository(
+            &repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::Head,
+            123,
+        );
         assert_eq!(opened.previous_view, None);
         assert_eq!(opened.recent_status, StoreStatus::Ok);
         assert_eq!(opened.last_seen_status, StoreStatus::Ok);
@@ -715,18 +772,62 @@ mod tests {
         let advanced_head = "b".repeat(40);
         let mut advanced_repository = repository.clone();
         advanced_repository.head_oid = Some(advanced_head.clone());
-        let reopened =
-            store.open_repository(&advanced_repository, "repository-key", "worktree-id", 456);
+        let reopened = store.open_repository(
+            &advanced_repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::Head,
+            456,
+        );
         assert_eq!(reopened.previous_view.unwrap().tips, vec![old_head]);
 
         let advanced_session = test_session(advanced_repository.clone());
         assert!(store.record_view(&advanced_session).saved);
-        let reopened_again =
-            store.open_repository(&advanced_repository, "repository-key", "worktree-id", 789);
+        let reopened_again = store.open_repository(
+            &advanced_repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::Head,
+            789,
+        );
         assert_eq!(
             reopened_again.previous_view.unwrap().tips,
             vec![advanced_head]
         );
+    }
+
+    #[test]
+    fn last_viewed_snapshots_are_isolated_by_scope_and_keep_all_tips() {
+        let temp = TestDir::new("scope-tips");
+        let app_data = temp.0.join("app-data");
+        let head = "a".repeat(40);
+        let other = "b".repeat(40);
+        let repository = test_repository(&temp.0, Some(&head));
+        let store = SessionStore {
+            data_dir: Some(app_data),
+            initial_status: StoreStatus::Ok,
+        };
+        let mut session = test_session(repository.clone());
+        session.scope = RepositoryScope::AllBranches;
+        session.tips = vec![head.clone(), other.clone()];
+        assert!(store.record_view(&session).saved);
+
+        let all = store.open_repository(
+            &repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::AllBranches,
+            456,
+        );
+        assert_eq!(all.previous_view.unwrap().tips, vec![head.clone(), other]);
+        let head_only = store.open_repository(
+            &repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::Head,
+            789,
+        );
+        assert_eq!(head_only.previous_view, None);
     }
 
     #[test]
@@ -747,6 +848,7 @@ mod tests {
             &first_commit_repository,
             "repository-key",
             "worktree-id",
+            &RepositoryScope::Head,
             123,
         );
         assert_eq!(reopened.previous_view.unwrap().tips, Vec::<String>::new());
@@ -765,7 +867,13 @@ mod tests {
             initial_status: StoreStatus::Ok,
         };
 
-        let opened = store.open_repository(&repository, "repository-key", "worktree-id", 123);
+        let opened = store.open_repository(
+            &repository,
+            "repository-key",
+            "worktree-id",
+            &RepositoryScope::Head,
+            123,
+        );
         assert_eq!(opened.previous_view, None);
         assert_eq!(opened.last_seen_status, StoreStatus::Corrupt);
         assert_eq!(opened.recent_status, StoreStatus::Ok);

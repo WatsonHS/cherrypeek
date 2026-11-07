@@ -56,6 +56,23 @@
       ],
       "type": "object"
     },
+    "RefMergeStatusParams": {
+      "additionalProperties": false,
+      "properties": {
+        "refNames": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "refNames"
+      ],
+      "type": "object"
+    },
     "RefreshRepositoryParams": {
       "additionalProperties": false,
       "properties": {
@@ -70,6 +87,45 @@
         "pageSize"
       ],
       "type": "object"
+    },
+    "RepositoryScope": {
+      "oneOf": [
+        {
+          "enum": [
+            "head",
+            "allBranches"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ref": {
+              "maxLength": 16384,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "worktree": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "worktree"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RequestParams": {
       "anyOf": [
@@ -98,12 +154,40 @@
           "$ref": "#/definitions/EmptyParams"
         },
         {
+          "$ref": "#/definitions/SelectRepositoryScopeParams"
+        },
+        {
+          "$ref": "#/definitions/RefMergeStatusParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
           "$ref": "#/definitions/EmptyParams"
         },
         {
           "$ref": "#/definitions/EmptyParams"
         }
       ]
+    },
+    "SelectRepositoryScopeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/definitions/RepositoryScope"
+        }
+      },
+      "required": [
+        "scope",
+        "pageSize"
+      ],
+      "type": "object"
     }
   },
   "oneOf": [

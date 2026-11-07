@@ -42,6 +42,28 @@ impl JsonSchema for NullableStringSchema {
     }
 }
 
+struct NullableOidSchema;
+
+impl JsonSchema for NullableOidSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableOid".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({
+            "anyOf": [
+                {"type": "string", "maxLength": 64},
+                {"type": "null"}
+            ]
+        }))
+        .expect("valid nullable object ID schema")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename = "GitInfo")]
@@ -76,6 +98,8 @@ pub enum Capability {
     ReadRepositoryPreview,
     RepositorySessions,
     HistoryPagination,
+    HistoryNewSinceLastSeen,
+    RepositoryScopes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -104,6 +128,8 @@ impl CoreReady {
                 Capability::ReadRepositoryPreview,
                 Capability::RepositorySessions,
                 Capability::HistoryPagination,
+                Capability::HistoryNewSinceLastSeen,
+                Capability::RepositoryScopes,
             ],
         }
     }
@@ -153,6 +179,9 @@ pub enum RequestParams {
     ReadSessionPreview(EmptyParams),
     ReadHistoryPage(ReadHistoryPageParams),
     RefreshRepository(RefreshRepositoryParams),
+    GetRepositoryNavigation(EmptyParams),
+    SelectRepositoryScope(SelectRepositoryScopeParams),
+    RefMergeStatus(RefMergeStatusParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -193,6 +222,21 @@ pub struct ReadHistoryPageParams {
 pub struct RefreshRepositoryParams {
     #[schemars(range(min = 1, max = 500))]
     pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectRepositoryScopeParams {
+    pub scope: RepositoryScope,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefMergeStatusParams {
+    #[schemars(length(min = 1, max = 50))]
+    pub ref_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -291,7 +335,7 @@ pub enum ResponseData {
     #[serde(rename = "historyPage")]
     HistoryPage {
         #[schemars(length(max = 500))]
-        commits: Vec<CommitSummary>,
+        commits: Vec<HistoryCommit>,
         offset: u32,
         #[schemars(range(min = 1, max = 500))]
         page_size: u16,
@@ -302,7 +346,33 @@ pub enum ResponseData {
         #[schemars(with = "NullableStringSchema")]
         previous_cursor: Option<String>,
         has_more: bool,
+        new_since_last_seen_status: NewSinceLastSeenStatus,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        #[schemars(required)]
+        #[schemars(with = "NullableOidSchema")]
+        last_seen_divider_oid: Option<String>,
     },
+    #[serde(rename = "repositoryNavigation")]
+    RepositoryNavigation { navigation: RepositoryNavigation },
+    #[serde(rename = "refMergeStatus")]
+    RefMergeStatus { result: RefMergeStatusResult },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryCommit {
+    #[serde(flatten)]
+    #[schemars(flatten)]
+    pub commit: CommitSummary,
+    pub is_new_since_last_seen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum NewSinceLastSeenStatus {
+    Ready,
+    FirstView,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -317,6 +387,8 @@ pub struct RepositorySessionInfo {
     #[schemars(length(min = 1, max = 128))]
     pub worktree_id: String,
     pub scope: RepositoryScope,
+    #[schemars(length(max = 2000))]
+    pub tips: Vec<String>,
     pub observed_at_unix_ms: u64,
     pub repository: RepositoryInfo,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -326,16 +398,116 @@ pub struct RepositorySessionInfo {
     pub persistence: SessionPersistenceStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum RepositoryScope {
     Head,
+    AllBranches,
+    Ref(#[schemars(length(min = 1, max = 16384))] String),
+    Worktree(#[schemars(length(min = 1, max = 256))] String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeInfo {
+    #[schemars(length(min = 1, max = 256))]
+    pub id: String,
+    #[schemars(length(min = 1, max = 16384))]
+    pub path: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub head_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub head_reference: Option<String>,
+    pub is_main: bool,
+    pub is_current: bool,
+    pub is_bare: bool,
+    pub is_detached: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub locked_reason: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub prunable_reason: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DefaultBase {
+    pub name: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryNavigation {
+    #[schemars(length(max = 2000))]
+    pub refs: Vec<RefInfo>,
+    pub refs_truncated: bool,
+    #[schemars(length(max = 128))]
+    pub worktrees: Vec<WorktreeInfo>,
+    pub worktrees_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableDefaultBaseSchema")]
+    pub default_base: Option<DefaultBase>,
+    pub observed_at_unix_ms: u64,
+}
+
+struct NullableDefaultBaseSchema;
+
+impl JsonSchema for NullableDefaultBaseSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "NullableDefaultBase".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let schema = generator.subschema_for::<DefaultBase>();
+        let schema = serde_json::to_value(schema).expect("default base schema serializes");
+        Schema::try_from(serde_json::json!({"anyOf": [schema, {"type": "null"}]}))
+            .expect("valid nullable default base schema")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefMergeStatusResult {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableDefaultBaseSchema")]
+    pub default_base: Option<DefaultBase>,
+    #[schemars(length(max = 50))]
+    pub statuses: Vec<RefMergeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefMergeStatus {
+    pub name: String,
+    pub oid: String,
+    pub status: MergeStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeStatus {
+    Merged,
+    NotMerged,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LastViewedSnapshot {
-    #[schemars(length(max = 1))]
+    #[schemars(length(max = 2000))]
     pub tips: Vec<String>,
     pub viewed_at_unix_ms: u64,
 }
@@ -491,6 +663,7 @@ pub enum ErrorCode {
     PermissionDenied,
     InvalidCursor,
     SnapshotChanged,
+    ScopeUnavailable,
 }
 
 #[must_use]
@@ -702,6 +875,58 @@ mod tests {
         assert_eq!(
             recent_schema["properties"]["worktreePath"]["type"],
             json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn history_commit_is_flattened_and_roundtrips_without_losing_the_marker() {
+        let wire = json!({
+            "oid":"0123456789012345678901234567890123456789",
+            "parents":[],
+            "summary":"initial",
+            "summaryTruncated":false,
+            "author":{"name":"A","email":"a@example.test","timestamp":"1","offset":"+0000"},
+            "committer":{"name":"A","email":"a@example.test","timestamp":"1","offset":"+0000"},
+            "textLossy":false,
+            "isNewSinceLastSeen":true
+        });
+        let decoded: HistoryCommit = serde_json::from_value(wire.clone()).unwrap();
+        assert!(decoded.is_new_since_last_seen);
+        assert_eq!(decoded.commit.summary, "initial");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+
+        let mut unknown = wire;
+        unknown["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<HistoryCommit>(unknown).is_err());
+
+        let schema = serde_json::to_value(server_message_schema()).unwrap();
+        let printed = schema.to_string();
+        assert!(printed.contains("isNewSinceLastSeen"));
+        assert!(printed.contains("lastSeenDividerOid"));
+        assert!(printed.contains("maxLength"));
+    }
+
+    #[test]
+    fn repository_scope_keeps_legacy_head_encoding_and_uses_external_ref_tags() {
+        assert_eq!(
+            serde_json::to_value(RepositoryScope::Head).unwrap(),
+            json!("head")
+        );
+        assert_eq!(
+            serde_json::to_value(RepositoryScope::AllBranches).unwrap(),
+            json!("allBranches")
+        );
+        assert_eq!(
+            serde_json::to_value(RepositoryScope::Ref("refs/heads/topic".into())).unwrap(),
+            json!({"ref":"refs/heads/topic"})
+        );
+        assert_eq!(
+            serde_json::to_value(RepositoryScope::Worktree("worktree:opaque".into())).unwrap(),
+            json!({"worktree":"worktree:opaque"})
+        );
+        assert_eq!(
+            serde_json::from_value::<RepositoryScope>(json!("head")).unwrap(),
+            RepositoryScope::Head
         );
     }
 }

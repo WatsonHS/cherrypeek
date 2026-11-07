@@ -1,6 +1,6 @@
 # 技术架构
 
-日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。下述多范围快照、事件、索引、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
+日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。P1-03 的有界虚拟窗口、新增标记及[滚动测量](benchmarks/p1-03-history-scroll.md)已交付，短时空闲整树 RSS 尚未达到目标。P1-04 的多范围快照、worktree 导航与按需合入状态已通过[验收](validation/p1-04-scope-navigation.md)。下述事件、索引、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
 
 ## 技术路线
 
@@ -45,7 +45,13 @@ P1-01 的会话契约见[代码级计划](implementation/p1-01-repository-sessio
 
 P1-02 按[代码级计划](implementation/p1-02-history-pagination.md)增加 `historyPagination` capability、`readHistoryPage` 和 `refreshRepository`。页大小默认 200、最大 500；返回当前页、前后页的游标与位置，`coverage.complete` 只表示这页完整，`processed` 只计本页提交。刷新先重新发现同一仓库并准备第一页，成功后再提交新 session / generation；失败保留旧会话。main 对翻页执行取消后排空终态，对会话变更接收迟到的已提交成功结果，避免核心和界面使用不同会话。记录查看时额外核验 renderer 实际显示的 generation。
 
-main 持有会话上下文，preload 不接受 renderer 指定的 repoId / generation。open 的取消会等到核心最终响应，以同步可能已提交的状态；会话变更超时导致核心连接失败并回收，避免继续使用不确定的句柄。六个 IPC 接口返回可序列化的成功 / 错误结果。旧预览接口保留独立的 null 上下文；新接口是否接入界面与后端验收分开记录。UI-02 起 renderer 只用会话接口：打开、读取、取消（即关闭会话）与记录查看都由 renderer 发起，并按操作号丢弃过期结果；旧的 renderer 预览接口已移除，daemon 的 `readRepositoryPreview` 仍供 headless 测试与基准使用。`--repository=` 启动参数经 `getLaunchRepository` 交给 renderer，按正常路径打开。
+P1-03 增加 `historyNewSinceLastSeen` capability。`historyPage` 的行使用扁平 `HistoryCommit`，比摘要多 `isNewSinceLastSeen`；页 metadata 增加 `newSinceLastSeenStatus` 和 `lastSeenDividerOid`，main 校验分块一致性。首次查看与比较不可用分开表示；分隔线只有在全局连续前缀已证明后出现。renderer 将窗口边缘游标与活动页分开，切仓取消并排空页请求，异步导航还核验选择意图，详见[验收记录](validation/p1-03-virtual-history.md)。
+
+P1-04 增加桌面必需的 `repositoryScopes` capability。范围为 `"head"`、`"allBranches"`、`{ref: 完整引用名}` 或 `{worktree: 核心返回的ID}`；session 显式返回最多 2000 个冻结 `tips`。全部分支取本地和远端跟踪引用，不包含仅 tag、stash 或 reflog 可达的历史。切范围复用刷新事务：先捕获、解析目标并准备首屏，成功后原子替换 session。查看另一个 worktree 不改变本窗口的 repository / repositoryKey / worktreeId；刷新始终沿用 scope，目标失效返回 `SCOPE_UNAVAILABLE`，保留旧快照。历史和旧预览均从冻结 tips 遍历，查看记录按完整 scope 隔离，并兼容已有 `"head"` 记录。
+
+`getRepositoryNavigation` 返回会话内冻结的引用、worktree、默认基准和观察时间。捕获时复核 refs、worktree 与窗口 HEAD；导航获取失败不阻止基本 HEAD 浏览。引用最多 2000 条，worktree 最多 128 条，截断有显式标志；引用截断时不能选择“全部分支”。`refMergeStatus` 每次最多 50 个本地分支，只用冻结 OID 执行 `git merge-base --is-ancestor <分支 tip> <基准 tip>`；返回 0 才显示“已合入”。导航 / 合入响应均为单个完整终态，processed 分别为返回条目数 / 状态数，超过 512 KiB 目标载荷明确报 `RESOURCE_LIMIT`。renderer 在选择器中按实际可见分支请求，关闭或切换时取消；错误需显式重试，禁止自动循环重试。原子变更与页读取互斥，选择意图独立判旧；范围失败提示放在弹层外。远端只显示本地引用观察时间，fetch 时间未知，不主动 fetch。详见[P1-04 代码级计划](implementation/p1-04-scope-navigation.md)。
+
+main 持有会话上下文，preload 不接受 renderer 指定的 repoId / generation。open 的取消会等到核心最终响应，以同步可能已提交的状态；会话变更超时导致核心连接失败并回收，避免继续使用不确定的句柄。业务 IPC 接口返回可序列化的成功 / 错误结果。旧预览接口保留独立的 null 上下文；新接口是否接入界面与后端验收分开记录。UI-02 起 renderer 只用会话接口：打开、读取、取消（即关闭会话）与记录查看都由 renderer 发起，并按操作号丢弃过期结果；旧的 renderer 预览接口已移除，daemon 的 `readRepositoryPreview` 仍供 headless 测试与基准使用。`--repository=` 启动参数经 `getLaunchRepository` 交给 renderer，按正常路径打开。
 
 | 消息 | 必备字段和行为 |
 | --- | --- |
@@ -74,7 +80,7 @@ P0-03 的仓库预览契约见[代码级计划](implementation/p0-03-repository-
 - `Query` 包含范围、消息子串、Author / Committer 独立身份集合、OID 筛选、路径、日期条件、文本大小写选项、时间字段、时区、排序和 generation；完整序列化后形成缓存键。不同字段 AND、同一身份集合内 OR，由 Rust 统一执行；renderer 不自行扩大检索字段或推断 hash 模式。
 - `Coverage` 记录索引已完成的范围 / 快照、已处理量、是否 complete 与是否过期。完整性始终相对绑定快照；“该快照已完成”与“存在更新快照”可以同时成立，但不能复用为新快照的完整性证明。若总量未知，显示已处理数量，不编造百分比。
 - **引用关系**：`refMergeStatus` 在打开范围选择器时计算本地分支相对默认分支的合入状态（口径见 PRODUCT 数据口径）。先判断可达（第一版只做这一步）；M4 起，不可达时再比对补丁：分别为分支自分叉点以来独有的提交、基准自分叉点以来的提交计算 patch-id（等价 `git cherry`），再把分支整体 diff 的 patch-id 与基准提交比较，用来识别 squash。只用只读命令，不用 `git merge-tree --write-tree` 这类会向仓库写对象的路径。比对量受分叉点以来的提交数约束并设上限；超限返回“未知”，不当作未合入。结果按（基准 OID，分支 OID）缓存。分支多时只算可见项，分批返回；`branchesContaining` 只在用户点击“包含它的分支”时计算。两者都绑定当前浏览快照，可取消，可按快照缓存，不预先物化“所有分支 × 所有提交”。worktree 检出关系来自 `listWorktrees`；远端跟踪引用是否一致直接比较 `RefSnapshot` 中的 OID。`getActivity` 同时返回按日计数和按原始 Author 身份的去重计数，口径与筛选和历史一致。
-- **上次查看与更新明细**：应用数据目录按（仓库对象库标识，worktreeId，浏览范围）保存上次查看的 tip OID 集合，不写被查看仓库。P1-01 先用版本化 JSON 保存最近 20 个 worktree 与最多 100 条查看记录，两个文件各限 1 MiB；main 配置可信数据目录，路径落在被查看仓库内时禁用存储。打开只写 recent；内容实际显示后由调用方显式记录会话捕获的 tips，不读取外部最新 HEAD。首次查看为 null，曾查看空仓库为 `[]`；坏文件保留并报告状态，不阻止浏览。P1-05 引入 SQLite 元数据索引，不把它作为 P1-01 的前置条件。后续 `readHistoryPage` 的行带 `isNewSinceLastSeen`，由“当前 tips 可达、上次 tips 不可达”在遍历时标注，不另行全量计算。`diffRefSnapshots` 比较当前浏览 generation 与最新已观察 generation：逐个引用给出快进 / 改写 / 新建 / 删除，快进附新增提交的有界摘要，改写附被替换数量；只在用户打开更新明细时计算，可取消，结果按两个 generation 缓存。
+- **上次查看与更新明细**：应用数据目录按（仓库对象库标识，worktreeId，浏览范围）保存上次查看的 tip OID 集合，不写被查看仓库。P1-01 先用版本化 JSON 保存最近 20 个 worktree 与最多 100 条查看记录，两个文件各限 1 MiB；main 配置可信数据目录，路径落在被查看仓库内时禁用存储。打开只写 recent；内容实际显示后由调用方显式记录会话捕获的 tips，不读取外部最新 HEAD。首次查看为 null，曾查看空仓库为 `[]`；坏文件保留并报告状态，不阻止浏览。P1-05 引入 SQLite 元数据索引，不把它作为 P1-01 的前置条件。P1-03 的 `readHistoryPage` 行带 `isNewSinceLastSeen`，在固定 HEAD 拓扑分页后，正向流式读取上次 tips 的可达历史，只保存本页候选的命中集合；未命中者只有在旧历史正常读完后才能标为新增，避免 Git 负 tip 遍历静默跳过缺失旧祖先造成误标。额外一次有界输出的全局新增计数用于证明顶部新增前缀完整，避免交错历史误画“上次看到这里”；这个可取消的额外走图取代原先“不另行全量计算”的设想，不保存全仓 OID 或引入索引。比较预算超时或旧对象缺失时明确降级，不阻止历史浏览，详见[P1-03 代码级计划](implementation/p1-03-virtual-history.md)。`diffRefSnapshots` 比较当前浏览 generation 与最新已观察 generation：逐个引用给出快进 / 改写 / 新建 / 删除，快进附新增提交的有界摘要，改写附被替换数量；只在用户打开更新明细时计算，可取消，结果按两个 generation 缓存。
 - **详情扩展**：`getCommit` 按 Git trailer 规则拆出 trailer，返回原始消息与解析结果，不读取外部配置改变解析方式。merge 的“带入的提交”复用 `readHistoryPage`，范围为“包含第 N 父、排除第一父”，与普通分页共享游标、取消与有界页面。
 - **交给 Agent**：`getHandoffFacts` 只读计算 prompt 所需事实：领先 / 落后计数（`rev-list --left-right --count` 口径）、分叉点以来两侧改动路径的交集、分支独有提交标题的有界列表，全部绑定当前浏览快照；字段与模板见 [HANDOFF](HANDOFF.md)。模板在 renderer 渲染；仓库来源文本经转义后放进带随机分隔标记的参考数据段，文本中出现同一标记时换一个。复制经 preload 暴露的 `copyText` 窄接口，由 main 写系统剪贴板，仅响应用户点击，长度设上限。复制动作不启动外部进程、不调用 Agent；事实计算可调用受只读边界约束的 Git，整个流程不执行 Git 写操作。
 
@@ -84,7 +90,7 @@ P0-03 的仓库预览契约见[代码级计划](implementation/p0-03-repository-
 
 分页游标绑定查询、引用快照、遍历位置和图布局状态。Rust 保持有界的遍历 session，按需继续读取；不把 `--skip=N` 的反复全量遍历当最终分页方案。回滚到被淘汰的页时，可用检查点恢复或重算，并记录延迟；session 过期返回明确错误。M0 已确认每页从 HEAD 重算约 0.44 秒，需优先续读已有遍历；现有数据不足以决定检查点落盘格式，待 M1 测量随机回读与淘汰成本再选择，避免提前存储完整可达矩阵。
 
-P1-02 先绑定冻结 HEAD、页大小、排序版本、随机 query ID 和页起点；图布局状态由 P2-01 扩充。每个会话只保留一个带背压的 `rev-list --topo-order` 流，连续下一页沿用该流；对象摘要仍通过 cat-file 批量解码。已发行游标位置与流当前读到的位置分别记录，旧页淘汰后从冻结 HEAD 重放，不使已发行的深页游标失效。应用缓存最多 8 页且估算提交载荷不超过 16 MiB；renderer 只持有一页及至多一条旧选择摘要。Git 内部遍历内存、输出缓冲与临时解码内存不计入这个缓存额度，性能报告单独采样整个进程树。
+P1-02 先绑定冻结 HEAD、页大小、排序版本、随机 query ID 和页起点；图布局状态由 P2-01 扩充。每个会话只保留一个带背压的 `rev-list --topo-order` 流，连续下一页沿用该流；对象摘要仍通过 cat-file 批量解码。已发行游标位置与流当前读到的位置分别记录，旧页淘汰后从冻结 HEAD 重放，不使已发行的深页游标失效。应用缓存最多 8 页且估算提交载荷不超过 16 MiB；P1-03 将 renderer 扩展为最多 2000 条的连续页窗口及至多一条旧选择摘要；只保存窗口内游标，DOM 仅为可见项和前后各 12 项缓冲，滚动锚点由 OID、高度索引和行内像素偏移维护。Git 内部遍历内存、输出缓冲与临时解码内存不计入这个缓存额度，性能报告单独采样整个进程树。
 
 同一查询的历史顺序不依赖提交时间单调。history 命令禁用 commitGraph 加速；发现时记录 commonDir 的 shallow / info/grafts 有界内容指纹，每次读页前后复核，包括缓存命中。普通引用移动不影响旧页，历史边界改变则返回 `SNAPSHOT_CHANGED` 并要求刷新；不把重放得到的另一套历史拼入原查询。取消、超时或对象错误回收流，保留完成页与 query 身份，重试从固定快照恢复。会话替换、关闭及 daemon EOF 同样回收闲置 Git 子进程。
 
@@ -116,7 +122,7 @@ FTS5 是加速候选，不能改变产品约定的字面子串语义。M1 先建
 
 固定 tip 不保证对象免于外部 GC。读取当前快照时遇到缺失对象，返回缺失 / 不完整状态并保留已读内容，不自动网络补拉，也不把中断查询标为完整；允许用户重试或刷新。M1 提供手动刷新与固定快照语义，M3 再增加文件事件、聚焦与定时复核的通知。
 
-磁盘缓存放 Electron 应用数据目录；后续 SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。MVP 预算上限为 renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；P1-02 先采用更小的一页 renderer 窗口和 8 页 / 16 MiB 内存缓存，尚无磁盘索引。缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
+磁盘缓存放 Electron 应用数据目录；后续 SQLite 为可重建派生数据，schema 带版本，写入事务化，中断后可续建或重建。默认只保留一个活跃仓库的昂贵 session。MVP 预算上限为 renderer 2,000 条摘要、Rust 显式缓存 128 MiB、磁盘缓存 2 GiB / 仓库；当前 P1-03 renderer 上限为 2000 条，Rust 沿用 P1-02 的 8 页 / 16 MiB 内存缓存，尚无磁盘索引。缓存上限不等于整个进程的内存上限，按 VALIDATION 单独测量。
 
 ## 只读边界
 

@@ -1,11 +1,14 @@
 import type {
-  CommitSummary,
+  HistoryCommit,
+  MergeStatus,
+  RepositoryScope,
+  NewSinceLastSeenStatus,
   RefInfo,
   RepositoryInfo,
   RepositorySessionInfo,
   StoreStatus,
 } from "../../../../../packages/protocol/src/generated/server-message.js";
-import type { HistoryPage, RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
+import type { HistoryPage, RepositoryNavigation, RefMergeStatusResult, RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
 
 export type RepositoryViewState = "idle" | "loading" | "ready" | "error" | "cancelled";
 
@@ -31,24 +34,35 @@ export interface RepositoryView {
   repository: RepositoryInfo | null;
   refs: RefInfo[];
   refsTruncated: boolean;
-  commits: CommitSummary[];
+  newSinceLastSeenStatus: NewSinceLastSeenStatus;
+  lastSeenDividerOid: string | null;
+  commits: HistoryCommit[];
   hasMore: boolean;
   pageOffset: number | null;
   pageSize: number;
   pageCursor: string | null;
   previousCursor: string | null;
   nextCursor: string | null;
+  windowPreviousCursor: string | null;
+  windowNextCursor: string | null;
+  canNavigatePrevious: boolean;
+  canNavigateNext: boolean;
   pageLoading: boolean;
+  pageRequestDirection: "before" | "after" | null;
+  pageRequestKind: "prefetch" | "navigation" | null;
   refreshing: boolean;
   pageError: ViewError | null;
   pageErrorKind: "read" | "refresh" | null;
   retryCursor: string | null;
-  oldSelectedCommit: CommitSummary | null;
+  retryDirection: "before" | "after";
+  oldSelectedCommit: HistoryCommit | null;
   oldSelectedObservedAtUnixMs: number | null;
   selectionMissingOnPage: boolean;
   anchorMissing: boolean;
   anchorRestorationSpace: number;
   pageRevision: number;
+  windowRevision: number;
+  windowPageCount: number;
   /** Error about what is shown: a failed read, or a failed open when nothing else is shown. */
   error: ViewError | null;
   /** Path being opened while the current repository stays on screen. */
@@ -57,20 +71,42 @@ export interface RepositoryView {
   notice: ViewError | null;
   /** Result of the latest "viewed" record for this session. */
   record: ViewRecord | null;
+  navigation: RepositoryNavigation | null;
+  navigationLoading: boolean;
+  navigationError: ViewError | null;
+  scopeSwitching: boolean;
+  scopeError: ViewError | null;
+  scopeErrorTarget: RepositoryScope | null;
+  scopeErrorAction: "switch" | "refresh" | null;
+  mergeStatuses: Record<string, MergeStatus>;
+  mergeStatusLoading: boolean;
+  mergeStatusError: ViewError | null;
+}
+
+export interface ScopeSwitchResult {
+  selectedOid: string | undefined;
+  anchor: { oid: string; offset: number } | undefined;
 }
 
 export type SessionApi = Pick<RepositorySessionApi,
   "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "cancelHistoryRead" |
-  "refreshRepositorySession" | "recordRepositoryView" | "closeRepositorySession">;
+  "refreshRepositorySession" | "recordRepositoryView" | "closeRepositorySession" |
+  "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus">;
 
 function emptyView(revision: number, state: RepositoryViewState = "idle"): RepositoryView {
   return {
-    revision, state, session: null, repository: null, refs: [], refsTruncated: false, commits: [], hasMore: false,
+    revision, state, session: null, repository: null, refs: [], refsTruncated: false,
+    newSinceLastSeenStatus: "unavailable", lastSeenDividerOid: null, commits: [], hasMore: false,
     pageOffset: null, pageSize: 200, pageCursor: null, previousCursor: null, nextCursor: null,
-    pageLoading: false, refreshing: false, pageError: null, pageErrorKind: null, retryCursor: null,
+    windowPreviousCursor: null, windowNextCursor: null, canNavigatePrevious: false, canNavigateNext: false,
+    pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+    refreshing: false, pageError: null, pageErrorKind: null, retryCursor: null, retryDirection: "after",
     oldSelectedCommit: null, oldSelectedObservedAtUnixMs: null,
     selectionMissingOnPage: false, anchorMissing: false, anchorRestorationSpace: 0, pageRevision: 0,
+    windowRevision: 0, windowPageCount: 0,
     error: null, opening: null, notice: null, record: null,
+    navigation: null, navigationLoading: false, navigationError: null,
+    scopeSwitching: false, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null, mergeStatuses: {}, mergeStatusLoading: false, mergeStatusError: null,
   };
 }
 
@@ -82,11 +118,19 @@ export class RepositorySessionStore {
   private view = emptyView(0);
   private readonly listeners = new Set<() => void>();
   private operation = 0;
+  private openIntent = 0;
+  private navigationOperation = 0;
+  private mergeStatusOperation = 0;
+  private scopePending?: Promise<ScopeSwitchResult | undefined>;
   private pageOperation = 0;
   private refreshIntent = 0;
   private refreshRpcStarted = false;
   private refreshingSession?: RepositorySessionInfo;
   private pageRequest?: { cursor: string | null; done: Promise<void> };
+  private pages: HistoryPage[] = [];
+  private activePageCursor: string | null = null;
+  private markerUnavailable = false;
+  private viewportAnchorOid?: string;
   private recording?: { session: RepositorySessionInfo; done: Promise<void> };
   private shownSession?: RepositorySessionInfo;
 
@@ -100,7 +144,16 @@ export class RepositorySessionStore {
   };
 
   async open(path: string): Promise<void> {
+    const openIntent = ++this.openIntent;
+    const scopePending = this.scopePending;
+    if (scopePending) {
+      await scopePending.catch(() => undefined);
+      if (openIntent !== this.openIntent) return;
+    }
     const operation = ++this.operation;
+    ++this.navigationOperation;
+    ++this.mergeStatusOperation;
+    const pendingPage = this.pageRequest;
     ++this.pageOperation;
     ++this.refreshIntent;
     if (this.refreshingSession && !this.refreshRpcStarted && sameSession(this.view.session, this.refreshingSession)) {
@@ -109,7 +162,18 @@ export class RepositorySessionStore {
     }
     const previous = this.view;
     const keep = previous.state === "ready" && previous.session !== null ? previous.session : null;
-    this.update(keep ? { ...previous, opening: path, notice: null } : { ...emptyView(0, "loading"), opening: path });
+    this.update(keep
+      ? { ...previous, opening: path, notice: null, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+        navigationLoading: false, mergeStatusLoading: false }
+      : { ...emptyView(0, "loading"), opening: path });
+    if (!keep) this.pages = [];
+
+    if (pendingPage) {
+      this.pageRequest = undefined;
+      await settle(this.api.cancelHistoryRead());
+      await pendingPage.done;
+      if (operation !== this.operation) return;
+    }
 
     // The shown repository counts as viewed when the user switches away from it.
     if (keep) await this.recordView();
@@ -122,8 +186,140 @@ export class RepositorySessionStore {
       return;
     }
     const session = opened.value;
+    this.pages = [];
+    this.activePageCursor = null;
+    this.markerUnavailable = false;
+    this.viewportAnchorOid = undefined;
     this.update({ ...emptyView(0, "loading"), session, repository: session.repository });
     await this.readFirstPage(operation, session);
+  }
+
+  async loadNavigation(): Promise<void> {
+    const session = this.view.session;
+    if (!session || this.view.state !== "ready" || this.view.navigationLoading || this.view.opening !== null || this.view.refreshing || this.view.scopeSwitching) return;
+    const operation = ++this.navigationOperation;
+    this.update({ ...this.view, navigationLoading: true, navigationError: null });
+    const result = await settle(this.api.getRepositoryNavigation());
+    if (operation !== this.navigationOperation || !sameSession(this.view.session, session)) return;
+    if (!result.ok) {
+      this.update({ ...this.view, navigationLoading: false, navigationError: result.error });
+      return;
+    }
+    this.update({ ...this.view, navigation: result.value, navigationLoading: false, navigationError: null });
+  }
+
+  async loadRefMergeStatus(refNames: string[]): Promise<void> {
+    const session = this.view.session;
+    const names = [...new Set(refNames)].slice(0, 50);
+    if (!session || this.view.state !== "ready" || !names.length || this.view.mergeStatusLoading ||
+      this.view.opening !== null || this.view.refreshing || this.view.scopeSwitching) return;
+    const operation = ++this.mergeStatusOperation;
+    this.update({ ...this.view, mergeStatusLoading: true, mergeStatusError: null });
+    const result = await settle(this.api.getRefMergeStatus(names));
+    if (operation !== this.mergeStatusOperation || !sameSession(this.view.session, session)) return;
+    if (!result.ok) {
+      this.update({ ...this.view, mergeStatusLoading: false, mergeStatusError: result.error });
+      return;
+    }
+    const statuses = { ...this.view.mergeStatuses };
+    for (const item of result.value.statuses) statuses[item.name] = item.status;
+    this.update({ ...this.view, mergeStatuses: statuses, mergeStatusLoading: false, mergeStatusError: null });
+  }
+
+  async cancelRefMergeStatus(): Promise<void> {
+    ++this.mergeStatusOperation;
+    const { session } = this.view;
+    const pending = settle(this.api.cancelRefMergeStatus());
+    if (session) await pending;
+    if (session && sameSession(this.view.session, session)) this.update({ ...this.view, mergeStatusLoading: false });
+  }
+
+  switchScope(scope: RepositoryScope, selectedOid?: string, anchor?: { oid: string; offset: number }): Promise<ScopeSwitchResult | undefined> {
+    const session = this.view.session;
+    if (!session || this.view.state !== "ready" || this.view.scopeSwitching || this.view.refreshing || sameScope(session.scope, scope)) {
+      return Promise.resolve(undefined);
+    }
+    const pending = this.performScopeSwitch(scope, selectedOid, anchor);
+    this.scopePending = pending;
+    void pending.finally(() => { if (this.scopePending === pending) this.scopePending = undefined; }).catch(() => undefined);
+    return pending;
+  }
+
+  private async performScopeSwitch(scope: RepositoryScope, selectedOid?: string, anchor?: { oid: string; offset: number }): Promise<ScopeSwitchResult | undefined> {
+    const previous = this.view;
+    const session = previous.session;
+    if (!session || previous.state !== "ready" || previous.scopeSwitching || previous.refreshing || sameScope(session.scope, scope)) return undefined;
+    const operation = ++this.operation;
+    ++this.pageOperation;
+    ++this.refreshIntent;
+    ++this.navigationOperation;
+    ++this.mergeStatusOperation;
+    if (this.refreshingSession && sameSession(previous.session, this.refreshingSession)) {
+      this.refreshingSession = undefined;
+      this.refreshRpcStarted = false;
+    }
+    const pendingPage = this.pageRequest;
+    this.update({ ...previous, scopeSwitching: true, refreshing: false, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null, pageLoading: false,
+      pageRequestDirection: null, pageRequestKind: null, navigationLoading: false,
+      mergeStatusLoading: false, mergeStatusError: null });
+    if (pendingPage) {
+      this.pageRequest = undefined;
+      await settle(this.api.cancelHistoryRead());
+      await pendingPage.done;
+      if (operation !== this.operation) return undefined;
+    }
+    await settle(this.api.cancelRefMergeStatus());
+    if (operation !== this.operation || !sameSession(this.view.session, session)) return undefined;
+    await this.recordView();
+    if (operation !== this.operation || !sameSession(this.view.session, session)) return undefined;
+    const result = await settle(this.api.selectRepositoryScope(scope, previous.pageSize));
+    if (operation !== this.operation || !sameSession(this.view.session, session)) return undefined;
+    if (!result.ok) {
+      this.update({ ...this.view, scopeSwitching: false, scopeError: result.error, scopeErrorTarget: scope, scopeErrorAction: "switch" });
+      return undefined;
+    }
+    const { session: nextSession, page } = result.value;
+    if (!validHistoryPage(page, previous.pageSize) ||
+      nextSession.repositoryKey !== session.repositoryKey || nextSession.worktreeId !== session.worktreeId ||
+      nextSession.repository.path !== session.repository.path || !sameScope(nextSession.scope, scope) ||
+      nextSession.repoId === session.repoId || nextSession.generation === session.generation) {
+      this.update({ ...this.view, scopeSwitching: false, scopeError: { code: "PROTOCOL_ERROR", message: "范围切换返回的快照与窗口身份不匹配" }, scopeErrorTarget: scope, scopeErrorAction: "switch" });
+      return undefined;
+    }
+    const activeSelectionOid = this.selectedOid ?? selectedOid;
+    const selection = this.view.commits.find(commit => commit.oid === activeSelectionOid) ??
+      (this.view.oldSelectedCommit?.oid === activeSelectionOid ? this.view.oldSelectedCommit : null);
+    const oldSelectedObservedAtUnixMs = selection === this.view.oldSelectedCommit
+      ? this.view.oldSelectedObservedAtUnixMs : session.observedAtUnixMs;
+    const selectedStillLoaded = !selection || page.commits.some(commit => commit.oid === selection.oid);
+    const anchorStillLoaded = !anchor || page.commits.some(commit => commit.oid === anchor.oid);
+    this.shownSession = undefined;
+    this.pageRequest = undefined;
+    this.pages = [page];
+    this.activePageCursor = page.cursor;
+    this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
+    this.viewportAnchorOid = anchorStillLoaded ? anchor?.oid : undefined;
+    this.update({
+      ...this.view,
+      state: "ready", session: nextSession, repository: page.repository, refs: page.refs, refsTruncated: page.refsTruncated,
+      newSinceLastSeenStatus: page.newSinceLastSeenStatus,
+      lastSeenDividerOid: page.newSinceLastSeenStatus === "ready" ? page.lastSeenDividerOid : null,
+      commits: page.commits, hasMore: page.hasMore, pageOffset: page.offset, pageSize: page.pageSize,
+      pageCursor: page.cursor, previousCursor: page.previousCursor, nextCursor: page.nextCursor,
+      windowPreviousCursor: page.previousCursor, windowNextCursor: page.nextCursor,
+      canNavigatePrevious: page.previousCursor !== null, canNavigateNext: page.nextCursor !== null,
+      pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+      pageError: null, pageErrorKind: null, retryCursor: null,
+      oldSelectedCommit: selectedStillLoaded ? null : selection ?? null,
+      oldSelectedObservedAtUnixMs: selectedStillLoaded ? null : oldSelectedObservedAtUnixMs,
+      selectionMissingOnPage: Boolean(selection && !selectedStillLoaded),
+      anchorMissing: Boolean(anchor && !anchorStillLoaded), anchorRestorationSpace: 0,
+      pageRevision: previous.pageRevision + 1, windowRevision: previous.windowRevision + 1, windowPageCount: 1,
+      navigation: null, navigationLoading: false, navigationError: null, mergeStatuses: {},
+      mergeStatusLoading: false, mergeStatusError: null, scopeSwitching: false, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null,
+      record: null, error: null, notice: null,
+    });
+    return { selectedOid: selection?.oid, anchor: anchorStillLoaded ? anchor : undefined };
   }
 
   /** Re-reads the first page of the current session after a failed read. */
@@ -136,28 +332,65 @@ export class RepositorySessionStore {
   }
 
   async readPage(cursor: string | null): Promise<void> {
+    if (cursor !== null) await this.readPageAndReturn(cursor, "prefetch");
+  }
+
+  async previousPage(): Promise<string | undefined> {
+    if (this.view.pageLoading && this.view.pageRequestKind === "prefetch") await this.cancelPage();
+    const index = this.pages.findIndex(page => page.cursor === this.activePageCursor);
+    if (index > 0) {
+      const page = this.pages[index - 1]!;
+      this.setActivePage(page);
+      return page.commits.at(-1)?.oid;
+    }
+    if (this.pages[0]?.previousCursor === null || !this.pages[0]?.previousCursor) return undefined;
+    const cursor = this.pages[0]!.previousCursor!;
+    const page = await this.readPageAndReturn(cursor, "navigation");
+    return page?.commits.at(-1)?.oid;
+  }
+
+  async nextPage(): Promise<string | undefined> {
+    if (this.view.pageLoading && this.view.pageRequestKind === "prefetch") await this.cancelPage();
+    const index = this.pages.findIndex(page => page.cursor === this.activePageCursor);
+    if (index >= 0 && index < this.pages.length - 1) {
+      const page = this.pages[index + 1]!;
+      this.setActivePage(page);
+      return page.commits[0]?.oid;
+    }
+    if (this.pages.at(-1)?.nextCursor === null || !this.pages.at(-1)?.nextCursor) return undefined;
+    const cursor = this.pages.at(-1)!.nextCursor!;
+    const page = await this.readPageAndReturn(cursor, "navigation");
+    return page?.commits[0]?.oid;
+  }
+
+  async loadWindowEdge(direction: "before" | "after"): Promise<string | undefined> {
+    const cursor = direction === "before" ? this.view.windowPreviousCursor : this.view.windowNextCursor;
+    if (!cursor) return undefined;
+    const page = await this.readPageAndReturn(cursor, "navigation");
+    return direction === "before" ? page?.commits.at(-1)?.oid : page?.commits[0]?.oid;
+  }
+
+  async readPageAndReturn(cursor: string, kind: "prefetch" | "navigation" = "navigation"): Promise<HistoryPage | undefined> {
     const { session, state } = this.view;
-    if (!session || state !== "ready" || this.view.refreshing) return;
+    if (!session || state !== "ready" || this.view.refreshing || this.view.scopeSwitching) return undefined;
+    const direction = cursor === this.view.windowPreviousCursor ? "before" : "after";
+    if ((direction === "before" ? this.pages[0]?.previousCursor : this.pages.at(-1)?.nextCursor) !== cursor) return undefined;
     const token = ++this.pageOperation;
     const previous = this.pageRequest;
     if (previous) {
       await settle(this.api.cancelHistoryRead());
       await previous.done;
-      if (token !== this.pageOperation || !sameSession(this.view.session, session)) return;
+      if (token !== this.pageOperation || !sameSession(this.view.session, session)) return undefined;
     }
-    this.update({ ...this.view, pageLoading: true, pageError: null, pageErrorKind: null, anchorRestorationSpace: 0 });
-    const done = this.loadPage(token, session, cursor);
-    this.pageRequest = { cursor, done };
-    await done;
-    if (this.pageRequest?.done === done) this.pageRequest = undefined;
-  }
-
-  async previousPage(): Promise<void> {
-    if (this.view.previousCursor !== null) await this.readPage(this.view.previousCursor);
-  }
-
-  async nextPage(): Promise<void> {
-    if (this.view.nextCursor !== null) await this.readPage(this.view.nextCursor);
+    this.update({ ...this.view, pageLoading: true, pageRequestDirection: direction, pageRequestKind: kind, pageError: null, pageErrorKind: null, anchorRestorationSpace: 0 });
+    const done = this.loadPage(token, session, cursor, direction);
+    const tracked = done.then(() => undefined);
+    this.pageRequest = { cursor, done: tracked };
+    const page = await done;
+    if (page && kind === "navigation") this.activePageCursor = page.cursor;
+    if (page && kind === "navigation") this.updateActivePageFields();
+    if (this.pageRequest?.done === tracked) this.pageRequest = undefined;
+    return page;
   }
 
   async cancelPage(): Promise<void> {
@@ -169,19 +402,21 @@ export class RepositorySessionStore {
     await active.done;
     if (token !== this.pageOperation || !sameSession(this.view.session, session)) return;
     if (this.pageRequest === active) this.pageRequest = undefined;
-    this.update({ ...this.view, pageLoading: false });
+    this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null });
   }
 
   async retryPage(selectedOid = this.selectedOid): Promise<void> {
     if (this.view.pageErrorKind === "refresh") return this.refresh(selectedOid);
-    if (this.view.pageErrorKind === "read") return this.readPage(this.view.retryCursor);
+    if (this.view.pageErrorKind === "read") return this.readPageAndReturn(this.view.retryCursor ?? "", "navigation").then(() => undefined);
     if (this.view.state === "error") return this.retry();
   }
 
   async refresh(selectedOid?: string, anchor?: { oid: string; offset: number }): Promise<void> {
     const session = this.view.session;
-    if (!session || this.view.state !== "ready" || this.view.refreshing) return;
+    if (!session || this.view.state !== "ready" || this.view.refreshing || this.view.scopeSwitching) return;
     const intent = ++this.refreshIntent;
+    ++this.navigationOperation;
+    ++this.mergeStatusOperation;
     const selected = this.view.commits.find(commit => commit.oid === selectedOid) ?? this.view.oldSelectedCommit;
     const oldSelectedObservedAtUnixMs = this.view.oldSelectedCommit && selected === this.view.oldSelectedCommit
       ? this.view.oldSelectedObservedAtUnixMs : session.observedAtUnixMs;
@@ -189,7 +424,10 @@ export class RepositorySessionStore {
     ++this.pageOperation;
     this.refreshingSession = session;
     this.refreshRpcStarted = false;
-    this.update({ ...this.view, refreshing: true, pageLoading: false, pageError: null, pageErrorKind: null, anchorMissing: false, anchorRestorationSpace: 0 });
+    this.update({ ...this.view, refreshing: true, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: null, pageErrorKind: null, anchorMissing: false, anchorRestorationSpace: 0,
+      navigationLoading: false, mergeStatusLoading: false });
+    await settle(this.api.cancelRefMergeStatus());
+    if (intent !== this.refreshIntent || !sameSession(this.view.session, session)) return;
     await this.recordView();
     if (intent !== this.refreshIntent || !sameSession(this.view.session, session)) {
       if (sameSession(this.view.session, session) && this.refreshingSession === session) {
@@ -209,7 +447,11 @@ export class RepositorySessionStore {
       if (oldPageRequest) await oldPageRequest.done;
       const latest = this.view;
       if (!sameSession(latest.session, session)) return;
-      this.update({ ...latest, refreshing: false, pageError: result.error, pageErrorKind: "refresh" });
+      const unavailableScope = result.error.code === "SCOPE_UNAVAILABLE";
+      this.update({ ...latest, refreshing: false, pageError: result.error, pageErrorKind: "refresh",
+        scopeError: unavailableScope ? result.error : latest.scopeError,
+        scopeErrorTarget: unavailableScope ? session.scope : latest.scopeErrorTarget,
+        scopeErrorAction: unavailableScope ? "refresh" : latest.scopeErrorAction });
       return;
     }
     const { session: refreshedSession, page } = result.value;
@@ -221,6 +463,9 @@ export class RepositorySessionStore {
     const anchorLoaded = !anchor || page.commits.some(commit => commit.oid === anchor.oid);
     this.shownSession = undefined;
     this.pageRequest = undefined;
+    this.pages = [page];
+    this.activePageCursor = page.cursor;
+    this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
     this.update({
       ...current,
       state: "ready",
@@ -228,6 +473,8 @@ export class RepositorySessionStore {
       repository: page.repository,
       refs: page.refs,
       refsTruncated: page.refsTruncated,
+      newSinceLastSeenStatus: page.newSinceLastSeenStatus,
+      lastSeenDividerOid: page.newSinceLastSeenStatus === "ready" ? page.lastSeenDividerOid : null,
       commits: page.commits,
       hasMore: page.hasMore,
       pageOffset: page.offset,
@@ -235,7 +482,13 @@ export class RepositorySessionStore {
       pageCursor: page.cursor,
       previousCursor: page.previousCursor,
       nextCursor: page.nextCursor,
+      windowPreviousCursor: page.previousCursor,
+      windowNextCursor: page.nextCursor,
+      canNavigatePrevious: page.previousCursor !== null,
+      canNavigateNext: page.nextCursor !== null,
       pageLoading: false,
+      pageRequestDirection: null,
+      pageRequestKind: null,
       refreshing: false,
       pageError: null,
       pageErrorKind: null,
@@ -246,6 +499,10 @@ export class RepositorySessionStore {
       anchorMissing: Boolean(anchor && !anchorLoaded),
       anchorRestorationSpace: 0,
       pageRevision: current.pageRevision + 1,
+      windowRevision: current.windowRevision + 1,
+      windowPageCount: 1,
+      navigation: null, navigationLoading: false, navigationError: null, mergeStatuses: {},
+      mergeStatusLoading: false, mergeStatusError: null, scopeError: null, scopeErrorTarget: null, scopeErrorAction: null,
       opening: current.opening,
       error: null,
     });
@@ -253,9 +510,18 @@ export class RepositorySessionStore {
 
   /** Stops opening or reading. The session API can only stop by closing, so this closes the repository. */
   async cancel(): Promise<void> {
-    if (this.view.state !== "loading" && this.view.opening === null) return;
+    if (this.view.state !== "loading" && this.view.opening === null && !this.view.pageLoading &&
+      !this.view.refreshing && !this.view.scopeSwitching) return;
     const operation = ++this.operation;
+    ++this.refreshIntent;
+    ++this.pageOperation;
+    ++this.navigationOperation;
+    ++this.mergeStatusOperation;
+    this.refreshingSession = undefined;
+    this.refreshRpcStarted = false;
     this.update(emptyView(0, "cancelled"));
+    this.pages = [];
+    this.viewportAnchorOid = undefined;
     const closed = await settle(this.api.closeRepositorySession());
     if (operation !== this.operation || closed.ok) return;
     this.update({ ...this.view, error: closed.error });
@@ -300,13 +566,15 @@ export class RepositorySessionStore {
     this.pageOperation += 1;
     this.refreshIntent += 1;
     this.pageRequest = undefined;
+    this.pages = [];
+    this.viewportAnchorOid = undefined;
     this.refreshingSession = undefined;
     this.refreshRpcStarted = false;
     if (view.state === "ready") {
-      this.update({ ...view, session: null, opening: null, pageLoading: false, refreshing: false });
+      this.update({ ...view, session: null, opening: null, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, refreshing: false });
       return;
     }
-    this.update({ ...view, session: null, opening: null, pageLoading: false, refreshing: false, state: "error", error: { code: "CORE_EXITED", message: "核心已退出，仓库读取已停止" } });
+    this.update({ ...view, session: null, opening: null, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, refreshing: false, state: "error", error: { code: "CORE_EXITED", message: "核心已退出，仓库读取已停止" } });
   }
 
   private async readFirstPage(operation: number, session: RepositorySessionInfo): Promise<void> {
@@ -320,39 +588,78 @@ export class RepositorySessionStore {
       this.update({ ...this.view, state: "error", error: { code: "PROTOCOL_ERROR", message: "核心返回的历史页不完整" } });
       return;
     }
-    this.applyPage(session, page.value, "ready", { retryCursor: null, pageErrorKind: null });
+    this.pages = [page.value];
+    this.activePageCursor = page.value.cursor;
+    this.markerUnavailable = false;
+    this.applyWindow(session, this.pages, "ready", { retryCursor: null, retryDirection: "after", pageErrorKind: null });
   }
 
-  private async loadPage(token: number, session: RepositorySessionInfo, cursor: string | null): Promise<void> {
+  private async loadPage(token: number, session: RepositorySessionInfo, cursor: string, direction: "before" | "after"): Promise<HistoryPage | undefined> {
     const requestDone = settle(this.api.readHistoryPage(cursor, this.view.pageSize)).then(result => {
-      if (token !== this.pageOperation || !sameSession(this.view.session, session)) return;
+      if (token !== this.pageOperation || !sameSession(this.view.session, session)) return undefined;
       if (!result.ok) {
-        this.update({ ...this.view, pageLoading: false, pageError: result.error, pageErrorKind: "read", retryCursor: cursor });
-        return;
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: result.error, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
+        return undefined;
       }
       if (!validHistoryPage(result.value, this.view.pageSize)) {
-        this.update({ ...this.view, pageLoading: false, pageError: { code: "PROTOCOL_ERROR", message: "核心返回的历史页不完整" }, pageErrorKind: "read", retryCursor: cursor });
-        return;
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: { code: "PROTOCOL_ERROR", message: "核心返回的历史页不完整" }, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
+        return undefined;
       }
-      const selectedPresent = this.view.commits.some(commit => commit.oid === this.selectedOid);
-      this.applyPage(session, result.value, "ready", {
-        selectionMissingOnPage: Boolean(this.selectedOid && !result.value.commits.some(commit => commit.oid === this.selectedOid)),
-        oldSelectedCommit: selectedPresent ? null : this.view.oldSelectedCommit,
-        oldSelectedObservedAtUnixMs: selectedPresent ? null : this.view.oldSelectedObservedAtUnixMs,
+      const current = this.view;
+      const edge = direction === "before" ? this.pages[0] : this.pages.at(-1);
+      const adjacent = direction === "before"
+        ? result.value.offset + result.value.commits.length === edge?.offset && result.value.nextCursor === edge.cursor
+        : result.value.offset === (edge?.offset ?? -1) + (edge?.commits.length ?? 0) && result.value.previousCursor === edge?.cursor;
+      const duplicate = result.value.commits.some(commit => current.commits.some(existing => existing.oid === commit.oid));
+      if (!adjacent || duplicate) {
+        this.update({ ...current, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: { code: "PROTOCOL_ERROR", message: "核心返回的历史页与当前窗口不连续" }, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
+        return undefined;
+      }
+      const nextPages = direction === "before" ? [result.value, ...this.pages] : [...this.pages, result.value];
+      while (nextPages.reduce((total, item) => total + item.commits.length, 0) > 2_000) {
+        const protectedIndex = this.viewportAnchorOid
+          ? nextPages.findIndex(item => item.commits.some(commit => commit.oid === this.viewportAnchorOid))
+          : -1;
+        if (direction === "before") {
+          if (protectedIndex === nextPages.length - 1) nextPages.shift();
+          else nextPages.pop();
+        } else if (protectedIndex === 0) nextPages.pop();
+        else nextPages.shift();
+      }
+      this.pages = nextPages;
+      const selectedInWindow = current.commits.find(commit => commit.oid === this.selectedOid);
+      const selectedCommit = selectedInWindow ?? current.oldSelectedCommit;
+      const selectedRetained = !selectedCommit || nextPages.some(item => item.commits.some(commit => commit.oid === selectedCommit.oid));
+      const selectedLoaded = Boolean(selectedCommit && nextPages.some(item => item.commits.some(commit => commit.oid === selectedCommit.oid)));
+      this.applyWindow(session, nextPages, "ready", {
+        oldSelectedCommit: selectedLoaded ? null : selectedRetained ? current.oldSelectedCommit : selectedCommit ?? null,
+        oldSelectedObservedAtUnixMs: selectedLoaded ? null : selectedRetained ? current.oldSelectedObservedAtUnixMs : selectedInWindow ? session.observedAtUnixMs : current.oldSelectedObservedAtUnixMs,
+        selectionMissingOnPage: Boolean(this.selectedOid && !nextPages.some(item => item.commits.some(commit => commit.oid === this.selectedOid))),
         retryCursor: cursor,
+        retryDirection: direction,
         pageErrorKind: null,
       });
+      return result.value;
     });
-    await requestDone;
+    return await requestDone;
   }
 
   private selectedOid?: string;
 
   setSelectedOid(oid: string | undefined): void {
     this.selectedOid = oid;
+    const selectedPage = oid ? this.pages.find(page => page.commits.some(commit => commit.oid === oid)) : undefined;
+    if (selectedPage && selectedPage.cursor !== this.activePageCursor) {
+      this.activePageCursor = selectedPage.cursor;
+      this.updateActivePageFields();
+    }
     if (this.view.selectionMissingOnPage && this.view.commits.some(commit => commit.oid === oid)) {
       this.update({ ...this.view, selectionMissingOnPage: false, oldSelectedCommit: null });
     }
+  }
+
+  setViewportAnchor(oid: string | undefined): void {
+    this.viewportAnchorOid = oid;
   }
 
   setAnchorRestorationSpace(pixels: number): void {
@@ -361,31 +668,74 @@ export class RepositorySessionStore {
     this.update({ ...this.view, anchorRestorationSpace: bounded });
   }
 
-  private applyPage(
+  private applyWindow(
     session: RepositorySessionInfo,
-    page: HistoryPage,
+    pages: HistoryPage[],
     state: "ready" | "loading",
     extra: Partial<RepositoryView> = {},
   ): void {
+    const first = pages[0];
+    const last = pages.at(-1);
+    if (!first || !last) return;
+    const activePage = pages.find(page => page.cursor === this.activePageCursor) ?? first;
+    this.activePageCursor = activePage.cursor;
+    if (pages.some(page => page.newSinceLastSeenStatus === "unavailable")) this.markerUnavailable = true;
+    const newSinceLastSeenStatus: NewSinceLastSeenStatus = this.markerUnavailable
+      ? "unavailable"
+      : pages.some(page => page.newSinceLastSeenStatus === "firstView") ? "firstView" : "ready";
+    const commits = pages.flatMap(page => page.commits).map(commit =>
+      newSinceLastSeenStatus === "ready" ? commit : { ...commit, isNewSinceLastSeen: false });
+    const lastSeenDividerOid = newSinceLastSeenStatus === "ready"
+      ? pages.find(page => page.lastSeenDividerOid !== null)?.lastSeenDividerOid ?? null
+      : null;
     this.update({
       ...this.view,
       state,
       session,
-      repository: page.repository,
-      refs: page.refs,
-      refsTruncated: page.refsTruncated,
-      commits: page.commits,
-      hasMore: page.hasMore,
-      pageOffset: page.offset,
-      pageSize: page.pageSize,
-      pageCursor: page.cursor,
-      previousCursor: page.previousCursor,
-      nextCursor: page.nextCursor,
+      repository: first.repository,
+      refs: first.refs,
+      refsTruncated: first.refsTruncated,
+      newSinceLastSeenStatus,
+      lastSeenDividerOid,
+      commits,
+      hasMore: last.nextCursor !== null,
+      pageOffset: first.offset,
+      pageSize: first.pageSize,
+      pageCursor: activePage.cursor,
+      previousCursor: activePage.previousCursor,
+      nextCursor: activePage.nextCursor,
+      windowPreviousCursor: first.previousCursor,
+      windowNextCursor: last.nextCursor,
+      canNavigatePrevious: pages[0] !== activePage || activePage.previousCursor !== null,
+      canNavigateNext: pages.at(-1) !== activePage || activePage.nextCursor !== null,
       pageLoading: false,
+      pageRequestDirection: null,
+      pageRequestKind: null,
+      windowPageCount: pages.length,
+      windowRevision: this.view.windowRevision + 1,
       anchorRestorationSpace: 0,
       pageError: null,
       error: null,
       ...extra,
+    });
+  }
+
+  private setActivePage(page: HistoryPage): void {
+    this.activePageCursor = page.cursor;
+    this.updateActivePageFields();
+  }
+
+  private updateActivePageFields(): void {
+    const index = this.pages.findIndex(page => page.cursor === this.activePageCursor);
+    if (index < 0) return;
+    const page = this.pages[index]!;
+    this.update({
+      ...this.view,
+      pageCursor: page.cursor,
+      previousCursor: page.previousCursor,
+      nextCursor: page.nextCursor,
+      canNavigatePrevious: index > 0 || page.previousCursor !== null,
+      canNavigateNext: index < this.pages.length - 1 || page.nextCursor !== null,
     });
   }
 
@@ -414,12 +764,19 @@ function sameSession(left: RepositorySessionInfo | null, right: RepositorySessio
   return left?.repoId === right.repoId && left.generation === right.generation;
 }
 
+function sameScope(left: RepositoryScope, right: RepositoryScope): boolean {
+  return typeof left === "string" || typeof right === "string"
+    ? left === right
+    : "ref" in left && "ref" in right ? left.ref === right.ref
+      : "worktree" in left && "worktree" in right ? left.worktree === right.worktree : false;
+}
+
 function sameRepository(left: RepositorySessionInfo, right: RepositorySessionInfo): boolean {
   return left.repositoryKey === right.repositoryKey && left.worktreeId === right.worktreeId;
 }
 
 function validHistoryPage(page: HistoryPage, requestedPageSize: number): boolean {
-  return page.pageSize === requestedPageSize && page.commits.length <= requestedPageSize &&
+  return Number.isInteger(page.offset) && page.offset >= 0 && page.pageSize === requestedPageSize && page.commits.length <= requestedPageSize &&
     page.hasMore === (page.nextCursor !== null);
 }
 

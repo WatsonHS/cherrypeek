@@ -7,7 +7,9 @@
         "getRuntimeInfo",
         "readRepositoryPreview",
         "repositorySessions",
-        "historyPagination"
+        "historyPagination",
+        "historyNewSinceLastSeen",
+        "repositoryScopes"
       ],
       "type": "string"
     },

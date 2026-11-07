@@ -17,7 +17,7 @@ test("control and legacy null-context requests bypass the session gate; session 
     coreVersion: "0.1.0-test",
     pid: 8123,
     git: { available: true, version: "git version fixture", error: null },
-      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination"],
+      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination", "historyNewSinceLastSeen"],
   };
   stdin.on("data", bytes => {
     for (const line of bytes.toString("utf8").trim().split("\n")) {
@@ -140,7 +140,7 @@ test("cancelled open drains its terminal response; uncertain open timeout is fat
   }
 });
 
-test("history page cancellation drains and discards chunks; refresh retains a committed terminal", async () => {
+test("history page cancellation drains; scope transport validates requests and retains a committed terminal", async () => {
   const stdout = new PassThrough();
   const stdin = new PassThrough();
   const requests = [];
@@ -151,7 +151,7 @@ test("history page cancellation drains and discards chunks; refresh retains a co
   const ready = {
     protocolVersion: 1, coreVersion: "0.1.0-test", pid: 8126,
     git: { available: true, version: "git version fixture", error: null },
-    capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "historyPagination"],
+      capabilities: ["getRuntimeInfo", "readRepositoryPreview", "repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen"],
   };
   stdin.on("data", bytes => {
     for (const line of bytes.toString("utf8").trim().split("\n")) {
@@ -167,6 +167,32 @@ test("history page cancellation drains and discards chunks; refresh retains a co
 
   try {
     await transport.handshake(8126);
+    const navigation = transport.request("getRepositoryNavigation", {}, session, { timeoutMs: 1000 });
+    await new Promise(resolve => setImmediate(resolve));
+    const navigationRequest = requests.find(item => item.method === "getRepositoryNavigation");
+    assert.ok(navigationRequest, "navigation uses the current session protocol route");
+    respond(navigationRequest, 0, true, { section: "repositoryNavigation", navigation: {
+      refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 100,
+    } }, 0);
+    assert.deepEqual((await navigation).coverage, { complete: true, processed: 0 });
+    await assert.rejects(transport.request("getRepositoryNavigation", { unexpected: true }, session), error => error.code === "INVALID_REQUEST");
+    await assert.rejects(transport.request("selectRepositoryScope", { pageSize: 200, scope: { ref: "", worktree: "x" } }, session), error => error.code === "INVALID_REQUEST");
+    await assert.rejects(transport.request("refMergeStatus", { refNames: [] }, session), error => error.code === "INVALID_REQUEST");
+    const abortMerge = new AbortController();
+    const merge = transport.request("refMergeStatus", { refNames: ["refs/heads/main"] }, session, {
+      signal: abortMerge.signal, drainAfterAbort: true, timeoutMs: 1000,
+    });
+    const mergeRejected = assert.rejects(merge, error => error.code === "CANCELLED");
+    await new Promise(resolve => setImmediate(resolve));
+    const mergeRequest = requests.find(item => item.method === "refMergeStatus");
+    assert.ok(mergeRequest, "merge-status queries use the current session protocol route");
+    abortMerge.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    respond(mergeRequest, 0, true, { section: "refMergeStatus", result: { defaultBase: null, statuses: [
+      { name: "refs/heads/main", oid: "a".repeat(40), status: "unavailable" },
+    ] } }, 1);
+    await mergeRejected;
+
     const abortPage = new AbortController();
     const delivered = [];
     const page = transport.request("readHistoryPage", { cursor: null, pageSize: 200 }, session, {
@@ -180,24 +206,25 @@ test("history page cancellation drains and discards chunks; refresh retains a co
     const pageRequest = requests.find(item => item.method === "readHistoryPage");
     assert.ok(pageRequest);
     respond(pageRequest, 0, true, { section: "historyPage", commits: [], offset: 0, pageSize: 200,
-      cursor: "cursor-0", previousCursor: null, hasMore: false }, 0);
+      cursor: "cursor-0", previousCursor: null, hasMore: false,
+      newSinceLastSeenStatus: "firstView", lastSeenDividerOid: null }, 0);
     await pageRejected;
     assert.deepEqual(delivered, [], "a cancelled page drains framing without delivering payload chunks");
 
-    const abortRefresh = new AbortController();
+    const abortScope = new AbortController();
     const chunks = [];
-    const refresh = transport.request("refreshRepository", { pageSize: 200 }, session, {
-      signal: abortRefresh.signal, retainResultAfterAbort: true, fatalOnTimeout: true, timeoutMs: 1000,
+    const scope = transport.request("selectRepositoryScope", { pageSize: 200, scope: "allBranches" }, session, {
+      signal: abortScope.signal, retainResultAfterAbort: true, fatalOnTimeout: true, timeoutMs: 1000,
       onChunk: chunk => chunks.push(chunk),
     });
     await new Promise(resolve => setImmediate(resolve));
-    abortRefresh.abort();
+    abortScope.abort();
     await new Promise(resolve => setImmediate(resolve));
-    const refreshRequest = requests.find(item => item.method === "refreshRepository");
-    assert.ok(refreshRequest);
-    respond(refreshRequest, 0, true, { section: "repositoryClosed", closed: true }, 1);
-    assert.deepEqual((await refresh).coverage, { complete: true, processed: 1 });
-    assert.equal(chunks.length, 1, "a committed mutation terminal remains visible after abort");
+    const scopeRequest = requests.find(item => item.method === "selectRepositoryScope");
+    assert.ok(scopeRequest);
+    respond(scopeRequest, 0, true, { section: "repositoryClosed", closed: true }, 1);
+    assert.deepEqual((await scope).coverage, { complete: true, processed: 1 });
+    assert.equal(chunks.length, 1, "a committed scope mutation terminal remains visible after abort");
 
     const malformed = transport.request("readHistoryPage", { cursor: null, pageSize: 200 }, session, {
       timeoutMs: 1000, drainAfterAbort: true, fatalOnTimeout: true,

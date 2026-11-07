@@ -2,7 +2,7 @@ import * as React from "react";
 import { Check, ChevronDown, ChevronUp, Copy, ExternalLink } from "lucide-react";
 import type { CommitIdentity, CommitSummary, RepositoryInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
-import { homeAbbreviated, identityTime, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
+import { homeAbbreviated, identityTime, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { refsByTarget, RefTags } from "./commit-list.js";
 import { IdentityAvatar } from "./identity-avatar.js";
@@ -12,10 +12,11 @@ import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
-export function CommitDetail({ preview, selectedOid, onSelect }: {
+export function CommitDetail({ preview, selectedOid, onSelect, onMoveSelection }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
+  onMoveSelection(delta: -1 | 1): Promise<void>;
 }): React.JSX.Element {
   const commits = preview.commits;
   const index = commits.findIndex(commit => commit.oid === selectedOid);
@@ -24,6 +25,7 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
   const byOid = React.useMemo(() => new Map(commits.map(item => [item.oid, item])), [commits]);
   const repository = preview.repository;
+  const otherWorktrees = !oldSelection ? (preview.navigation?.worktrees ?? []).filter(worktree => !worktree.isCurrent && worktree.headOid === commit?.oid) : [];
 
   if (!commit || !repository) {
     return <section aria-label="提交详情" className="flex min-w-0 flex-1 items-center justify-center bg-panel">
@@ -42,14 +44,14 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
         <div className="flex-1" />
         <HandoffMenu commit={commit} repository={repository} />
         <CopyOidButton oid={commit.oid} />
-        <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={index <= 0}
-          onClick={() => onSelect(commits[index - 1]!.oid)}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
-        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={index < 0 || index >= commits.length - 1}
-          onClick={() => onSelect(commits[index + 1]!.oid)}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
+        <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={index < 0 || (index === 0 && preview.windowPreviousCursor === null)}
+          onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
+        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null)}
+          onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
       </div>
 
       {oldSelection ? <p role="status" className="m-0 rounded-md border border-line bg-bg px-3 py-2 text-xs text-fg3">
-        这条详情来自刷新前的观察 {preview.oldSelectedObservedAtUnixMs ? new Date(preview.oldSelectedObservedAtUnixMs).toLocaleString() : ""}；它不在当前页，不能据此判断是否已不可达。
+        这条提交不在当前已加载窗口{preview.oldSelectedObservedAtUnixMs ? `（来自 ${new Date(preview.oldSelectedObservedAtUnixMs).toLocaleString()} 的观察）` : ""}；它可能仍在当前范围的更深位置，这里不推断整个范围的可达性。
       </p> : null}
 
       <div className="flex flex-col gap-2">
@@ -98,6 +100,9 @@ export function CommitDetail({ preview, selectedOid, onSelect }: {
                 {!oldSelection ? <><dt className="text-fg3">HEAD</dt><dd className="m-0 text-fg2">{isHead
                   ? `本窗口 HEAD 指向这里${repository.headReference ? `（${shortRefName(repository.headReference)}）` : "（detached）"}`
                   : "不是本窗口 HEAD"}</dd></> : null}
+                {otherWorktrees.length ? <><dt className="text-fg3">其他 worktree</dt><dd className="m-0 flex flex-col gap-1 text-fg2">
+                  {otherWorktrees.map(worktree => <span key={worktree.id} title={worktree.path}>{repositoryName(worktree.path)} · {worktree.isMain ? "主" : "linked"}{worktree.isDetached ? " · detached HEAD" : ""}</span>)}
+                </dd></> : null}
                 <dt className="text-fg3">包含它的分支</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-2">
                   <Button variant="outline" size="sm" disabled>按需计算</Button>

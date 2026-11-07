@@ -1,4 +1,8 @@
-use crate::{history::HistoryState, repository::DiscoveredRepository, session_store::SessionStore};
+use crate::{
+    history::{Baseline, HistoryState},
+    repository::DiscoveredRepository,
+    session_store::SessionStore,
+};
 use commitscope_core::{
     ErrorCode, RecentRepository, RepositoryScope, RepositorySessionInfo, SessionPersistenceStatus,
     StoreStatus,
@@ -62,17 +66,27 @@ impl SessionManager {
         cancelled: &AtomicBool,
         discovered: Arc<DiscoveredRepository>,
     ) -> Result<SessionCommit, SessionError> {
-        self.commit_open_with_history(intent, cancelled, discovered, Arc::new(HistoryState::new()))
+        self.commit_open_with_history(
+            intent,
+            cancelled,
+            discovered,
+            Arc::new(HistoryState::new()),
+            None,
+            RepositoryScope::Head,
+        )
     }
 
-    pub fn commit_refresh(
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_scope(
         &mut self,
         intent: u64,
         expected_repo_id: &str,
         expected_generation: &str,
         cancelled: &AtomicBool,
+        scope: RepositoryScope,
         discovered: Arc<DiscoveredRepository>,
         history: Arc<HistoryState>,
+        baseline: Baseline,
     ) -> Result<SessionCommit, SessionError> {
         let current = match self.require_current(expected_repo_id, expected_generation) {
             Ok(current) => current,
@@ -91,7 +105,14 @@ impl SessionManager {
                 "The selected path no longer identifies the open repository worktree",
             ));
         }
-        self.commit_open_with_history(intent, cancelled, discovered, history)
+        self.commit_open_with_history(
+            intent,
+            cancelled,
+            discovered,
+            history,
+            Some(baseline),
+            scope,
+        )
     }
 
     fn commit_open_with_history(
@@ -100,6 +121,8 @@ impl SessionManager {
         cancelled: &AtomicBool,
         discovered: Arc<DiscoveredRepository>,
         history: Arc<HistoryState>,
+        baseline_override: Option<Baseline>,
+        scope: RepositoryScope,
     ) -> Result<SessionCommit, SessionError> {
         if cancelled.load(Ordering::Acquire) || intent != self.latest_open_intent {
             self.pending_opens.remove(&intent);
@@ -128,21 +151,29 @@ impl SessionManager {
             &discovered.info,
             &repository_key,
             &worktree_id,
+            &scope,
             observed_at_unix_ms,
         );
+
+        let baseline = baseline_override.unwrap_or(Baseline {
+            previous_view: stored.previous_view,
+            status: stored.last_seen_status,
+        });
+        history.set_baseline(baseline.clone());
 
         let info = RepositorySessionInfo {
             repo_id,
             generation,
             repository_key,
             worktree_id,
-            scope: RepositoryScope::Head,
+            scope,
+            tips: discovered.scope_tips.clone(),
             observed_at_unix_ms,
             repository: discovered.info.clone(),
-            previous_view: stored.previous_view,
+            previous_view: baseline.previous_view,
             persistence: SessionPersistenceStatus {
                 recent: stored.recent_status,
-                last_seen: stored.last_seen_status,
+                last_seen: baseline.status,
             },
         };
         let session = Arc::new(RepositorySession {
@@ -185,6 +216,25 @@ impl SessionManager {
         let session = self.require_current(repo_id, generation)?;
         let result = self.store.record_view(&session.info);
         Ok((result.saved, result.status))
+    }
+
+    pub fn capture_previous_view(
+        &self,
+        repo_id: &str,
+        generation: &str,
+        scope: &RepositoryScope,
+    ) -> Result<Baseline, SessionError> {
+        let session = self.require_current(repo_id, generation)?;
+        let (previous_view, status) = self.store.capture_previous_view(
+            &session.info.repository,
+            &session.info.repository_key,
+            &session.info.worktree_id,
+            scope,
+        );
+        Ok(Baseline {
+            previous_view,
+            status,
+        })
     }
 
     pub fn close(&mut self, repo_id: &str, generation: &str) -> Result<String, SessionError> {

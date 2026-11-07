@@ -44,6 +44,9 @@ pub struct DiscoveredRepository {
     pub refs_truncated: bool,
     pub oid_length: usize,
     pub graph_boundary: GraphBoundaryFingerprint,
+    pub scope_tips: Vec<String>,
+    pub navigation:
+        Result<commitscope_core::RepositoryNavigation, crate::navigation::NavigationError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,13 +163,133 @@ pub fn discover_repository(
     if cancelled.load(Ordering::Acquire) {
         return Err(cancelled_error());
     }
+    let observed_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    let mut navigation = crate::navigation::capture(
+        executable,
+        &repository.path,
+        repository
+            .worktree_path
+            .as_deref()
+            .unwrap_or(&repository.path),
+        &repository.common_dir,
+        &repository.object_format,
+        &refs,
+        refs_truncated,
+        observed_at_unix_ms,
+        cancelled,
+        deadline,
+    );
+    if cancelled.load(Ordering::Acquire) {
+        return Err(cancelled_error());
+    }
+    if let Some(first) = navigation.as_ref().ok().cloned() {
+        let refs_recheck = read_refs(&git, &path, oid_length, cancelled, deadline);
+        match refs_recheck {
+            Ok((current_refs, current_truncated)) if current_refs == refs && current_truncated == refs_truncated => {}
+            Ok(_) => navigation = Err(crate::navigation::NavigationError {
+                code: ErrorCode::SnapshotChanged,
+                message: "References changed while the navigation snapshot was being captured; refresh and retry".into(),
+            }),
+            Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
+            Err(error) => navigation = Err(crate::navigation::NavigationError { code: error.code, message: error.message }),
+        }
+        if navigation.is_ok() {
+            let second = crate::navigation::capture(
+                executable,
+                &repository.path,
+                repository
+                    .worktree_path
+                    .as_deref()
+                    .unwrap_or(&repository.path),
+                &repository.common_dir,
+                &repository.object_format,
+                &refs,
+                refs_truncated,
+                observed_at_unix_ms,
+                cancelled,
+                deadline,
+            );
+            match second {
+                Ok(second) if second.worktrees == first.worktrees
+                    && second.worktrees_truncated == first.worktrees_truncated
+                    && second.default_base == first.default_base => {}
+                Ok(_) => navigation = Err(crate::navigation::NavigationError {
+                    code: ErrorCode::SnapshotChanged,
+                    message: "Worktrees changed while the navigation snapshot was being captured; refresh and retry".into(),
+                }),
+                Err(error) if error.code == ErrorCode::Cancelled => return Err(repository_navigation_error(error)),
+                Err(error) => navigation = Err(error),
+            }
+        }
+        if navigation.is_ok() {
+            match symbolic_head(&git, &path, cancelled, deadline) {
+                Ok(current_reference) => match resolve_head(
+                    &git,
+                    &path,
+                    current_reference.as_deref(),
+                    oid_length,
+                    cancelled,
+                    deadline,
+                ) {
+                    Ok(HeadState::Commit(oid)) => {
+                        if current_reference != repository.head_reference
+                            || Some(oid) != repository.head_oid
+                        {
+                            navigation = Err(crate::navigation::NavigationError {
+                                code: ErrorCode::SnapshotChanged,
+                                message: "HEAD changed while the navigation snapshot was being captured; refresh and retry".into(),
+                            });
+                        }
+                    }
+                    Ok(HeadState::Unborn) => {
+                        if current_reference != repository.head_reference
+                            || repository.head_oid.is_some()
+                        {
+                            navigation = Err(crate::navigation::NavigationError {
+                                code: ErrorCode::SnapshotChanged,
+                                message: "HEAD changed while the navigation snapshot was being captured; refresh and retry".into(),
+                            });
+                        }
+                    }
+                    Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
+                    Err(error) => {
+                        navigation = Err(crate::navigation::NavigationError {
+                            code: error.code,
+                            message: error.message,
+                        })
+                    }
+                },
+                Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
+                Err(error) => {
+                    navigation = Err(crate::navigation::NavigationError {
+                        code: error.code,
+                        message: error.message,
+                    })
+                }
+            }
+        }
+    }
     Ok(DiscoveredRepository {
+        scope_tips: head_oid.into_iter().collect(),
         info: repository,
         refs,
         refs_truncated,
         oid_length,
         graph_boundary,
+        navigation,
     })
+}
+
+fn repository_navigation_error(error: crate::navigation::NavigationError) -> PreviewError {
+    PreviewError {
+        code: error.code,
+        message: error.message,
+        retryable: false,
+    }
 }
 
 pub fn read_discovered_preview(
@@ -175,18 +298,18 @@ pub fn read_discovered_preview(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<PreviewTail, PreviewError> {
-    let Some(head_oid) = discovered.info.head_oid.as_deref() else {
+    if discovered.scope_tips.is_empty() {
         return Ok(PreviewTail {
             commits: Vec::new(),
             has_more: false,
         });
-    };
+    }
     let path = Path::new(&discovered.info.path);
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
     let (oids, has_more) = read_commit_oids(
         &git,
         path,
-        head_oid,
+        &discovered.scope_tips,
         discovered.oid_length,
         cancelled,
         deadline,
@@ -223,6 +346,12 @@ pub fn verify_graph_fingerprint(
         ));
     }
     Ok(())
+}
+
+pub fn history_boundary_limited(discovered: &DiscoveredRepository) -> bool {
+    discovered.info.is_shallow
+        || discovered.graph_boundary.shallow.is_some()
+        || discovered.graph_boundary.grafts.is_some()
 }
 
 fn graph_boundary_fingerprint(
@@ -674,26 +803,21 @@ fn read_refs(
 fn read_commit_oids(
     git: &ReadOnlyGit,
     path: &Path,
-    head_oid: &str,
+    tips: &[String],
     oid_length: usize,
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<(Vec<String>, bool), PreviewError> {
-    let output = run_git_status(
-        git,
-        path,
-        &[
-            "rev-list",
-            "--topo-order",
-            &format!("--max-count={COMMIT_QUERY_COUNT}"),
-            head_oid,
-            "--",
-        ],
-        None,
-        32 * 1024,
-        cancelled,
-        deadline,
-    )?;
+    let mut args = vec![
+        string_arg("rev-list"),
+        string_arg("--topo-order"),
+        string_arg(format!("--max-count={COMMIT_QUERY_COUNT}")),
+    ];
+    args.extend(tips.iter().map(string_arg));
+    args.push(string_arg("--"));
+    let output = git
+        .run(path, &args, None, 32 * 1024, cancelled, deadline)
+        .map_err(map_git_failure)?;
     if !output.status.success() {
         if is_missing_object_diagnostic(&output.stderr) {
             return Err(preview_error(

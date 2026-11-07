@@ -1,6 +1,6 @@
 # 实施计划
 
-日期：2026-11-07。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话已通过[验收](validation/p1-01-repository-sessions.md)，P1-02 已按[代码级计划](implementation/p1-02-history-pagination.md)完成固定快照分页与手动刷新，见[验收记录](validation/p1-02-history-pagination.md)和[分页基线](benchmarks/p1-02-history-pagination.md)。下一项为 P1-03；P1-05 的分页依赖也已具备。下面按完成证据区分已实现与待交付，不据此提前声明后续能力。
+日期：2026-11-07。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话已通过[验收](validation/p1-01-repository-sessions.md)，P1-02 已按[代码级计划](implementation/p1-02-history-pagination.md)完成固定快照分页与手动刷新，见[验收记录](validation/p1-02-history-pagination.md)和[分页基线](benchmarks/p1-02-history-pagination.md)。P1-03 的虚拟历史、新增标记和滚动测量已完成，见[验收记录](validation/p1-03-virtual-history.md)及[滚动基线](benchmarks/p1-03-history-scroll.md)。P1-04 的分支与 worktree 导航已完成[验收](validation/p1-04-scope-navigation.md)，下一项为 P1-05 元数据索引。下面按完成证据区分已实现与待交付，不据此提前声明后续能力。
 
 执行顺序：P0-01 → P0-02 → P0-03 → P0-04 → M1 → M2 → M3 → M4。每项交付应能独立检查；任务记录包含完成条件的证据后再勾选。
 
@@ -19,13 +19,15 @@
 
 ## M1：历史浏览与元数据搜索
 
+- [x] **UI-03 隐藏系统标题栏。** 2026-11-07 按用户要求，将原生窗口按钮嵌入顶部工具栏，隐藏系统白色顶栏；保留拖动区和控件点击，打开 / 错误页也避让窗口按钮。本机深浅色、默认与 850px 宽度验证见[验收记录](validation/ui-03-window-chrome.md)。
+
 - [x] **UI-01 界面基础与 v3 外壳。** 引入 Tailwind CSS 4 与 shadcn 风格组件（Radix），按 [DESIGN](DESIGN.md) 实现颜色 token（跟随系统深浅色）、顶部栏、提交列表、详情与状态栏，接入 P0-03 已有的真实数据：仓库信息、引用、HEAD 前 200 个提交及其元数据；新增 `copyText` 窄接口供复制 OID。后端未接入的区域按 AGENTS.md 显示带“占位 · 任务编号”的示例内容。分支图暂由前端按已加载提交的父关系临时布局，P2-01 完成后由 Rust 布局替换。2026-11-07 本机验证见 [验收记录](validation/ui-01-foundation.md)；CSP 未放宽。
 
 - [x] **P1-01 仓库会话。** 仓库发现、最近打开记录、规范化路径、worktree / commonDir 区分，提供 Git 不可用、空仓库、权限错误状态；在应用数据目录按仓库、worktree 与浏览范围记录上次查看的 tip 集合。依赖 M0。完成条件：切换仓库释放旧任务；同一对象库的两个 worktree 使用正确的各自 HEAD；上次查看记录不写入被查看仓库，损坏或缺失时只是不做“新增”标记。2026-11-07 后端与非视觉接口验收通过：Rust 30 项、双 Node 运行时协议各 27 项、真实会话 10 组、旧预览回归 7 组。当前范围为 head；最近打开与记录查看已由 UI-02 接入界面，新增标记随 P1-03。见[代码级计划](implementation/p1-01-repository-sessions.md)与[验收记录](validation/p1-01-repository-sessions.md)。
 - [x] **UI-02 界面接入仓库会话。** 界面改用会话接口打开与读取首屏，renderer 的会话状态独立成可测模块，过期结果不覆盖当前视图；打开失败保留原仓库，取消即关闭会话；内容显示后及失焦 / 隐藏 / 切换前记录查看；打开页与切换弹层显示最近打开（按对象库分组 worktree）和上次查看事实。移除旧的 renderer 预览接口，`--repository=` 改经 `getLaunchRepository` 由 renderer 打开。2026-11-07 本机验证见[验收记录](validation/ui-02-sessions.md)。
 - [x] **P1-02 历史查询与游标。** 固定 tip 快照，实现流式分页、有界缓存、游标失效与手动刷新接口；记录深页重读成本。依赖 P1-01。完成条件：固定 fixture 完整遍历无重复 / 遗漏；同时间戳和 merge 历史次序稳定，外部连续提交不改变当前遍历，主动刷新后不会拼接两个快照。2026-11-07 本机验收通过：Rust 32 项、双 Node 协议各 25 项、renderer 20 项、历史集成 11 组及 Electron smoke；10 万提交三轮各 500 页完整对照通过，连续深页核心读取中位 18–19 ms，淘汰第一页 / 90k 页重读中位 380 / 446 ms。UI 已接显式翻页、取消与手动刷新并保留选择 / 可恢复锚点；仍仅 head 范围，无虚拟列表或跨页 Rust 图。见[验收记录](validation/p1-02-history-pagination.md)与[分页基线](benchmarks/p1-02-history-pagination.md)，不作为发布性能验收。
-- [ ] **P1-03 虚拟历史列表。** 显示摘要、Author（身份头像按 PRODUCT 配色规则）、时间、OID、引用标签，标出上次查看后新增的提交（连续时显示“上次看到这里”分隔线），支持键盘选择、复制、错误重试和有限预取。依赖 P1-02。完成条件：前端保留行数有界，快速切换范围不闪回旧数据；新增标记与独立 `git rev-list <当前 tips> --not <上次 tips>` 一致，首次打开不标记；10 万提交滚动记录满足已冻结预算或留下待修复测量。
-- [ ] **P1-04 分支与 worktree 导航。** 范围选择器列出 HEAD 可达历史、全部分支、worktree（主或 linked、HEAD 指向、路径）、本地分支、远端跟踪分支、标签与 detached HEAD；顶部显示本窗口 worktree 入口；分支与 worktree 点击仅切换范围，提供手动刷新入口；本地分支显示被哪个 worktree 检出，并通过 `refMergeStatus` 显示相对默认分支的合入状态（第一版只显示“已合入”）。依赖 P1-03。完成条件：浏览前后 worktree、index、HEAD、refs 均不变，界面分清当前工作区与查看范围；基准按 origin/HEAD → origin/main → origin/master 解析，没有远端跟踪分支时退回本地 main → master，都不存在时不显示；可达判断与独立 `git merge-base --is-ancestor` 一致；不可达时不显示标签，不给“未合入”结论（squash / rebase 识别见 P4-08）；刷新尽量保持所选 OID 与滚动锚点，引用或锚点已不存在时明确提示，不暗中替换选择。
+- [x] **P1-03 虚拟历史列表。** 显示摘要、Author（身份头像按 PRODUCT 配色规则）、时间、OID、引用标签，标出上次查看后新增的提交（连续时显示“上次看到这里”分隔线），支持键盘选择、复制、错误重试和有限预取。依赖 P1-02。完成条件：前端保留行数有界，快速切换范围不闪回旧数据；新增标记与独立 `git rev-list <当前 tips> --not <上次 tips>` 一致，首次打开不标记；10 万提交滚动记录满足已冻结预算或留下待修复测量。2026-11-07 按[代码级计划](implementation/p1-03-virtual-history.md)完成本机验收：Rust 36 项、双 Node 协议各 26 项、renderer 30 项、会话 10 项、历史集成及真实窗口检查通过。保留最多 2000 条，已验证淘汰/前插锚点、双向预取、显式翻页与新增集合；10 万提交三轮名义 60Hz 的帧间隔 p95 为 17.3–17.8 ms、无 >100 ms 间隔，DOM 峰值 35 行。全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，记录给 P4-01；普通翻页精确 RPC 到绘制与发布验收仍未完成。详见[验收记录](validation/p1-03-virtual-history.md)和[滚动基线](benchmarks/p1-03-history-scroll.md)。
+- [x] **P1-04 分支与 worktree 导航。** 2026-11-07 按[代码级计划](implementation/p1-04-scope-navigation.md)完成本机技术验收：Rust 43 项、双 Node 协议各 31 项、renderer 38 项、真实导航 9 组、会话 10 项、历史 16 项及四类 Electron smoke 通过；范围切换 / 失败恢复 / 只读 / 原生窗口边界已验证，详见[验收记录](validation/p1-04-scope-navigation.md)。 范围选择器列出 HEAD 可达历史、全部分支、worktree（主或 linked、HEAD 指向、路径）、本地分支、远端跟踪分支、标签与 detached HEAD；顶部显示本窗口 worktree 入口；分支与 worktree 点击仅切换范围，提供手动刷新入口；本地分支显示被哪个 worktree 检出，并通过 `refMergeStatus` 显示相对默认分支的合入状态（第一版只显示“已合入”）。依赖 P1-03。完成条件：浏览前后 worktree、index、HEAD、refs 均不变，界面分清当前工作区与查看范围；基准按 origin/HEAD → origin/main → origin/master 解析，没有远端跟踪分支时退回本地 main → master，都不存在时不显示；可达判断与独立 `git merge-base --is-ancestor` 一致；不可达时不显示标签，不给“未合入”结论（squash / rebase 识别见 P4-08）；刷新尽量保持所选 OID 与滚动锚点，引用或锚点已不存在时明确提示，不暗中替换选择。
 - [ ] **P1-05 元数据索引。** 引入 SQLite schema、事务、版本与可重建缓存；后台可暂停 / 取消，记录绑定快照的 coverage 和磁盘配额。依赖 P1-02，不依赖图布局或 diff。完成条件：建索引中途退出后重启可恢复；索引缺失 / 损坏不阻止基础浏览，达到配额时不会误报完整；外部新快照不使当前固定快照的索引任务反复重启。
 - [ ] **P1-06 元数据搜索。** 消息搜索框配合 OID / Author / Committer / 日期 / 分支筛选；字段间 AND、同一身份字段多选 OR，提供文本大小写开关并确定其初始状态及 Unicode 匹配规则；筛选弹层包括“添加条件”菜单、Author / Committer 身份多选、Hash 输入、提交时间预设与自定义起止日期（包含起止两天）。依赖 P1-03、P1-04、P1-05。完成条件：中文短词、标点、大小写、标题与正文、hash 歧义及身份区别验证通过，普通消息框不自动切换为 hash 查询，索引前后完整结果一致；部分结果按时间与 OID 自动合并、去重，保持选中项与视口锚点，跨结果版本分页无重复遗漏且前端行数有界。此阶段可选择搜索结果摘要；图形定位与返回在 P2-04 接入。
 
@@ -52,7 +54,7 @@
 
 ## M4：日用稳定性和平台分发
 
-- [ ] **P4-01 性能达标与边界恢复。** 根据实际瓶颈优化读取、序列化、图布局或缓存；覆盖仓库被移动、GC、数据库损坏、睡眠恢复与核心重启。依赖 M3。完成条件：VALIDATION 的发布预算及正确性关卡通过，30 分钟长时运行不出现持续资源增长。
+- [ ] **P4-01 性能达标与边界恢复。** 根据实际瓶颈优化读取、序列化、图布局或缓存；覆盖仓库被移动、GC、数据库损坏、睡眠恢复与核心重启。依赖 M3。完成条件：VALIDATION 的发布预算及正确性关卡通过，30 分钟长时运行不出现持续资源增长。 P1-03 已留待修项：全进程树短时空闲 RSS 实测 540–541 MiB，高于 500 MiB 目标；需定位资源占用并按同口径复验，另补精确翻页到绘制、反向深页、1 分钟空闲 CPU 与长时测量，见[滚动基线](benchmarks/p1-03-history-scroll.md)。
 - [ ] **P4-02 macOS 包与真实试用。** 固定打包链，随包带 Rust 二进制，检测系统 Git；验证从 Finder 启动的 PATH / 权限行为。依赖 P4-01。完成条件：本机可安装与运行，至少三个有代表性的本地仓库完成五个使用日试用记录；公开分发前再完成签名 / 公证与干净系统安装验证。
 - [ ] **P4-03 Windows 兼容与安装。** 适配 Git 发现、路径编码、文件通知、子进程树回收与二进制打包。依赖 P4-01。完成条件：目标 Windows 机器通过相同核心场景与单独性能预算；未验证前只声明计划支持，不阻塞 macOS 单平台候选版。
 - [ ] **P4-04 发行记录。** 汇总版本、依赖来源 / 许可证、测试平台、性能报告、已知限制和数据清理方式。依赖对应平台验收。完成条件：候选版本可以复现构建，能力声明与证据一致。正式项目许可证和公开发布渠道另行决定。

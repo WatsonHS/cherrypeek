@@ -28,72 +28,95 @@ const app = await electron.launch({
 let closed = false;
 try {
   const page = await app.firstWindow();
-  await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"]')?.dataset.state === "ready", { timeout: 25000 });
+  await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"]')?.dataset.state === "ready", null, { timeout: 25000 });
   await page.getByTestId("commit-row").first().waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("commit-row").count(), 200);
-  await assertStatusRange(page, "1–200");
+  const initialWindow = await windowMetrics(page);
+  assert.equal(initialWindow.offset, 0);
+  assert.equal(initialWindow.loadedCount, 200);
+  assert.ok(initialWindow.domRows < initialWindow.loadedCount);
+  assert.ok(initialWindow.domRows <= 60);
+  assert.equal(await page.getByTestId("history-marker").count(), 0, "a first view has no new markers");
 
   await page.getByRole("button", { name: "下一页", exact: true }).click();
-  await page.getByText("Commit 5", { exact: true }).waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("commit-row").count(), 5);
-  await assertStatusRange(page, "201–205");
+  await page.locator('[aria-label="提交列表"] [role="listbox"]').getByText("Commit 5", { exact: true }).waitFor({ state: "visible" });
+  await page.waitForFunction(() => Number(document.querySelector('[aria-label="提交列表"] [role="listbox"]')?.dataset.loadedCount) === 205, null, { timeout: 15000 });
+  const nextWindow = await windowMetrics(page);
+  assert.equal(nextWindow.loadedCount, 205);
+  assert.ok(nextWindow.domRows <= 60);
 
   await page.getByRole("button", { name: "上一页", exact: true }).click();
-  await page.getByText("Commit 205", { exact: true }).first().waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("commit-row").count(), 200);
-  await assertStatusRange(page, "1–200");
+  await page.locator('[aria-label="提交列表"] [role="listbox"]').getByText("Commit 6", { exact: true }).waitFor({ state: "visible" });
+  assert.equal((await windowMetrics(page)).loadedCount, 205, "explicit page navigation keeps the adjacent page in the bounded window");
   assert.deepEqual(await snapshotTree(repository), repositoryBeforeUI, "paging must be read-only");
 
-  const oldSelected = page.getByTestId("commit-row").last();
+  const oldSelected = page.getByTestId("commit-row").filter({ hasText: "Commit 6" });
   await oldSelected.click();
   const oldOid = await oldSelected.getAttribute("data-oid");
   const oldSummary = await oldSelected.locator("span.truncate").first().innerText();
   assert.ok(oldOid);
   assert.equal(oldSummary, "Commit 6");
-  createCommit(repository, 206);
-  const repositoryAfterExternalCommit = await snapshotTree(repository);
-  const newHead = git(repository, "rev-parse", "HEAD");
+  const commit10Oid = git(repository, "log", "--format=%H%x09%s", "HEAD").split("\n")
+    .find(line => line.endsWith("\tCommit 10"))?.split("\t", 1)[0];
+  assert.ok(commit10Oid, "fixture should have an independently identifiable Commit 10 OID");
+  const list = page.locator('[aria-label="提交列表"] [role="listbox"]');
+  await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const commit10Row = page.locator(`[data-testid="commit-row"][data-oid="${commit10Oid}"]`);
+  await commit10Row.scrollIntoViewIfNeeded();
+  await list.evaluate((element, oid) => {
+    const row = element.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`);
+    if (row) element.scrollTop += row.getBoundingClientRect().top - element.getBoundingClientRect().top;
+  }, commit10Oid);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
   const anchorBeforeRefresh = await visibleAnchor(page);
+  assert.equal(anchorBeforeRefresh?.oid, commit10Oid, "the refresh should capture Commit 10 as its visible top anchor");
+  assert.ok(Math.abs(anchorBeforeRefresh.offset) <= 8, `Commit 10 should be aligned near the viewport top: ${JSON.stringify(anchorBeforeRefresh)}`);
+  const newHead = await createCommit(repository, 206);
+  const repositoryAfterExternalCommit = await snapshotTree(repository);
+  assert.equal(newHead, git(repository, "rev-parse", "HEAD"));
   await page.getByRole("button", { name: "刷新仓库历史" }).click();
-  await page.getByTestId("commit-row").first().waitFor({ state: "visible" });
-  await page.getByText("Commit 206", { exact: true }).first().waitFor({ state: "visible" });
-  assert.equal(await page.getByTestId("commit-row").count(), 200);
-  assert.equal(await page.getByTestId("commit-row").first().getAttribute("data-oid"), newHead);
-  await assertStatusRange(page, "1–200");
+  await waitForRefreshReady(page, 200);
+  assert.equal((await windowMetrics(page)).loadedCount, 200);
   await page.getByText(oldSummary, { exact: true }).last().waitFor({ state: "visible" });
-  await page.getByText(/刷新前的观察/).waitFor({ state: "visible" });
-  await page.getByText(/它不在当前页，不能据此判断是否已不可达/).waitFor({ state: "visible" });
-  if (anchorBeforeRefresh) {
-    try { await page.waitForFunction(({ oid, offset }) => {
-      const row = document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`);
-      const container = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
-      return Boolean(row && container && Math.abs(row.getBoundingClientRect().top - container.getBoundingClientRect().top - offset) <= 4);
-    }, anchorBeforeRefresh, { timeout: 5000 }); }
-    catch (error) {
-      const detail = await page.evaluate(oid => ({
-        expected: document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`)?.textContent,
-        rows: [...document.querySelectorAll('[data-testid="commit-row"]')].slice(185, 200).map(row => ({ oid: row.getAttribute("data-oid"), text: row.textContent })),
-        anchorMissing: document.body.innerText.includes("刷新后，原列表位置不在当前页。"),
-      }), anchorBeforeRefresh.oid);
-      process.stderr.write(`Anchor restore diagnostic: expected ${JSON.stringify(anchorBeforeRefresh)}, actual ${JSON.stringify(await visibleAnchor(page))}, detail ${JSON.stringify(detail)}\n`);
-      throw error;
-    }
-  }
+  await page.getByText(/来自 .+ 的观察/).waitFor({ state: "visible" });
+  await page.getByText(/这条提交不在当前已加载窗口.*不推断整个范围的可达性/).waitFor({ state: "visible" });
+  const firstPageOids = git(repository, "rev-list", newHead).split("\n").slice(0, 200);
+  assert.ok(firstPageOids.includes(anchorBeforeRefresh.oid), "Commit 10 must remain inside the refreshed first page");
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`),
+    anchorBeforeRefresh.oid, { timeout: 5000 });
+  await page.waitForFunction(({ oid, offset }) => {
+    const row = document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`);
+    const container = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+    return Boolean(row && container && Math.abs(row.getBoundingClientRect().top - container.getBoundingClientRect().top - offset) <= 4);
+  }, anchorBeforeRefresh, { timeout: 5000 });
+  await page.locator('[aria-label="提交列表"] [role="listbox"]').evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(expected => document.querySelector('[data-testid="commit-row"]')?.getAttribute("data-oid") === expected,
+    newHead, { timeout: 10000 });
+  assert.equal(await page.getByTestId("commit-row").first().getAttribute("data-oid"), newHead);
+  await page.getByTestId("history-marker").first().waitFor({ state: "visible" });
+  assert.equal(await page.getByTestId("history-marker").count(), 1, "the fast-forward adds one marked commit");
+  assert.equal(await page.getByTestId("history-divider").count(), 1, "the consecutive new prefix has one divider");
   assert.deepEqual(await snapshotTree(repository), repositoryAfterExternalCommit, "refresh must not write to the viewed repository");
-  await page.screenshot({ path: resolve(screenshotDir, "p1-02-history-pagination.png") });
+  await page.screenshot({ path: resolve(screenshotDir, "p1-03-history-refresh.png") });
 
   for (let index = 207; index <= 236; index += 1) createCommit(repository, index);
   const repositoryAfterMoreExternalCommits = await snapshotTree(repository);
+  await list.evaluate(element => { element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight * 1.5); });
+  await page.waitForTimeout(100);
   const secondAnchor = await visibleAnchor(page);
-  await page.getByRole("button", { name: "刷新仓库历史" }).click();
+  assert.ok(secondAnchor, "second refresh should capture a visible row near the old page tail");
   const newestHead = git(repository, "rev-parse", "HEAD");
+  const refreshedOids = git(repository, "rev-list", newestHead).split("\n");
+  assert.ok(refreshedOids.indexOf(secondAnchor.oid) >= 200, "the chosen old tail anchor must be outside the refreshed first page");
+  await page.getByRole("button", { name: "刷新仓库历史" }).click();
+  await waitForRefreshReady(page, 200);
+  await page.getByText("刷新后，原列表位置不在当前窗口。", { exact: true }).waitFor({ state: "visible" });
+  await list.evaluate(element => { element.scrollTop = 0; });
   await page.waitForFunction(expected => document.querySelector('[data-testid="commit-row"]')?.getAttribute("data-oid") === expected,
-    newestHead, { timeout: 20000 });
-  await page.getByText("刷新后，原列表位置不在当前页。", { exact: true }).scrollIntoViewIfNeeded();
+    newestHead, { timeout: 10_000 });
   assert.equal(await page.getByTestId("commit-row").first().getAttribute("data-oid"), git(repository, "rev-parse", "HEAD"));
   if (secondAnchor) {
     const loaded = await page.getByTestId("commit-row").evaluateAll((rows, oid) => rows.some(row => row.getAttribute("data-oid") === oid), secondAnchor.oid);
-    assert.equal(loaded, false, "the old anchor must be outside the refreshed first page");
+    assert.equal(loaded, false, "the old anchor must be outside the refreshed first window");
   }
   assert.deepEqual(await snapshotTree(repository), repositoryAfterMoreExternalCommits, "refresh must not write to the viewed repository");
 
@@ -105,7 +128,7 @@ try {
   await Promise.all([waitForExit(electronPid), waitForExit(daemonPid)]);
   await app.close().catch(() => undefined);
   closed = true;
-  process.stdout.write(`History pagination UI smoke passed. Screenshot: output/playwright/p1-02-history-pagination.png\n`);
+  process.stdout.write(`History pagination UI smoke passed. Screenshot: output/playwright/p1-03-history-refresh.png\n`);
 } finally {
   if (!closed) await app.close().catch(() => undefined);
   await rm(temp, { recursive: true, force: true });
@@ -119,15 +142,31 @@ function createRepository(path, count) {
 }
 
 function createCommit(path, index) {
-  execFileSync("git", ["-C", path, "commit", "--allow-empty", "-qm", `Commit ${index}`]);
+  git(path, "commit", "--allow-empty", "-qm", `Commit ${index}`);
+  return git(path, "rev-parse", "HEAD");
 }
 
 function git(path, ...args) {
-  return execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C", path, ...args], { encoding: "utf8" }).trim();
 }
 
-async function assertStatusRange(page, range) {
-  await page.waitForFunction(expected => document.querySelector('[data-testid="preview-state"]')?.textContent?.includes(expected), range, { timeout: 15000 });
+async function windowMetrics(page) {
+  return page.locator('[aria-label="提交列表"] [role="listbox"]').evaluate(element => ({
+    offset: Number(element.dataset.loadedOffset),
+    loadedCount: Number(element.dataset.loadedCount),
+    windowPages: Number(element.dataset.windowPages),
+    domRows: element.querySelectorAll('[data-testid="commit-row"]').length,
+  }));
+}
+
+async function waitForRefreshReady(page, expectedCount) {
+  await page.waitForFunction(expected => {
+    const button = document.querySelector('button[aria-label="刷新仓库历史"]');
+    const list = document.querySelector('[aria-label="提交列表"] [role="listbox"]');
+    const state = document.querySelector('[data-testid="preview-state"]');
+    return button && !button.disabled && list?.dataset.pageLoading === "false" &&
+      Number(list.dataset.loadedCount) === expected && state?.dataset.state === "ready";
+  }, expectedCount, { timeout: 20000 });
 }
 
 async function visibleAnchor(page) {

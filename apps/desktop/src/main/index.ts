@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, session, type IpcMainInvokeEvent } from "electron";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CoreProcess } from "./core-process.js";
@@ -23,6 +23,10 @@ const IPC_SESSION_PREVIEW = "commitscope:session:preview";
 const IPC_SESSION_RECORD_VIEW = "commitscope:session:record-view";
 const IPC_SESSION_CLOSE = "commitscope:session:close";
 const IPC_SESSION_LIST_RECENT = "commitscope:session:list-recent";
+const IPC_SESSION_NAVIGATION = "commitscope:session:navigation";
+const IPC_SESSION_SELECT_SCOPE = "commitscope:session:select-scope";
+const IPC_REF_MERGE_STATUS = "commitscope:refs:merge-status";
+const IPC_REF_MERGE_STATUS_CANCEL = "commitscope:refs:merge-status:cancel";
 const IPC_HISTORY_READ = "commitscope:history:read-page";
 const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
 const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
@@ -98,6 +102,22 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.listRecent());
   });
+  ipcMain.handle(IPC_SESSION_NAVIGATION, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getNavigation());
+  });
+  ipcMain.handle(IPC_SESSION_SELECT_SCOPE, (event, scope: unknown, pageSize: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.selectScope(scope, pageSize === undefined ? 200 : pageSize as number));
+  });
+  ipcMain.handle(IPC_REF_MERGE_STATUS, (event, refNames: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getRefMergeStatus(refNames));
+  });
+  ipcMain.handle(IPC_REF_MERGE_STATUS_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelRefMergeStatus());
+  });
   ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.readHistoryPage(cursor, pageSize === undefined ? 200 : pageSize as number));
@@ -134,6 +154,9 @@ async function createWindow(): Promise<void> {
     minWidth: 850,
     minHeight: 560,
     show: false,
+    titleBarStyle: "hidden",
+    titleBarOverlay: true,
+    ...(process.platform === "darwin" ? { trafficLightPosition: { x: 16, y: 18 } } : {}),
     webPreferences: {
       preload: PRELOAD_ENTRY,
       nodeIntegration: false,
@@ -144,6 +167,21 @@ async function createWindow(): Promise<void> {
       allowRunningInsecureContent: false,
     },
   });
+  const syncWindowAppearance = () => {
+    const dark = nativeTheme.shouldUseDarkColors;
+    const background = dark ? "#121311" : "#f7f7f5";
+    window?.setBackgroundColor(background);
+    if (process.platform !== "darwin") {
+      window?.setTitleBarOverlay({
+        color: background,
+        symbolColor: dark ? "#ecece8" : "#1b1b19",
+        height: 52,
+      });
+    }
+  };
+  syncWindowAppearance();
+  nativeTheme.on("updated", syncWindowAppearance);
+  window.on("closed", () => nativeTheme.removeListener("updated", syncWindowAppearance));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     if (url !== APP_URL) event.preventDefault();

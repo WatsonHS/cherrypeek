@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { RepositorySessionStore } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "repository-session-store.mjs")));
 
-const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession"];
+const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus"];
 
 /** Session API whose every call waits until the test answers it. */
 function fakeApi() {
@@ -20,6 +20,7 @@ function fakeApi() {
     return promise;
   }]));
   api.cancelHistoryRead = async () => ok({ cancelled: true });
+  api.cancelRefMergeStatus = async () => ok({ cancelled: true });
   return {
     api,
     calls,
@@ -82,7 +83,7 @@ function makePreview(session) {
     refs: [],
     refsTruncated: false,
     commits: [{
-      oid, parents: [], summary: `summary ${session.repoId}`, summaryTruncated: false, textLossy: false,
+      oid, parents: [], summary: `summary ${session.repoId}`, summaryTruncated: false, textLossy: false, isNewSinceLastSeen: false,
       author: { name: "A", email: "a@example.invalid", timestamp: "1", offset: "+0000" },
       committer: { name: "C", email: "c@example.invalid", timestamp: "2", offset: "+0000" },
     }],
@@ -90,7 +91,7 @@ function makePreview(session) {
   };
 }
 
-function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, previousCursor = null, nextCursor = null, count = 1, commits } = {}) {
+function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, previousCursor = null, nextCursor = null, count = 1, commits, status = "firstView", divider = null } = {}) {
   const preview = makePreview(session);
   return {
     ...preview,
@@ -105,6 +106,8 @@ function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, pre
     previousCursor,
     nextCursor,
     hasMore: nextCursor !== null,
+    newSinceLastSeenStatus: status,
+    lastSeenDividerOid: divider,
   };
 }
 
@@ -214,6 +217,34 @@ test("switching records the shown repository first, and a failed switch keeps it
 
   store.dismissNotice();
   assert.equal(store.getView().notice, null);
+});
+
+test("opening while a page read is pending cancels and drains it before a failed open keeps the session", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a", { nextCursor: "cursor-1" });
+  let cancellations = 0;
+  fake.api.cancelHistoryRead = async () => { cancellations += 1; return ok({ cancelled: true }); };
+
+  const reading = store.readPage("cursor-1");
+  await settled();
+  assert.equal(store.getView().pageLoading, true);
+  const opening = store.open("/missing");
+  assert.equal(store.getView().pageLoading, false, "the old page loading state clears immediately");
+  assert.equal(store.getView().opening, "/missing");
+  assert.equal(cancellations, 1);
+
+  await fake.fail("readHistoryPage", err("CANCELLED"));
+  await reading;
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await fake.answer("openRepositorySession", err("NOT_A_REPOSITORY"));
+  await fake.answer("getRepositorySession", ok(session));
+  await opening;
+  assert.equal(store.getView().state, "ready");
+  assert.equal(store.getView().session, session);
+  assert.equal(store.getView().pageLoading, false);
+  assert.equal(store.getView().pageRequestDirection, null);
+  assert.equal(store.getView().notice.code, "NOT_A_REPOSITORY");
 });
 
 test("a failed switch falls back to the error screen when the old session is gone", async () => {
@@ -386,7 +417,7 @@ test("when the core goes away, shown data stays but is no longer recorded, and l
 test("failed next page keeps the current page and retries the failed cursor", async () => {
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);
-  const session = await openReady(fake, store, "a", { nextCursor: "cursor-200" });
+  const session = await openReady(fake, store, "a", { nextCursor: "cursor-200", count: 200 });
   const firstPage = store.getView().commits;
 
   const next = store.nextPage();
@@ -401,11 +432,146 @@ test("failed next page keeps the current page and retries the failed cursor", as
   const retry = store.retryPage();
   await settled();
   assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200]);
-  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { offset: 200, cursor: "cursor-200", previousCursor: "cursor-0" })));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { offset: 200, cursor: "cursor-200", previousCursor: "cursor-0", count: 200 })));
   await retry;
-  assert.equal(store.getView().pageOffset, 200);
-  assert.equal(store.getView().commits[0].summary, "summary 201");
+  assert.equal(store.getView().pageOffset, 0);
+  assert.equal(store.getView().commits.length, 400);
+  assert.equal(store.getView().commits[0].summary, "summary 1");
+  assert.equal(store.getView().commits[200].summary, "summary 201");
   assert.deepEqual(fake.pending.readHistoryPage, []);
+
+  const previousLoadedPage = await store.previousPage();
+  assert.equal(previousLoadedPage, store.getView().commits[199].oid);
+  assert.equal(store.getView().pageCursor, "cursor-0");
+  assert.equal(store.getView().canNavigateNext, true);
+  assert.deepEqual(fake.pending.readHistoryPage, [], "previous on a retained page must not issue another RPC");
+});
+
+test("selecting a commit after scrolling back moves the active page without another read", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "active-page", { count: 200, nextCursor: "cursor-200" });
+
+  const nextPage = store.nextPage();
+  await settled();
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    offset: 200, count: 200, cursor: "cursor-200", previousCursor: "cursor-0", nextCursor: "cursor-400",
+  })));
+  await nextPage;
+  const prefetch = store.readPage("cursor-400");
+  await settled();
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    offset: 400, count: 200, cursor: "cursor-400", previousCursor: "cursor-200",
+  })));
+  await prefetch;
+
+  const firstPageOid = store.getView().commits[0].oid;
+  store.setSelectedOid(firstPageOid);
+  assert.equal(store.getView().pageCursor, "cursor-0");
+  assert.equal(store.getView().canNavigatePrevious, false);
+  assert.equal(store.getView().canNavigateNext, true);
+
+  const loadedNext = await store.nextPage();
+  assert.equal(loadedNext, store.getView().commits[200].oid);
+  assert.equal(store.getView().pageCursor, "cursor-200");
+  assert.deepEqual(fake.pending.readHistoryPage, [], "navigating to a retained page issues no RPC");
+});
+
+test("the renderer retains at most 2,000 commits and can reread a trimmed edge", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "window", { count: 200, nextCursor: "cursor-200" });
+
+  for (let offset = 200; offset <= 2_000; offset += 200) {
+    const loading = store.nextPage();
+    await settled();
+    await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+      offset, count: 200, cursor: `cursor-${offset}`, previousCursor: `cursor-${offset - 200}`,
+      nextCursor: offset === 2_000 ? null : `cursor-${offset + 200}`,
+    })));
+    await loading;
+  }
+  assert.equal(store.getView().commits.length, 2_000);
+  assert.equal(store.getView().pageOffset, 200);
+  assert.equal(store.getView().windowPageCount, 10);
+  assert.equal(store.getView().commits[0].summary, "summary 201");
+
+  for (let index = 0; index < 9; index += 1) await store.previousPage();
+  assert.equal(store.getView().pageCursor, "cursor-200");
+  const previous = store.previousPage();
+  await settled();
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200]);
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { count: 200, cursor: "cursor-0", nextCursor: "cursor-200" })));
+  const selected = await previous;
+  assert.equal(selected, store.getView().commits[199].oid);
+  assert.equal(store.getView().commits.length, 2_000);
+  assert.equal(store.getView().pageOffset, 0);
+  assert.equal(store.getView().windowPageCount, 10);
+  assert.equal(store.getView().commits.at(-1).summary, "summary 2000");
+});
+
+test("a newer reverse intent drains and supersedes a pending forward prefetch", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "reverse", {
+    offset: 200, count: 200, cursor: "cursor-200", previousCursor: "cursor-0", nextCursor: "cursor-400",
+  });
+  const selected = store.getView().commits[0].oid;
+  store.setSelectedOid(selected);
+
+  const forward = store.readPage("cursor-400");
+  await settled();
+  assert.equal(store.getView().pageRequestDirection, "after");
+  const reverse = store.readPage("cursor-0");
+  await settled();
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-400", 200]);
+  await fake.answer("readHistoryPage", err("CANCELLED", "superseded"));
+  await settled();
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200]);
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    offset: 0, count: 200, cursor: "cursor-0", nextCursor: "cursor-200",
+  })));
+  await Promise.all([forward, reverse]);
+
+  assert.equal(store.getView().pageOffset, 0);
+  assert.equal(store.getView().commits.length, 400);
+  assert.equal(store.getView().commits[200].oid, selected);
+  assert.equal(store.getView().pageLoading, false);
+});
+
+test("marker metadata can add a divider across pages, while unavailable disables the whole window", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = makeSession("markers");
+  const opening = store.open(session.repository.path);
+  await fake.answer("openRepositorySession", ok(session));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    count: 1, nextCursor: "cursor-1", status: "ready", divider: "01".repeat(20),
+    commits: [{ ...makePreview(session).commits[0], oid: "01".repeat(20), isNewSinceLastSeen: false }],
+  })));
+  await opening;
+  assert.equal(store.getView().lastSeenDividerOid, "01".repeat(20));
+
+  const next = store.nextPage();
+  await settled();
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    offset: 1, cursor: "cursor-1", previousCursor: "cursor-0", nextCursor: "cursor-2", status: "ready",
+    count: 1, commits: [{ ...makePreview(session).commits[0], oid: "02".repeat(20), isNewSinceLastSeen: true }],
+  })));
+  await next;
+  assert.equal(store.getView().commits[1].isNewSinceLastSeen, true);
+  assert.equal(store.getView().lastSeenDividerOid, "01".repeat(20));
+
+  const unavailable = store.nextPage();
+  await settled();
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    offset: 2, cursor: "cursor-2", previousCursor: "cursor-1", status: "unavailable",
+    count: 1, commits: [{ ...makePreview(session).commits[0], oid: "03".repeat(20), isNewSinceLastSeen: true }],
+  })));
+  await unavailable;
+  assert.equal(store.getView().newSinceLastSeenStatus, "unavailable");
+  assert.equal(store.getView().lastSeenDividerOid, null);
+  assert.ok(store.getView().commits.every(commit => !commit.isNewSinceLastSeen));
 });
 
 test("cancelling a page read drains it without replacing the visible page", async () => {
@@ -438,6 +604,22 @@ test("refresh failure preserves the old session and page", async () => {
   assert.deepEqual(store.getView().commits, page);
   assert.equal(store.getView().refreshing, false);
   assert.equal(store.getView().pageErrorKind, "refresh");
+});
+
+test("refresh reports a deleted selected scope while retaining the previous history", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a");
+  session.scope = { ref: "refs/heads/feature/gone" };
+  const commits = store.getView().commits;
+  const refreshing = store.refresh();
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await fake.answer("refreshRepositorySession", err("SCOPE_UNAVAILABLE", "所选分支已不存在"));
+  await refreshing;
+  assert.equal(store.getView().session, session);
+  assert.deepEqual(store.getView().commits, commits);
+  assert.equal(store.getView().scopeError.code, "SCOPE_UNAVAILABLE");
+  assert.deepEqual(store.getView().scopeErrorTarget, { ref: "refs/heads/feature/gone" });
 });
 
 test("refresh preserves an old selection and anchor status, then records the new shown session", async () => {
@@ -515,4 +697,143 @@ test("a newer open intent prevents a refresh still recording the old view from s
   await fake.answer("readHistoryPage", ok(makeHistoryPage(sessionB)));
   await opening;
   assert.equal(store.getView().session, sessionB);
+});
+
+test("scope switch keeps window identity and preserves an in-window selection and anchor", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const original = await openReady(fake, store, "a");
+  const selected = store.getView().commits[0].oid;
+  const switching = store.switchScope({ ref: "refs/heads/dev" }, selected, { oid: selected, offset: 13 });
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  const next = { ...original, repoId: "repo-a-scope", generation: "gen-a-scope", scope: { ref: "refs/heads/dev" }, tips: [selected] };
+  const page = makeHistoryPage(next, { commits: [{ ...store.getView().commits[0] }] });
+  await fake.answer("selectRepositoryScope", ok({ session: next, page }));
+  const result = await switching;
+  assert.deepEqual(result, { selectedOid: selected, anchor: { oid: selected, offset: 13 } });
+  assert.equal(store.getView().session.scope.ref, "refs/heads/dev");
+  assert.equal(store.getView().session.worktreeId, original.worktreeId);
+  assert.equal(store.getView().repository.path, original.repository.path);
+  assert.equal(store.getView().selectionMissingOnPage, false);
+  assert.equal(store.getView().anchorMissing, false);
+  assert.deepEqual(store.getView().commits.map(commit => commit.oid), [selected]);
+});
+
+test("scope switch retains old detail and reports only the loaded-window boundary", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const original = await openReady(fake, store, "a");
+  const selectedCommit = store.getView().commits[0];
+  const switching = store.switchScope("allBranches", selectedCommit.oid, { oid: selectedCommit.oid, offset: 8 });
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  const next = { ...original, repoId: "repo-a-all", generation: "gen-a-all", scope: "allBranches", tips: [selectedCommit.oid] };
+  const other = { ...selectedCommit, oid: "b".repeat(40), summary: "other range" };
+  await fake.answer("selectRepositoryScope", ok({ session: next, page: makeHistoryPage(next, { commits: [other] }) }));
+  const result = await switching;
+  assert.deepEqual(result, { selectedOid: selectedCommit.oid, anchor: undefined });
+  assert.equal(store.getView().oldSelectedCommit.oid, selectedCommit.oid);
+  assert.equal(store.getView().selectionMissingOnPage, true);
+  assert.equal(store.getView().anchorMissing, true);
+  assert.equal(store.getView().session.scope, "allBranches");
+});
+
+test("failed scope switch keeps the old snapshot and history visible", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const original = await openReady(fake, store, "a");
+  const previousCommits = store.getView().commits;
+  const switching = store.switchScope({ ref: "refs/heads/deleted" });
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await fake.answer("selectRepositoryScope", err("SCOPE_UNAVAILABLE", "该分支已不存在"));
+  assert.equal(await switching, undefined);
+  assert.equal(store.getView().session, original);
+  assert.deepEqual(store.getView().commits, previousCommits);
+  assert.equal(store.getView().scopeSwitching, false);
+  assert.equal(store.getView().scopeError.code, "SCOPE_UNAVAILABLE");
+});
+
+test("scope and refresh mutations are mutually exclusive", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const refreshing = store.refresh();
+  assert.equal(store.getView().refreshing, true);
+  assert.equal(await store.switchScope("allBranches"), undefined);
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  const refreshed = { ...makeSession("a-refresh"), repositoryKey: "key-a", worktreeId: "wt-a" };
+  await fake.answer("refreshRepositorySession", ok({ session: refreshed, page: makeHistoryPage(refreshed) }));
+  await refreshing;
+
+  const switching = store.switchScope("allBranches");
+  assert.equal(store.getView().scopeSwitching, true);
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  assert.equal(await store.refresh(), undefined);
+  const allBranches = { ...refreshed, repoId: "repo-a-all", generation: "gen-a-all", scope: "allBranches", tips: [refreshed.repository.headOid] };
+  await fake.answer("selectRepositoryScope", ok({ session: allBranches, page: makeHistoryPage(allBranches) }));
+  await switching;
+});
+
+test("failed scope switch clears stale navigation and merge loading state", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const navigation = store.loadNavigation();
+  const merge = store.loadRefMergeStatus(["refs/heads/main"]);
+  await settled();
+  assert.equal(store.getView().navigationLoading, true);
+  assert.equal(store.getView().mergeStatusLoading, true);
+
+  const switching = store.switchScope("allBranches");
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  await fake.answer("selectRepositoryScope", err("SCOPE_UNAVAILABLE"));
+  await switching;
+  assert.equal(store.getView().navigationLoading, false);
+  assert.equal(store.getView().mergeStatusLoading, false);
+
+  const navData = { refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 1 };
+  await fake.answer("getRepositoryNavigation", ok(navData));
+  await fake.answer("getRefMergeStatus", ok({ defaultBase: null, statuses: [{ name: "refs/heads/main", oid: "a".repeat(40), status: "merged" }] }));
+  await Promise.all([navigation, merge]);
+  assert.equal(store.getView().navigation, null);
+  assert.deepEqual(store.getView().mergeStatuses, {});
+});
+
+test("scope response retains the latest user selection made while it was pending", async () => {
+  const fake = fakeApi();
+  const originalPage = makeHistoryPage(makeSession("a"), { commits: [
+    makePreview(makeSession("a")).commits[0],
+    { ...makePreview(makeSession("a")).commits[0], oid: "d".repeat(40), summary: "selection B" },
+  ] });
+  const store = new RepositorySessionStore(fake.api);
+  const original = await openReady(fake, store, "a", { commits: originalPage.commits });
+  const oidA = store.getView().commits[0].oid;
+  const oidB = store.getView().commits[1].oid;
+  store.setSelectedOid(oidA);
+  const switching = store.switchScope("allBranches", oidA);
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  store.setSelectedOid(oidB);
+  const next = { ...original, repoId: "repo-a-all", generation: "gen-a-all", scope: "allBranches", tips: [oidA] };
+  const other = { ...store.getView().commits[0], oid: "e".repeat(40), summary: "new scope" };
+  await fake.answer("selectRepositoryScope", ok({ session: next, page: makeHistoryPage(next, { commits: [other] }) }));
+  assert.deepEqual(await switching, { selectedOid: oidB, anchor: undefined });
+  assert.equal(store.getView().oldSelectedCommit.oid, oidB);
+});
+
+test("cancel closes and drains a pending scope transaction", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const original = await openReady(fake, store, "a");
+  const switching = store.switchScope("allBranches");
+  await fake.answer("recordRepositoryView", ok({ saved: true, status: "ok" }));
+  const next = { ...original, repoId: "repo-a-all", generation: "gen-a-all", scope: "allBranches", tips: [original.repository.headOid] };
+  const selection = fake.pending.selectRepositoryScope[0];
+  assert.ok(selection);
+
+  const cancelling = store.cancel();
+  await fake.answer("closeRepositorySession", ok({ closed: true }));
+  await cancelling;
+  selection.resolve(ok({ session: next, page: makeHistoryPage(next) }));
+  await switching;
+  assert.equal(store.getView().state, "cancelled");
+  assert.equal(store.getView().session, null);
 });

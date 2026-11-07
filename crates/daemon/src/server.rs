@@ -1,8 +1,9 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     ClientMessage, CoreReady, Coverage, EmptyParams, ErrorCode, OpenRepositoryParams,
-    PROTOCOL_VERSION, ReadHistoryPageParams, ReadRepositoryPreviewParams, RefreshRepositoryParams,
-    ResponseData, ServerMessage,
+    PROTOCOL_VERSION, ReadHistoryPageParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
+    RefreshRepositoryParams, RepositoryScope, ResponseData, SelectRepositoryScopeParams,
+    ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -41,6 +42,9 @@ enum RequestOperation {
     ReadSessionPreview,
     ReadHistoryPage(ReadHistoryPageParams),
     RefreshRepository(RefreshRepositoryParams),
+    GetRepositoryNavigation,
+    SelectRepositoryScope(SelectRepositoryScopeParams),
+    RefMergeStatus(RefMergeStatusParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -58,6 +62,7 @@ enum OpenCompletionPayload {
     Refresh {
         expected_repo_id: String,
         expected_generation: String,
+        scope: RepositoryScope,
         result: Result<PreparedRefresh, repository::PreviewError>,
     },
 }
@@ -65,6 +70,7 @@ enum OpenCompletionPayload {
 struct PreparedRefresh {
     discovered: Arc<repository::DiscoveredRepository>,
     history: Arc<crate::history::HistoryState>,
+    baseline: crate::history::Baseline,
     page: crate::history::HistoryPage,
 }
 
@@ -440,6 +446,9 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ReadSessionPreview
             | RequestOperation::ReadHistoryPage(_)
             | RequestOperation::RefreshRepository(_)
+            | RequestOperation::GetRepositoryNavigation
+            | RequestOperation::SelectRepositoryScope(_)
+            | RequestOperation::RefMergeStatus(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
@@ -607,66 +616,138 @@ fn dispatch_request(
                 remove_request(requests, &request_id, &cancelled);
                 return;
             };
+            let baseline = match sessions.capture_previous_view(
+                repo_id.as_deref().expect("session context checked"),
+                generation.as_deref().expect("session context checked"),
+                &session.info.scope,
+            ) {
+                Ok(baseline) => baseline,
+                Err(error) => {
+                    send_terminal_error(
+                        sender,
+                        shutdown,
+                        Some(request_id.clone()),
+                        repo_id,
+                        generation,
+                        error.code,
+                        error.message,
+                        false,
+                    );
+                    remove_request(requests, &request_id, &cancelled);
+                    return;
+                }
+            };
             let intent = sessions.begin_open(Arc::clone(&cancelled));
-            let open_done = open_done.clone();
-            let request_id_for_worker = request_id.clone();
-            let cancelled_for_worker = Arc::clone(&cancelled);
-            let expected_repo_id = session.info.repo_id.clone();
-            let expected_generation = session.info.generation.clone();
-            let path = session.info.repository.path.clone();
+            let scope = session.info.scope.clone();
+            spawn_scope_transition(
+                workers,
+                open_done,
+                request_id,
+                intent,
+                cancelled,
+                session.info.repo_id.clone(),
+                session.info.generation.clone(),
+                scope,
+                session.info.repository.path.clone(),
+                git_path,
+                baseline,
+                params.page_size,
+            );
+        }
+        RequestOperation::SelectRepositoryScope(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let Some(git_path) = git_path.map(std::path::Path::to_path_buf) else {
+                send_terminal_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    ErrorCode::GitUnavailable,
+                    "Git executable was not found".into(),
+                    false,
+                );
+                remove_request(requests, &request_id, &cancelled);
+                return;
+            };
+            let baseline = match sessions.capture_previous_view(
+                repo_id.as_deref().expect("session context checked"),
+                generation.as_deref().expect("session context checked"),
+                &params.scope,
+            ) {
+                Ok(baseline) => baseline,
+                Err(error) => {
+                    send_terminal_error(
+                        sender,
+                        shutdown,
+                        Some(request_id.clone()),
+                        repo_id,
+                        generation,
+                        error.code,
+                        error.message,
+                        false,
+                    );
+                    remove_request(requests, &request_id, &cancelled);
+                    return;
+                }
+            };
+            let intent = sessions.begin_open(Arc::clone(&cancelled));
+            spawn_scope_transition(
+                workers,
+                open_done,
+                request_id,
+                intent,
+                cancelled,
+                session.info.repo_id.clone(),
+                session.info.generation.clone(),
+                params.scope,
+                session.info.repository.path.clone(),
+                git_path,
+                baseline,
+                params.page_size,
+            );
+        }
+        RequestOperation::GetRepositoryNavigation => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let request_id = request_id.clone();
+            let cancelled = Arc::clone(&cancelled);
             workers.push(thread::spawn(move || {
-                let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
-                let result = repository::discover_repository(
-                    &git_path,
-                    &path,
-                    &cancelled_for_worker,
-                    deadline,
-                )
-                .and_then(|discovered| {
-                    let discovered = Arc::new(discovered);
-                    let history = Arc::new(crate::history::HistoryState::new());
-                    let page = history.read_page(
-                        &git_path,
-                        &discovered,
-                        None,
-                        params.page_size,
-                        &cancelled_for_worker,
-                        deadline,
-                    )?;
-                    bounded_repository_response(
-                        &request_id_for_worker,
-                        Some(&expected_repo_id),
-                        Some(&expected_generation),
-                        1,
-                        discovered.info.clone(),
-                        discovered.refs.clone(),
-                        discovered.refs_truncated,
-                    )?;
-                    pack_history_chunks(
-                        &request_id_for_worker,
-                        Some(&expected_repo_id),
-                        Some(&expected_generation),
-                        &page,
-                    )
-                    .map_err(|()| {
-                        repository::resource_limit("History page response exceeds the size limit")
-                    })?;
-                    Ok(PreparedRefresh {
-                        discovered,
-                        history,
-                        page,
-                    })
-                });
-                let _ = open_done.send(OpenCompletion {
-                    request_id: request_id_for_worker,
-                    intent,
-                    cancelled: cancelled_for_worker,
-                    payload: OpenCompletionPayload::Refresh {
-                        expected_repo_id,
-                        expected_generation,
-                        result,
-                    },
-                });
+                execute_repository_navigation(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    session,
+                    cancelled,
+                );
+            }));
+        }
+        RequestOperation::RefMergeStatus(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let request_id = request_id.clone();
+            let cancelled = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            workers.push(thread::spawn(move || {
+                execute_ref_merge_status(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    session,
+                    params,
+                    cancelled,
+                );
             }));
         }
         RequestOperation::RecordRepositoryView => {
@@ -769,6 +850,113 @@ fn session_response(
     }
 }
 
+fn navigation_preview_error(
+    error: &crate::navigation::NavigationError,
+) -> repository::PreviewError {
+    repository::PreviewError {
+        code: error.code,
+        message: error.message.clone(),
+        retryable: matches!(
+            error.code,
+            ErrorCode::Timeout | ErrorCode::RepositoryUnavailable
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_scope_transition(
+    workers: &mut Vec<JoinHandle<()>>,
+    open_done: &mpsc::SyncSender<OpenCompletion>,
+    request_id: String,
+    intent: u64,
+    cancelled: Arc<AtomicBool>,
+    expected_repo_id: String,
+    expected_generation: String,
+    scope: RepositoryScope,
+    path: String,
+    git_path: std::path::PathBuf,
+    baseline: crate::history::Baseline,
+    page_size: u16,
+) {
+    let open_done = open_done.clone();
+    let cancelled_for_worker = Arc::clone(&cancelled);
+    let request_id_for_worker = request_id.clone();
+    let scope_for_worker = scope.clone();
+    workers.push(thread::spawn(move || {
+        let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
+        let result =
+            repository::discover_repository(&git_path, &path, &cancelled_for_worker, deadline)
+                .and_then(|mut discovered| {
+                    discovered.scope_tips = if scope_for_worker == RepositoryScope::Head {
+                        discovered.info.head_oid.iter().cloned().collect()
+                    } else {
+                        let navigation = discovered
+                            .navigation
+                            .as_ref()
+                            .map_err(navigation_preview_error)?;
+                        crate::navigation::scope_tips(
+                            &git_path,
+                            &path,
+                            navigation,
+                            discovered.refs_truncated,
+                            &scope_for_worker,
+                            discovered.info.head_oid.as_deref(),
+                            discovered.oid_length,
+                            &cancelled_for_worker,
+                            deadline,
+                        )
+                        .map_err(|error| navigation_preview_error(&error))?
+                    };
+                    let discovered = Arc::new(discovered);
+                    let history = Arc::new(crate::history::HistoryState::new());
+                    history.set_baseline(baseline.clone());
+                    let page = history.read_page(
+                        &git_path,
+                        &discovered,
+                        None,
+                        page_size,
+                        &cancelled_for_worker,
+                        deadline,
+                    )?;
+                    bounded_repository_response(
+                        &request_id_for_worker,
+                        Some(&expected_repo_id),
+                        Some(&expected_generation),
+                        1,
+                        discovered.info.clone(),
+                        discovered.refs.clone(),
+                        discovered.refs_truncated,
+                    )?;
+                    pack_history_chunks(
+                        &request_id_for_worker,
+                        Some(&expected_repo_id),
+                        Some(&expected_generation),
+                        &page,
+                    )
+                    .map_err(|()| {
+                        repository::resource_limit("History page response exceeds the size limit")
+                    })?;
+                    Ok(PreparedRefresh {
+                        discovered,
+                        history,
+                        baseline,
+                        page,
+                    })
+                });
+        let _ = open_done.send(OpenCompletion {
+            request_id,
+            intent,
+            cancelled,
+            payload: OpenCompletionPayload::Refresh {
+                expected_repo_id,
+                expected_generation,
+                scope,
+                result,
+            },
+        });
+    }));
+}
+
 fn cancel_repository_requests(requests: &ActiveRequests, repo_id: &str) {
     for request in requests.lock().expect("request map poisoned").values() {
         if request.repo_id.as_deref() == Some(repo_id) {
@@ -850,15 +1038,18 @@ fn drain_open_completions(
             OpenCompletionPayload::Refresh {
                 expected_repo_id,
                 expected_generation,
+                scope,
                 result: Ok(prepared),
             } => {
-                let commit = sessions.commit_refresh(
+                let commit = sessions.commit_scope(
                     intent,
                     &expected_repo_id,
                     &expected_generation,
                     &cancelled,
+                    scope,
                     Arc::clone(&prepared.discovered),
                     Arc::clone(&prepared.history),
+                    prepared.baseline.clone(),
                 );
                 match commit {
                     Ok(commit) => {
@@ -891,6 +1082,7 @@ fn drain_open_completions(
             OpenCompletionPayload::Refresh {
                 expected_repo_id,
                 expected_generation,
+                scope: _,
                 result: Err(error),
             } => {
                 let was_cancelled =
@@ -1025,6 +1217,8 @@ fn emit_refresh_result(
                 cursor: page.cursor.clone(),
                 previous_cursor: page.previous_cursor.clone(),
                 has_more: page.has_more,
+                new_since_last_seen_status: page.new_since_last_seen_status,
+                last_seen_divider_oid: page.last_seen_divider_oid.clone(),
             },
         };
         if !send_queued_message(sender, shutdown, &message) {
@@ -1147,6 +1341,9 @@ fn validate_request(
         | "readSessionPreview"
         | "readHistoryPage"
         | "refreshRepository"
+        | "getRepositoryNavigation"
+        | "selectRepositoryScope"
+        | "refMergeStatus"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -1172,9 +1369,28 @@ fn validate_request(
                             )
                         })
                 }
+                "selectRepositoryScope" => {
+                    serde_json::from_value::<SelectRepositoryScopeParams>(params.clone())
+                        .map(RequestOperation::SelectRepositoryScope)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "selectRepositoryScope params 无效".into(),
+                            )
+                        })
+                }
+                "refMergeStatus" => serde_json::from_value::<RefMergeStatusParams>(params.clone())
+                    .map(RequestOperation::RefMergeStatus)
+                    .map_err(|_| {
+                        (
+                            ErrorCode::InvalidRequest,
+                            "refMergeStatus params 无效".into(),
+                        )
+                    }),
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
+                        "getRepositoryNavigation" => RequestOperation::GetRepositoryNavigation,
                         "readSessionPreview" => RequestOperation::ReadSessionPreview,
                         "recordRepositoryView" => RequestOperation::RecordRepositoryView,
                         _ => RequestOperation::CloseRepository,
@@ -1191,6 +1407,9 @@ fn validate_request(
         | "readSessionPreview"
         | "readHistoryPage"
         | "refreshRepository"
+        | "getRepositoryNavigation"
+        | "selectRepositoryScope"
+        | "refMergeStatus"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"
@@ -1372,6 +1591,198 @@ fn execute_repository_preview(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn execute_repository_navigation(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    session: Arc<session::RepositorySession>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
+    let result = repository::verify_graph_fingerprint(&session.discovered, &cancelled, deadline)
+        .and_then(|()| {
+            session
+                .discovered
+                .navigation
+                .as_ref()
+                .map_err(navigation_preview_error)
+                .cloned()
+        })
+        .and_then(|navigation| {
+            repository::verify_graph_fingerprint(&session.discovered, &cancelled, deadline)?;
+            Ok(navigation)
+        });
+    if cancelled.load(Ordering::Acquire) {
+        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+    } else {
+        match result {
+            Ok(navigation)
+                if serde_json::to_vec(&navigation)
+                    .map_or(true, |value| value.len() > RESPONSE_TARGET_BYTES) =>
+            {
+                send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.to_owned()),
+                    repo_id,
+                    generation,
+                    ErrorCode::ResourceLimit,
+                    "Repository navigation response exceeds the size limit".into(),
+                    false,
+                );
+            }
+            Ok(navigation) => {
+                let cancel_repo_id = repo_id.clone();
+                let cancel_generation = generation.clone();
+                let processed = navigation
+                    .refs
+                    .len()
+                    .saturating_add(navigation.worktrees.len())
+                    as u32;
+                let message = session_response(
+                    request_id,
+                    repo_id,
+                    generation,
+                    ResponseData::RepositoryNavigation { navigation },
+                    processed,
+                );
+                if !send_task_message(sender, shutdown, &cancelled, &message)
+                    && cancelled.load(Ordering::Acquire)
+                {
+                    finish_cancelled(
+                        sender,
+                        shutdown,
+                        request_id,
+                        cancel_repo_id,
+                        cancel_generation,
+                    );
+                }
+            }
+            Err(error) => send_error(
+                sender,
+                shutdown,
+                Some(request_id.to_owned()),
+                repo_id,
+                generation,
+                error.code,
+                error.message,
+                error.retryable,
+            ),
+        }
+    }
+    remove_request(requests, request_id, &cancelled);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_ref_merge_status(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    params: RefMergeStatusParams,
+    cancelled: Arc<AtomicBool>,
+) {
+    let Some(git_path) = git_path else {
+        send_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::GitUnavailable,
+            "Git executable was not found".into(),
+            false,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    };
+    let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
+    let result = repository::verify_graph_fingerprint(&session.discovered, &cancelled, deadline)
+        .and_then(|()| {
+            let navigation = session
+                .discovered
+                .navigation
+                .as_ref()
+                .map_err(navigation_preview_error)?;
+            let result = crate::navigation::ref_merge_status(
+                git_path,
+                &session.info.repository.path,
+                navigation,
+                &params.ref_names,
+                session.discovered.oid_length,
+                repository::history_boundary_limited(&session.discovered),
+                &cancelled,
+                deadline,
+            )
+            .map_err(|error| navigation_preview_error(&error))?;
+            repository::verify_graph_fingerprint(&session.discovered, &cancelled, deadline)?;
+            Ok(result)
+        });
+    if cancelled.load(Ordering::Acquire) {
+        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+    } else {
+        match result {
+            Ok(result)
+                if serde_json::to_vec(&result)
+                    .map_or(true, |value| value.len() > RESPONSE_TARGET_BYTES) =>
+            {
+                send_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.to_owned()),
+                    repo_id,
+                    generation,
+                    ErrorCode::ResourceLimit,
+                    "Reference status response exceeds the size limit".into(),
+                    false,
+                );
+            }
+            Ok(result) => {
+                let cancel_repo_id = repo_id.clone();
+                let cancel_generation = generation.clone();
+                let processed = result.statuses.len() as u32;
+                let message = session_response(
+                    request_id,
+                    repo_id,
+                    generation,
+                    ResponseData::RefMergeStatus { result },
+                    processed,
+                );
+                if !send_task_message(sender, shutdown, &cancelled, &message)
+                    && cancelled.load(Ordering::Acquire)
+                {
+                    finish_cancelled(
+                        sender,
+                        shutdown,
+                        request_id,
+                        cancel_repo_id,
+                        cancel_generation,
+                    );
+                }
+            }
+            Err(error) => send_error(
+                sender,
+                shutdown,
+                Some(request_id.to_owned()),
+                repo_id,
+                generation,
+                error.code,
+                error.message,
+                error.retryable,
+            ),
+        }
+    }
+    remove_request(requests, request_id, &cancelled);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_session_preview(
     sender: &SyncSender<OutFrame>,
     shutdown: &AtomicBool,
@@ -1529,6 +1940,8 @@ fn execute_history_page(
                         cursor: page.cursor.clone(),
                         previous_cursor: page.previous_cursor.clone(),
                         has_more: page.has_more,
+                        new_since_last_seen_status: page.new_since_last_seen_status,
+                        last_seen_divider_oid: page.last_seen_divider_oid.clone(),
                     },
                 };
                 if !send_task_message(sender, shutdown, &cancelled, &message) {
@@ -1567,7 +1980,7 @@ fn pack_history_chunks(
     repo_id: Option<&str>,
     generation: Option<&str>,
     page: &crate::history::HistoryPage,
-) -> Result<Vec<Vec<commitscope_core::CommitSummary>>, ()> {
+) -> Result<Vec<Vec<commitscope_core::HistoryCommit>>, ()> {
     if page.commits.is_empty() {
         return Ok(vec![Vec::new()]);
     }
@@ -1593,6 +2006,8 @@ fn pack_history_chunks(
                 cursor: page.cursor.clone(),
                 previous_cursor: page.previous_cursor.clone(),
                 has_more: page.has_more,
+                new_since_last_seen_status: page.new_since_last_seen_status,
+                last_seen_divider_oid: page.last_seen_divider_oid.clone(),
             },
         };
         if current.len() > COMMIT_CHUNK_SIZE
@@ -1624,6 +2039,8 @@ fn pack_history_chunks(
                     cursor: page.cursor.clone(),
                     previous_cursor: page.previous_cursor.clone(),
                     has_more: page.has_more,
+                    new_since_last_seen_status: page.new_since_last_seen_status,
+                    last_seen_divider_oid: page.last_seen_divider_oid.clone(),
                 },
             };
             if serde_json::to_vec(&single).map_err(|_| ())?.len() > RESPONSE_TARGET_BYTES {

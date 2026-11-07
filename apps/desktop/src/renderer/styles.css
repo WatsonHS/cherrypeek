@@ -161,3 +161,33 @@
     cursor: default;
   }
 }
+
+.window-toolbar {
+  min-height: 52px;
+  -webkit-app-region: drag;
+  user-select: none;
+  padding-inline-start: max(16px, env(titlebar-area-x, 76px));
+  padding-inline-end: max(16px, calc(100vw - env(titlebar-area-x, 76px) - env(titlebar-area-width, calc(100vw - 152px))));
+}
+
+.window-toolbar-empty {
+  flex: 0 0 52px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.window-toolbar button,
+.window-toolbar input,
+.window-toolbar textarea,
+.window-toolbar select,
+.window-toolbar a,
+.window-toolbar [role="button"],
+.window-toolbar [role="combobox"] {
+  -webkit-app-region: no-drag;
+}
+
+.window-toolbar input,
+.window-toolbar textarea,
+.window-toolbar select {
+  user-select: text;
+}

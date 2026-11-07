@@ -20,6 +20,10 @@ const api: CommitScopeApi = {
   recordRepositoryView: expectedGeneration => ipcRenderer.invoke("commitscope:session:record-view", expectedGeneration),
   closeRepositorySession: () => ipcRenderer.invoke("commitscope:session:close"),
   listRecentRepositories: () => ipcRenderer.invoke("commitscope:session:list-recent"),
+  getRepositoryNavigation: () => ipcRenderer.invoke("commitscope:session:navigation"),
+  selectRepositoryScope: (scope, pageSize) => ipcRenderer.invoke("commitscope:session:select-scope", scope, pageSize),
+  getRefMergeStatus: refNames => ipcRenderer.invoke("commitscope:refs:merge-status", refNames),
+  cancelRefMergeStatus: () => ipcRenderer.invoke("commitscope:refs:merge-status:cancel"),
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

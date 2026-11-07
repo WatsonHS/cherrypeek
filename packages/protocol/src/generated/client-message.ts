@@ -18,7 +18,21 @@ export type ClientMessage =
       type: "cancel";
     };
 export type RequestParams =
-  EmptyParams | ReadRepositoryPreviewParams | OpenRepositoryParams | ReadHistoryPageParams | RefreshRepositoryParams;
+  | EmptyParams
+  | ReadRepositoryPreviewParams
+  | OpenRepositoryParams
+  | ReadHistoryPageParams
+  | RefreshRepositoryParams
+  | SelectRepositoryScopeParams
+  | RefMergeStatusParams;
+export type RepositoryScope =
+  | ("head" | "allBranches")
+  | {
+      ref: string;
+    }
+  | {
+      worktree: string;
+    };
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -33,4 +47,15 @@ export interface ReadHistoryPageParams {
 }
 export interface RefreshRepositoryParams {
   pageSize: number;
+}
+export interface SelectRepositoryScopeParams {
+  pageSize: number;
+  scope: RepositoryScope;
+}
+export interface RefMergeStatusParams {
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  refNames: [string, ...string[]];
 }

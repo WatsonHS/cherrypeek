@@ -40,6 +40,7 @@ export class HistoryDaemonClient {
   refresh(session, pageSize = 200, timeoutMs = 30_000) {
     return this.request("refreshRepository", session.repoId, session.generation, { pageSize }, timeoutMs);
   }
+  recordView(session) { return this.request("recordRepositoryView", session.repoId, session.generation, {}); }
   close(session) { return this.request("closeRepository", session.repoId, session.generation, {}); }
   cancel(requestId) { this.child.stdin.write(`${JSON.stringify({ type: "cancel", requestId })}\n`); }
   pauseOutput() {
@@ -187,7 +188,7 @@ export function projectPage(response) {
   if (!repositoryChunk || pageChunks.length === 0) throw new Error(`Incomplete history response: ${JSON.stringify(response.chunks.map(chunk => chunk.data.section))}`);
   const metadata = pageChunks[0].data;
   for (const chunk of pageChunks) {
-    if (chunk.data.offset !== metadata.offset || chunk.data.pageSize !== metadata.pageSize || chunk.data.cursor !== metadata.cursor || chunk.data.previousCursor !== metadata.previousCursor || chunk.data.hasMore !== metadata.hasMore) {
+    if (chunk.data.offset !== metadata.offset || chunk.data.pageSize !== metadata.pageSize || chunk.data.cursor !== metadata.cursor || chunk.data.previousCursor !== metadata.previousCursor || chunk.data.hasMore !== metadata.hasMore || chunk.data.newSinceLastSeenStatus !== metadata.newSinceLastSeenStatus || chunk.data.lastSeenDividerOid !== metadata.lastSeenDividerOid) {
       throw new Error("historyPage metadata changed between response chunks");
     }
   }

@@ -25,7 +25,13 @@ export type ServerMessage =
       retryable: boolean;
       type: "error";
     };
-export type Capability = "getRuntimeInfo" | "readRepositoryPreview" | "repositorySessions" | "historyPagination";
+export type Capability =
+  | "getRuntimeInfo"
+  | "readRepositoryPreview"
+  | "repositorySessions"
+  | "historyPagination"
+  | "historyNewSinceLastSeen"
+  | "repositoryScopes";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -69,17 +75,36 @@ export type ResponseData =
       /**
        * @maxItems 500
        */
-      commits: CommitSummary[];
+      commits: HistoryCommit[];
       cursor: string;
       hasMore: boolean;
+      lastSeenDividerOid: string | null;
+      newSinceLastSeenStatus: NewSinceLastSeenStatus;
       offset: number;
       pageSize: number;
       previousCursor: string | null;
       section: "historyPage";
+    }
+  | {
+      navigation: RepositoryNavigation;
+      section: "repositoryNavigation";
+    }
+  | {
+      result: RefMergeStatusResult;
+      section: "refMergeStatus";
     };
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
-export type RepositoryScope = "head";
+export type RepositoryScope =
+  | ("head" | "allBranches")
+  | {
+      ref: string;
+    }
+  | {
+      worktree: string;
+    };
+export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
+export type MergeStatus = "merged" | "notMerged" | "unavailable";
 export type ErrorCode =
   | "PROTOCOL_MISMATCH"
   | "PROTOCOL_ERROR"
@@ -99,7 +124,8 @@ export type ErrorCode =
   | "GIT_ERROR"
   | "PERMISSION_DENIED"
   | "INVALID_CURSOR"
-  | "SNAPSHOT_CHANGED";
+  | "SNAPSHOT_CHANGED"
+  | "SCOPE_UNAVAILABLE";
 
 export interface CoreReady {
   capabilities: Capability[];
@@ -159,6 +185,10 @@ export interface RepositorySessionInfo {
   repository: RepositoryInfo;
   repositoryKey: string;
   scope: RepositoryScope;
+  /**
+   * @maxItems 2000
+   */
+  tips: string[];
   worktreeId: string;
 }
 export interface SessionPersistenceStatus {
@@ -167,9 +197,9 @@ export interface SessionPersistenceStatus {
 }
 export interface LastViewedSnapshot {
   /**
-   * @maxItems 1
+   * @maxItems 2000
    */
-  tips: [] | [string];
+  tips: string[];
   viewedAtUnixMs: number;
 }
 export interface RecentRepository {
@@ -181,4 +211,57 @@ export interface RecentRepository {
   repositoryKey: string;
   worktreeId: string;
   worktreePath: string | null;
+}
+export interface HistoryCommit {
+  author: CommitIdentity;
+  committer: CommitIdentity;
+  isNewSinceLastSeen: boolean;
+  oid: string;
+  parents: string[];
+  summary: string;
+  summaryTruncated: boolean;
+  textLossy: boolean;
+}
+export interface RepositoryNavigation {
+  defaultBase: DefaultBase | null;
+  observedAtUnixMs: number;
+  /**
+   * @maxItems 2000
+   */
+  refs: RefInfo[];
+  refsTruncated: boolean;
+  /**
+   * @maxItems 128
+   */
+  worktrees: WorktreeInfo[];
+  worktreesTruncated: boolean;
+}
+export interface DefaultBase {
+  name: string;
+  oid: string;
+}
+export interface WorktreeInfo {
+  available: boolean;
+  headOid: string | null;
+  headReference: string | null;
+  id: string;
+  isBare: boolean;
+  isCurrent: boolean;
+  isDetached: boolean;
+  isMain: boolean;
+  lockedReason: string | null;
+  path: string;
+  prunableReason: string | null;
+}
+export interface RefMergeStatusResult {
+  defaultBase: DefaultBase | null;
+  /**
+   * @maxItems 50
+   */
+  statuses: RefMergeStatus[];
+}
+export interface RefMergeStatus {
+  name: string;
+  oid: string;
+  status: MergeStatus;
 }
