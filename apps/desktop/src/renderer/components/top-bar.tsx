@@ -2,18 +2,23 @@ import * as React from "react";
 import { ChevronDown, Cloud, Folder, GitBranch, LoaderCircle, RefreshCw, Tag } from "lucide-react";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
+import type { SearchView } from "../lib/metadata-search-store.js";
+import type { SearchQuery } from "../../../../../packages/protocol/src/generated/client-message.js";
+import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView, ViewRecord } from "../lib/repository-session-store.js";
 import type { RepositoryActions } from "../app.js";
 import { momentLabel, repositoryName, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { PathField } from "./path-field.js";
-import { SearchPlaceholder, UpdatesPlaceholder } from "./placeholder-widgets.js";
+import { UpdatesPlaceholder } from "./placeholder-widgets.js";
+import { SearchControls } from "./search-controls.js";
 import { RecentList, storeStatusText, type RecentState } from "./recent-repositories.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
-export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus }: {
+export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
+  searchView, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities }: {
   preview: RepositoryView;
   actions: RepositoryActions;
   recent: RecentState;
@@ -23,6 +28,10 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
   onRefresh(): Promise<void>;
+  searchView: SearchView;
+  onSearchQueryChange(query: SearchQuery, composing?: boolean): void;
+  onSearchComposition(composing: boolean): void;
+  onLoadSearchIdentities(field: SearchTimeField, text: string): void;
 }): React.JSX.Element | null {
   const [scopeOpen, setScopeOpen] = React.useState(false);
   const repository = preview.repository;
@@ -37,7 +46,8 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <WorktreeChip repository={repository} session={preview.session} navigation={preview.navigation} onOpen={() => setScopeOpen(true)} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="flex-1" />
-    <SearchPlaceholder />
+    <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
+      onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} />
     <UpdatesPlaceholder />
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
       onClick={() => { void actions.refresh(); }} aria-label="刷新仓库历史">

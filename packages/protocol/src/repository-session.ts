@@ -1,6 +1,9 @@
 import type {
   CommitSummary,
   MetadataIndexStatus,
+  SearchPage,
+  SearchIdentities,
+  SearchIdentity,
   ErrorCode,
   HistoryCommit,
   RecentRepository,
@@ -14,10 +17,13 @@ import type {
   StoreStatus,
 } from "./generated/server-message.js";
 import type { MetadataIndexAction } from "./generated/client-message.js";
+import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { MetadataIndexAction } from "./generated/client-message.js";
 export type { MetadataIndexStatus } from "./generated/server-message.js";
+export type { SearchPage, SearchIdentities, SearchIdentity } from "./generated/server-message.js";
+export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -79,4 +85,7 @@ export interface RepositorySessionApi {
   cancelRefMergeStatus(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   getMetadataIndexStatus(): Promise<RepositorySessionResult<MetadataIndexStatus>>;
   controlMetadataIndex(action: MetadataIndexAction): Promise<RepositorySessionResult<MetadataIndexStatus>>;
+  searchCommits(params: SearchCommitsParams): Promise<RepositorySessionResult<SearchPage>>;
+  listSearchIdentities(params: SearchIdentitiesParams): Promise<RepositorySessionResult<SearchIdentities>>;
+  cancelSearch(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
 }

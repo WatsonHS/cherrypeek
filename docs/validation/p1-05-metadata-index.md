@@ -1,6 +1,6 @@
 # P1-05 元数据索引验收记录
 
-日期：2026-11-07。状态：已完成本机 macOS 技术验收。前一阶段已提交为 `ba4a059`；本项改动暂未提交。契约见[代码级计划](../implementation/p1-05-metadata-index.md)。
+日期：2026-11-07。状态：已完成本机 macOS 技术验收并提交为 `05a2f7c`。前一阶段为 `ba4a059`。契约见[代码级计划](../implementation/p1-05-metadata-index.md)。
 
 ## 实现范围
 

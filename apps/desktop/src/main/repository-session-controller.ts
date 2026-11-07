@@ -5,8 +5,10 @@ import type {
   RefInfo,
   RepositoryInfo,
   RepositorySessionInfo,
+  SearchPage,
+  SearchIdentities,
 } from "../../../../packages/protocol/src/generated/server-message.js";
-import type { MetadataIndexAction } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { MetadataIndexAction, SearchCommitsParams, SearchIdentitiesParams, SearchQuery } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   RefreshedRepository,
@@ -63,6 +65,12 @@ interface ActiveMetadataIndexRequest {
   done: Promise<MetadataIndexStatus>;
 }
 
+interface ActiveSearchRequest {
+  kind: "commits" | "identities";
+  abort: AbortController;
+  done: Promise<SearchPage | SearchIdentities>;
+}
+
 export class RepositorySessionController {
   private current?: RepositorySessionInfo;
   private operation = 0;
@@ -76,6 +84,8 @@ export class RepositorySessionController {
   private mergeIntent = 0;
   private metadataIndexIntent = 0;
   private activeMetadataIndexRequest?: ActiveMetadataIndexRequest;
+  private searchIntent = 0;
+  private activeSearchRequest?: ActiveSearchRequest;
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -92,6 +102,8 @@ export class RepositorySessionController {
 
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -200,6 +212,8 @@ export class RepositorySessionController {
   async readHistoryPage(cursor: unknown, pageSize = 200): Promise<HistoryPage> {
     const intent = ++this.pageIntent;
     const session = this.requireHistoryCapability();
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
     if (cursor !== null && (typeof cursor !== "string" || cursor.length === 0)) {
       throw new ProtocolClientError("INVALID_REQUEST", "历史页游标无效");
@@ -234,6 +248,8 @@ export class RepositorySessionController {
     if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能刷新", true);
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -298,6 +314,8 @@ export class RepositorySessionController {
     }
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -392,6 +410,10 @@ export class RepositorySessionController {
     }
     const session = this.requireCurrent();
     this.requireMetadataIndexCapability();
+    if (action === "rebuild" && this.activeSearchRequest) {
+      await this.cancelSearch();
+      this.ensureCurrent(session);
+    }
     const previous = this.activeMetadataIndexRequest;
     if (previous?.kind === "control") throw new ProtocolClientError("BUSY", "索引控制请求正在执行", true);
     if (previous?.kind === "status") await this.cancelMetadataIndexStatus();
@@ -406,6 +428,117 @@ export class RepositorySessionController {
     } finally {
       if (this.activeMetadataIndexRequest === active) this.activeMetadataIndexRequest = undefined;
     }
+  }
+
+  async searchCommits(input: unknown): Promise<SearchPage> {
+    const params = validateSearchCommitsParams(input);
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能搜索", true);
+    const session = this.requireCurrent();
+    this.requireSearchCapability();
+    const oidLength = session.repository.objectFormat === "sha256" ? 64 : 40;
+    if (params.anchorOid !== null && params.anchorOid.length !== oidLength) {
+      throw new ProtocolClientError("INVALID_REQUEST", "搜索锚点必须是完整 OID");
+    }
+    const result = await this.runSearchRequest("commits", session, signal => this.readSearchPage(session, params, signal));
+    return result as SearchPage;
+  }
+
+  async listSearchIdentities(input: unknown): Promise<SearchIdentities> {
+    const params = validateSearchIdentitiesParams(input);
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取身份建议", true);
+    const session = this.requireCurrent();
+    this.requireSearchCapability();
+    const result = await this.runSearchRequest("identities", session, signal => this.readSearchIdentities(session, params, signal));
+    return result as SearchIdentities;
+  }
+
+  async cancelSearch(): Promise<{ cancelled: boolean }> {
+    ++this.searchIntent;
+    const active = this.activeSearchRequest;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("搜索已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeSearchRequest === active) this.activeSearchRequest = undefined;
+    return { cancelled: true };
+  }
+
+  private async runSearchRequest(
+    kind: ActiveSearchRequest["kind"],
+    session: RepositorySessionInfo,
+    read: (signal: AbortSignal) => Promise<SearchPage | SearchIdentities>,
+  ): Promise<SearchPage | SearchIdentities> {
+    const intent = ++this.searchIntent;
+    const previous = this.activeSearchRequest;
+    if (previous) {
+      previous.abort.abort(new Error("搜索条件已更新"));
+      await previous.done.catch(() => undefined);
+    }
+    if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+    if (this.activeMergeStatus) await this.cancelRefMergeStatus();
+    if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "搜索已取消历史页读取", true));
+    if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveSearchRequest = { kind, abort, done: Promise.resolve(undefined as never) };
+    active.done = read(abort.signal);
+    this.activeSearchRequest = active;
+    try {
+      const result = await active.done;
+      if (intent !== this.searchIntent) throw new ProtocolClientError("CANCELLED", "搜索请求已被更新操作取代", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeSearchRequest === active) this.activeSearchRequest = undefined;
+    }
+  }
+
+  private async readSearchPage(session: RepositorySessionInfo, params: SearchCommitsParams, signal: AbortSignal): Promise<SearchPage> {
+    let page: SearchPage | undefined;
+    const commits: SearchPage["commits"] = [];
+    const completion = await this.core.request("searchCommits", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        const data = chunk.data;
+        if (data.section !== "searchPage" || chunk.coverage.complete !== chunk.done || (!chunk.done && chunk.nextCursor !== null)) {
+          throw invalidSessionResponse("搜索结果块的 coverage 无效");
+        }
+        if (page && !sameSearchPageMetadata(page, data.page)) throw invalidSessionResponse("搜索结果块版本或页边界不一致");
+        if (!page) page = data.page;
+        commits.push(...data.page.commits);
+        if (commits.length > params.pageSize || chunk.coverage.processed !== commits.length) throw invalidSessionResponse("搜索结果超过页大小或 envelope coverage 不连续");
+      },
+    });
+    this.ensureCurrent(session);
+    if (!page || !completion.coverage.complete || completion.coverage.processed !== commits.length ||
+      completion.nextCursor !== page.nextCursor ||
+      !validSearchPage(page, params, commits)) throw invalidSessionResponse("搜索响应不完整或不一致");
+    return { ...page, commits };
+  }
+
+  private async readSearchIdentities(session: RepositorySessionInfo, params: SearchIdentitiesParams, signal: AbortSignal): Promise<SearchIdentities> {
+    let result: SearchIdentities | undefined;
+    const completion = await this.core.request("listSearchIdentities", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (result || chunk.data.section !== "searchIdentities" || !chunk.done) throw invalidSessionResponse("身份建议响应无效");
+        result = chunk.data.result;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!result || result.field !== params.field || result.identities.length > params.limit ||
+      !completion.coverage.complete || completion.coverage.processed !== result.identities.length) {
+      throw invalidSessionResponse("身份建议响应不完整或不一致");
+    }
+    return result;
   }
 
   private async readMetadataIndexStatus(session: RepositorySessionInfo, signal: AbortSignal): Promise<MetadataIndexStatus> {
@@ -461,6 +594,8 @@ export class RepositorySessionController {
   async close(): Promise<{ closed: true }> {
     const operation = ++this.operation;
     ++this.pageIntent;
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -520,6 +655,9 @@ export class RepositorySessionController {
     this.activeHistoryRead?.abort.abort(new Error("应用正在关闭"));
     this.activeRefresh?.abort.abort(new Error("应用正在关闭"));
     this.activeMergeStatus?.abort.abort(new Error("应用正在关闭"));
+    ++this.searchIntent;
+    this.activeSearchRequest?.abort.abort(new Error("应用正在关闭"));
+    this.activeSearchRequest = undefined;
     ++this.mergeIntent;
     ++this.metadataIndexIntent;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("应用正在关闭"));
@@ -790,12 +928,17 @@ export class RepositorySessionController {
     if (status.state !== "ready") throw new ProtocolClientError("CORE_EXITED", "核心尚未就绪", true);
     if (!status.core.capabilities.includes(capability as typeof status.core.capabilities[number])) {
       throw new ProtocolClientError("UNKNOWN_METHOD", capability === "metadataIndex"
-        ? "核心不支持元数据索引，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
+        ? "核心不支持元数据索引，请更新核心版本" : capability === "metadataSearch"
+          ? "核心不支持元数据搜索，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
   private requireMetadataIndexCapability(): void {
     this.requireCapability("metadataIndex");
+  }
+
+  private requireSearchCapability(): void {
+    this.requireCapability("metadataSearch");
   }
 
   private onCoreStatus(status: CoreStatus): void {
@@ -807,6 +950,9 @@ export class RepositorySessionController {
     this.activeHistoryRead?.abort.abort(new Error("核心已退出"));
     this.activeRefresh?.abort.abort(new Error("核心已退出"));
     this.activeMergeStatus?.abort.abort(new Error("核心已退出"));
+    ++this.searchIntent;
+    this.activeSearchRequest?.abort.abort(new Error("核心已退出"));
+    this.activeSearchRequest = undefined;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("核心已退出"));
     ++this.metadataIndexIntent;
     this.activeOpen = undefined;
@@ -843,6 +989,81 @@ function validateScope(value: unknown): asserts value is RepositoryScope {
   if (keys[0] === "ref" && typeof item.ref === "string" && item.ref.length > 0 && Buffer.byteLength(item.ref, "utf8") <= 16 * 1024) return;
   if (keys[0] === "worktree" && typeof item.worktree === "string" && item.worktree.length > 0 && Buffer.byteLength(item.worktree, "utf8") <= 256) return;
   throw new ProtocolClientError("INVALID_REQUEST", "浏览范围无效");
+}
+
+function validateSearchCommitsParams(value: unknown): SearchCommitsParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["anchorOid", "cursor", "pageSize", "query"]) ||
+    !Number.isInteger(value.pageSize) || (value.pageSize as number) < 1 || (value.pageSize as number) > 500 ||
+    (value.cursor !== null && (typeof value.cursor !== "string" || Buffer.byteLength(value.cursor, "utf8") > 1024)) ||
+    (value.cursor !== null && value.anchorOid !== null) ||
+    (value.anchorOid !== null && (typeof value.anchorOid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.anchorOid))) ||
+    !isSearchQuery(value.query)) throw new ProtocolClientError("INVALID_REQUEST", "搜索请求参数无效");
+  return value as unknown as SearchCommitsParams;
+}
+
+function validateSearchIdentitiesParams(value: unknown): SearchIdentitiesParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["field", "limit", "text"]) ||
+    (value.field !== "author" && value.field !== "committer") || typeof value.text !== "string" ||
+    Buffer.byteLength(value.text, "utf8") > 1024 || !Number.isInteger(value.limit) ||
+    (value.limit as number) < 1 || (value.limit as number) > 100) {
+    throw new ProtocolClientError("INVALID_REQUEST", "身份建议请求参数无效");
+  }
+  return value as unknown as SearchIdentitiesParams;
+}
+
+function isSearchQuery(value: unknown): value is SearchQuery {
+  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "timeField", "timeZone", "toTimestamp"])) return false;
+  const timestamp = (item: unknown) => item === null || Number.isSafeInteger(item);
+  const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
+    isRecord(identity) && hasExactKeys(identity, ["email", "name"]) && typeof identity.name === "string" &&
+    Buffer.byteLength(identity.name, "utf8") <= 4096 && typeof identity.email === "string" && Buffer.byteLength(identity.email, "utf8") <= 4096);
+  return typeof value.message === "string" && Buffer.byteLength(value.message, "utf8") <= 4096 &&
+    typeof value.caseSensitive === "boolean" && identities(value.authors) && identities(value.committers) &&
+    typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
+    (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
+    (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
+    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128;
+}
+
+function sameSearchPageMetadata(left: SearchPage, right: SearchPage): boolean {
+  return left.queryKey === right.queryKey && left.snapshotKey === right.snapshotKey && left.resultVersion === right.resultVersion &&
+    left.pageOffset === right.pageOffset && left.previousCursor === right.previousCursor && left.nextCursor === right.nextCursor &&
+    left.matchedCount === right.matchedCount && left.coverage.processed === right.coverage.processed &&
+    left.coverage.complete === right.coverage.complete && left.anchorFound === right.anchorFound &&
+    JSON.stringify(left.index) === JSON.stringify(right.index);
+}
+
+function validSearchPage(page: SearchPage, params: SearchCommitsParams, commits: SearchPage["commits"]): boolean {
+  if (!page.queryKey || !page.snapshotKey || !page.resultVersion || !Number.isSafeInteger(page.pageOffset) || page.pageOffset < 0 ||
+    !Number.isSafeInteger(page.matchedCount) || page.matchedCount < 0 || page.matchedCount > page.coverage.processed || !Number.isSafeInteger(page.coverage.processed) ||
+    page.coverage.processed < 0 ||
+    page.index.coverage.complete !== (page.index.state === "complete") || commits.length > params.pageSize || commits.length === 0 && page.matchedCount > 0 ||
+    page.pageOffset + commits.length > page.matchedCount || (page.anchorFound === false && page.pageOffset !== 0) ||
+    (page.anchorFound === null && params.anchorOid !== null) || (page.anchorFound !== null && params.anchorOid === null) ||
+    (page.pageOffset === 0) !== (page.previousCursor === null) ||
+    (page.pageOffset + commits.length < page.matchedCount) !== (page.nextCursor !== null)) return false;
+  const seen = new Set<string>();
+  let previousTime = Number.POSITIVE_INFINITY;
+  let previousOid = "";
+  for (const commit of commits) {
+    if (seen.has(commit.oid) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit.oid)) return false;
+    seen.add(commit.oid);
+    const identity = params.query.timeField === "author" ? commit.author : commit.committer;
+    const timestamp = Number(identity.timestamp);
+    if (!Number.isSafeInteger(timestamp) || timestamp > previousTime || timestamp === previousTime && commit.oid < previousOid) return false;
+    previousTime = timestamp;
+    previousOid = commit.oid;
+  }
+  return true;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function invalidSessionResponse(message: string): ProtocolClientError {

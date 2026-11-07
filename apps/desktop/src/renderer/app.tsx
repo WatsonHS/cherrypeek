@@ -4,8 +4,10 @@ import type { CoreStatus } from "../../../../packages/protocol/src/core-status.j
 import type { RepositorySessionInfo } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryScope } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../packages/protocol/src/repository-session.js";
+import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
 import { CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
+import { SearchResultList } from "./components/search-result-list.js";
 import { OpenScreen } from "./components/open-screen.js";
 import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
@@ -14,6 +16,7 @@ import { errorTitle } from "./lib/errors.js";
 import { repositoryName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
+import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
 
 export interface RepositoryActions {
   path: string;
@@ -72,9 +75,10 @@ function useRecentRepositories(ready: boolean, session: RepositorySessionInfo | 
   return { recent, refresh };
 }
 
-function useMetadataIndexPolling(ready: boolean, supported: boolean, store: RepositorySessionStore, view: RepositoryView) {
+function useMetadataIndexPolling(ready: boolean, supported: boolean, store: RepositorySessionStore, view: RepositoryView,
+  searchBusy: boolean) {
   const sessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
-  const blocked = view.state !== "ready" || view.opening !== null || view.refreshing || view.scopeSwitching || view.pageLoading ||
+  const blocked = searchBusy || view.state !== "ready" || view.opening !== null || view.refreshing || view.scopeSwitching || view.pageLoading ||
     view.navigationLoading || view.mergeStatusLoading || view.recordLoading || view.metadataIndexAction !== null;
   React.useEffect(() => {
     if (!ready || !supported || !sessionKey || blocked) return;
@@ -151,8 +155,10 @@ function useLaunchRepository(ready: boolean, store: RepositorySessionStore) {
 export function App(): React.JSX.Element {
   const { status, readError } = useCoreStatus();
   const store = React.useMemo(() => new RepositorySessionStore(window.commitScope), []);
+  const searchStore = React.useMemo(() => new MetadataSearchStore(window.commitScope), []);
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
+  const searchView = React.useSyncExternalStore(searchStore.subscribe, searchStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
@@ -165,10 +171,49 @@ export function App(): React.JSX.Element {
   const loadNavigation = React.useCallback(() => store.loadNavigation(), [store]);
   const loadMergeStatus = React.useCallback((names: string[]) => store.loadRefMergeStatus(names), [store]);
   const cancelMergeStatus = React.useCallback(() => store.cancelRefMergeStatus(), [store]);
+  const loadSearchIdentities = React.useCallback((field: SearchTimeField, text: string) => { void searchStore.loadIdentities(field, text); }, [searchStore]);
+  const restoreHistoryAfterSearch = React.useCallback(async () => {
+    const point = searchStore.getHistoryReturn();
+    await searchStore.leave();
+    if (!point || searchStore.getView().active) return;
+    setSelectedOid(point.selectedOid);
+    anchorBeforeRefresh.current = point.anchor ?? undefined;
+    const restored = await store.restoreHistoryWindow(point);
+    if (restored && !searchStore.getView().active) searchStore.clearHistoryReturn();
+  }, [searchStore, store]);
+  const updateSearchQuery = React.useCallback((query: SearchQuery, composing = false) => {
+    const before = searchStore.getView();
+    const nextActive = hasSearchCriteria(query);
+    if (!before.active && nextActive && view.session) {
+      const saved = searchStore.getHistoryReturn();
+      if (saved) {
+        if (store.getView().pageLoading) void store.cancelPage();
+        else if (store.getView().commits.length) store.suspendHistoryWindow(selectedOid, saved.anchor);
+      } else {
+        const container = document.querySelector<HTMLElement>('[aria-label="提交列表"] [role="listbox"]');
+        const containerTop = container?.getBoundingClientRect().top ?? 0;
+        const row = container ? [...container.querySelectorAll<HTMLElement>('[data-testid="commit-row"]')]
+          .find(item => item.getBoundingClientRect().bottom > containerTop) : undefined;
+        const anchor = row ? { oid: row.dataset.oid ?? "", offset: row.getBoundingClientRect().top - containerTop } : null;
+        const point = store.suspendHistoryWindow(selectedOid, anchor);
+        searchStore.setHistoryReturn(point);
+      }
+    }
+    const transition = searchStore.updateQuery(query, composing);
+    if (transition.wasActive && !transition.active) void restoreHistoryAfterSearch();
+  }, [searchStore, view.session, store, selectedOid, restoreHistoryAfterSearch]);
+  const finishSearchComposition = React.useCallback((composing: boolean) => {
+    if (composing) searchStore.beginComposition();
+    else searchStore.finishComposition();
+  }, [searchStore]);
   const selectCommit = React.useCallback((oid: string) => {
     selectionIntent.invalidate();
     setSelectedOid(oid);
   }, [selectionIntent]);
+  const selectDisplayedCommit = React.useCallback((oid: string) => {
+    if (searchStore.getView().active) searchStore.setSelectedOid(oid);
+    else selectCommit(oid);
+  }, [searchStore, selectCommit]);
   const captureSelectionIntent = React.useCallback(() => selectionIntent.capture(store.getView().session), [selectionIntent, store]);
   const selectIfCurrent = React.useCallback((oid: string, token: SelectionIntentToken | null) => {
     applySelectionIfCurrent(selectionIntent, token, store.getView().session, oid, setSelectedOid);
@@ -176,7 +221,71 @@ export function App(): React.JSX.Element {
 
   useViewRecording(store, view);
   useLaunchRepository(ready, store);
-  useMetadataIndexPolling(ready, metadataIndexSupported, store, view);
+  const searchIdentityBusy = searchView.authorIdentities.loading || searchView.committerIdentities.loading;
+  const searchRequestBusy = searchView.loading || searchView.pageLoading || searchIdentityBusy;
+  const advancingPartialSearch = searchView.active && Boolean(searchView.window && !searchView.window.coverage.complete &&
+    !searchView.error && (searchView.window.index.state === "running" || searchView.window.index.state === "queued"));
+  const searchPartialBusy = searchView.active && (searchRequestBusy || advancingPartialSearch);
+  useMetadataIndexPolling(ready, metadataIndexSupported, store, view, searchPartialBusy);
+
+  const sessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  const boundSearchSession = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (searchView.active && view.state === "ready" && view.session &&
+      (!searchStore.getHistoryReturn() || boundSearchSession.current !== sessionKey)) {
+      const point = store.suspendHistoryWindow(selectedOid, anchorBeforeRefresh.current ?? null);
+      searchStore.setHistoryReturn(point);
+    }
+    searchStore.bindSession(sessionKey, ready && view.state === "ready");
+    boundSearchSession.current = sessionKey;
+  }, [searchStore, sessionKey, ready, view.state, selectedOid, store]);
+
+  React.useEffect(() => {
+    if (!ready || !view.session || !searchView.active || view.state !== "ready" || view.refreshing || view.scopeSwitching) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const nextDelay = () => {
+      const current = searchStore.getView();
+      if (current.error?.code === "BUSY") return 1_500;
+      if (current.error) return null;
+      if (!current.window) return 1_000;
+      if (current.window.coverage.complete) return null;
+      return current.window.index.state === "running" || current.window.index.state === "queued" ? 1_000 : null;
+    };
+    const schedule = (delay: number | null) => {
+      if (delay === null) return;
+      if (timer) clearTimeout(timer);
+      if (active && document.visibilityState === "visible") timer = setTimeout(() => { void poll(); }, delay);
+    };
+    const poll = async () => {
+      if (!active || document.visibilityState !== "visible") return;
+      const repositoryView = store.getView();
+      if (repositoryView.refreshing || repositoryView.scopeSwitching || repositoryView.metadataIndexLoading || repositoryView.metadataIndexAction) {
+        schedule(500);
+        return;
+      }
+      const current = searchStore.getView();
+      if (current.loading || current.pageLoading || current.authorIdentities.loading || current.committerIdentities.loading) {
+        schedule(500);
+        return;
+      }
+      if (current.window && !current.window.coverage.complete && (!current.error || current.error.code === "BUSY")) await searchStore.refreshPartial();
+      else if (!current.window && (!current.error || current.error.code === "BUSY")) await searchStore.retry();
+      else return;
+      if (active && searchStore.getView().active) schedule(nextDelay());
+    };
+    const onVisibility = () => {
+      if (timer) clearTimeout(timer);
+      if (document.visibilityState === "hidden") void searchStore.cancelPending();
+      else schedule(100);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") schedule(nextDelay());
+    return () => { active = false; if (timer) clearTimeout(timer); document.removeEventListener("visibilitychange", onVisibility); };
+  }, [ready, sessionKey, searchView.active, searchView.window?.coverage.complete, searchView.error?.code,
+    searchView.window?.index.state, view.state, view.refreshing, view.scopeSwitching, store, searchStore]);
+
+  React.useEffect(() => () => searchStore.dispose(), [searchStore]);
 
   const navigationAttempt = React.useRef<string | undefined>(undefined);
   React.useEffect(() => {
@@ -209,6 +318,13 @@ export function App(): React.JSX.Element {
     try { await action(); } catch (error) { setActionError(String(error)); }
   };
   const refresh = () => run(async () => {
+    const activeSearch = searchStore.getView();
+    if (activeSearch.active) {
+      const anchor = activeSearch.anchorOid ? { oid: activeSearch.anchorOid, offset: activeSearch.anchorOffset } : undefined;
+      anchorBeforeRefresh.current = anchor;
+      await store.refresh(activeSearch.selectedOid, anchor);
+      return;
+    }
     const container = document.querySelector<HTMLElement>('[aria-label="提交列表"] [role="listbox"]');
     const containerTop = container?.getBoundingClientRect().top ?? 0;
     const anchorRow = container ? [...container.querySelectorAll<HTMLElement>('[data-testid="commit-row"]')]
@@ -243,12 +359,14 @@ export function App(): React.JSX.Element {
       const containerTop = container?.getBoundingClientRect().top ?? 0;
       const anchorRow = container ? [...container.querySelectorAll<HTMLElement>('[data-testid="commit-row"]')]
         .find(row => row.getBoundingClientRect().bottom > containerTop) : undefined;
-      const anchor = anchorRow ? { oid: anchorRow.dataset.oid ?? "", offset: anchorRow.getBoundingClientRect().top - containerTop } : undefined;
+      const anchor = searchView.active
+        ? searchView.anchorOid ? { oid: searchView.anchorOid, offset: searchView.anchorOffset } : undefined
+        : anchorRow ? { oid: anchorRow.dataset.oid ?? "", offset: anchorRow.getBoundingClientRect().top - containerTop } : undefined;
       anchorBeforeRefresh.current = anchor;
-      const result = await store.switchScope(scope, selectedOid, anchor);
+      const result = await store.switchScope(scope, searchView.active ? searchView.selectedOid : selectedOid, anchor);
       if (result) {
         anchorBeforeRefresh.current = result.anchor;
-        if (selectionIntent.isRevisionCurrent(selectionToken)) {
+        if (!searchView.active && selectionIntent.isRevisionCurrent(selectionToken)) {
           selectionIntent.invalidate();
           setSelectedOid(result.selectedOid);
         }
@@ -262,11 +380,35 @@ export function App(): React.JSX.Element {
     actionError ? `操作失败：${actionError}` : undefined,
   ].filter((message): message is string => Boolean(message));
   const notice = view.notice;
+  const displayedOid = searchView.active ? searchView.selectedOid : selectedOid;
+  const displayedCommit = searchView.active
+    ? searchView.window?.commits.find(commit => commit.oid === displayedOid) ?? searchView.oldSelectedCommit
+    : null;
+  const statusView = searchView.active && searchPartialBusy && searchView.window
+    ? { ...view, metadataIndex: searchView.window.index, metadataIndexLoading: false } : view;
+  const moveSearchSelection = async (delta: -1 | 1) => {
+    const current = searchStore.getView();
+    const commits = current.window?.commits ?? [];
+    const index = commits.findIndex(commit => commit.oid === current.selectedOid);
+    const next = index + delta;
+    if (next >= 0 && next < commits.length) { searchStore.setSelectedOid(commits[next]!.oid); return; }
+    if (delta < 0 && current.window?.previousCursor) await searchStore.loadPrevious();
+    else if (delta > 0 && current.window?.nextCursor) await searchStore.loadNext();
+    const updated = searchStore.getView().window?.commits ?? [];
+    const currentIndex = updated.findIndex(commit => commit.oid === current.selectedOid);
+    const target = updated[currentIndex + delta];
+    if (target) searchStore.setSelectedOid(target.oid);
+  };
+  const setSearchAnchor = React.useCallback((anchor: { oid: string; offset: number } | null) => searchStore.setHistoryAnchor(anchor), [searchStore]);
+  const loadSearchNext = React.useCallback(() => { void searchStore.loadNext(); }, [searchStore]);
+  const loadSearchPrevious = React.useCallback(() => { void searchStore.loadPrevious(); }, [searchStore]);
+  const retrySearch = React.useCallback(() => { void searchStore.retry(); }, [searchStore]);
 
   return <div className="flex h-full min-h-0 flex-col">
     {view.repository
-      ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectCommit}
-        onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh} />
+      ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
+        onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
+        searchView={searchView} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {alerts.map(message => <p key={message} className="m-0">{message}</p>)}
@@ -287,7 +429,10 @@ export function App(): React.JSX.Element {
     {view.repository
       ? <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1">
-          <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit}
+          {searchView.active
+            ? <SearchResultList view={searchView} onSelect={selectDisplayedCommit} onAnchor={setSearchAnchor}
+              onNext={loadSearchNext} onPrevious={loadSearchPrevious} onRetry={retrySearch} />
+            : <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit}
             captureSelectionIntent={captureSelectionIntent} selectIfCurrent={selectIfCurrent} onCancel={actions.cancel}
             onRetry={actions.retry} onRetryPage={actions.retryPage} onCancelPage={actions.cancelPage}
             onPreviousPage={actions.previousPage} onNextPage={actions.nextPage}
@@ -296,9 +441,15 @@ export function App(): React.JSX.Element {
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
-            onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />
-          <CommitDetail preview={view} selectedOid={selectedOid} onSelect={selectCommit}
+            onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />}
+          <CommitDetail preview={view} selectedOid={displayedOid} onSelect={selectDisplayedCommit}
+            commitsOverride={searchView.active ? searchView.window?.commits : undefined}
+            selectedCommitOverride={searchView.active ? displayedCommit : undefined}
+            timeField={searchView.active ? searchView.query.timeField : undefined}
+            canMovePrevious={searchView.active ? Boolean(searchView.window?.previousCursor) || (searchView.window?.commits.findIndex(item => item.oid === displayedOid) ?? -1) > 0 : undefined}
+            canMoveNext={searchView.active ? Boolean(searchView.window?.nextCursor) || (searchView.window?.commits.findIndex(item => item.oid === displayedOid) ?? -1) < (searchView.window?.commits.length ?? 0) - 1 : undefined}
             onMoveSelection={async delta => {
+              if (searchView.active) { await moveSearchSelection(delta); return; }
               const current = store.getView();
               const index = current.commits.findIndex(commit => commit.oid === selectedOid);
               const next = index + delta;
@@ -315,7 +466,19 @@ export function App(): React.JSX.Element {
         </div>
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
-    <StatusBar status={status} preview={view} onIndexAction={action => { void store.controlMetadataIndex(action); }} />
+    <StatusBar status={status} preview={statusView}
+      previewStatus={searchView.active ? searchView.window
+        ? searchView.window.coverage.complete ? `搜索最终结果 · ${searchView.window.matchedCount} 条` : `搜索部分结果 · ${searchView.window.matchedCount} 条`
+        : searchView.loading ? "正在搜索当前历史范围…" : "搜索尚未读取到结果" : undefined}
+      searchBusy={searchRequestBusy} timeField={searchView.active ? searchView.query.timeField : undefined}
+      onIndexAction={async action => {
+        const applied = await store.controlMetadataIndex(action);
+        const index = store.getView().metadataIndex;
+        if (applied && index && searchStore.getView().active) {
+          searchStore.setIndexStatus(index);
+          await searchStore.retry();
+        }
+      }} />
   </div>;
 }
 

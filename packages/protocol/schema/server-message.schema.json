@@ -9,7 +9,8 @@
         "historyPagination",
         "historyNewSinceLastSeen",
         "repositoryScopes",
-        "metadataIndex"
+        "metadataIndex",
+        "metadataSearch"
       ],
       "type": "string"
     },
@@ -780,6 +781,40 @@
         {
           "additionalProperties": false,
           "properties": {
+            "page": {
+              "$ref": "#/definitions/SearchPage"
+            },
+            "section": {
+              "const": "searchPage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/SearchIdentities"
+            },
+            "section": {
+              "const": "searchIdentities",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -1027,6 +1062,140 @@
           "type": "object"
         }
       ]
+    },
+    "SearchIdentities": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/definitions/MetadataIndexCoverage"
+        },
+        "field": {
+          "$ref": "#/definitions/SearchTimeField"
+        },
+        "identities": {
+          "items": {
+            "$ref": "#/definitions/SearchIdentity"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "index": {
+          "$ref": "#/definitions/MetadataIndexStatus"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field",
+        "identities",
+        "truncated",
+        "coverage",
+        "index"
+      ],
+      "type": "object"
+    },
+    "SearchIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "type": "object"
+    },
+    "SearchPage": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorFound": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "commits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/definitions/MetadataIndexCoverage"
+        },
+        "index": {
+          "$ref": "#/definitions/MetadataIndexStatus"
+        },
+        "matchedCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nextCursor": {
+          "maxLength": 1024,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previousCursor": {
+          "maxLength": 1024,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queryKey": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "resultVersion": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "snapshotKey": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "queryKey",
+        "snapshotKey",
+        "resultVersion",
+        "commits",
+        "pageOffset",
+        "previousCursor",
+        "nextCursor",
+        "matchedCount",
+        "coverage",
+        "anchorFound",
+        "index"
+      ],
+      "type": "object"
+    },
+    "SearchTimeField": {
+      "enum": [
+        "author",
+        "committer"
+      ],
+      "type": "string"
     },
     "SessionPersistenceStatus": {
       "additionalProperties": false,

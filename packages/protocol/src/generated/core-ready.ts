@@ -7,7 +7,8 @@ export type Capability =
   | "historyPagination"
   | "historyNewSinceLastSeen"
   | "repositoryScopes"
-  | "metadataIndex";
+  | "metadataIndex"
+  | "metadataSearch";
 
 export interface CoreReady {
   capabilities: Capability[];

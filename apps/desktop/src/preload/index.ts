@@ -26,6 +26,9 @@ const api: CommitScopeApi = {
   cancelRefMergeStatus: () => ipcRenderer.invoke("commitscope:refs:merge-status:cancel"),
   getMetadataIndexStatus: () => ipcRenderer.invoke("commitscope:index:status"),
   controlMetadataIndex: action => ipcRenderer.invoke("commitscope:index:control", action),
+  searchCommits: params => ipcRenderer.invoke("commitscope:search:commits", params),
+  listSearchIdentities: params => ipcRenderer.invoke("commitscope:search:identities", params),
+  cancelSearch: () => ipcRenderer.invoke("commitscope:search:cancel"),
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Check, ChevronDown, ChevronUp, Copy, ExternalLink } from "lucide-react";
 import type { CommitIdentity, CommitSummary, RepositoryInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
 import { homeAbbreviated, identityTime, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
@@ -12,16 +13,22 @@ import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
-export function CommitDetail({ preview, selectedOid, onSelect, onMoveSelection }: {
+export function CommitDetail({ preview, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
   onMoveSelection(delta: -1 | 1): Promise<void>;
+  commitsOverride?: CommitSummary[];
+  selectedCommitOverride?: CommitSummary | null;
+  timeField?: SearchTimeField;
+  canMovePrevious?: boolean;
+  canMoveNext?: boolean;
 }): React.JSX.Element {
-  const commits = preview.commits;
+  const commits = commitsOverride ?? preview.commits;
   const index = commits.findIndex(commit => commit.oid === selectedOid);
-  const oldSelection = index === -1 && preview.oldSelectedCommit?.oid === selectedOid;
-  const commit = index === -1 ? oldSelection ? preview.oldSelectedCommit : undefined : commits[index];
+  const oldSelection = !selectedCommitOverride && index === -1 && preview.oldSelectedCommit?.oid === selectedOid;
+  const commit = selectedCommitOverride?.oid === selectedOid ? selectedCommitOverride
+    : index === -1 ? oldSelection ? preview.oldSelectedCommit : undefined : commits[index];
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
   const byOid = React.useMemo(() => new Map(commits.map(item => [item.oid, item])), [commits]);
   const repository = preview.repository;
@@ -44,9 +51,9 @@ export function CommitDetail({ preview, selectedOid, onSelect, onMoveSelection }
         <div className="flex-1" />
         <HandoffMenu commit={commit} repository={repository} />
         <CopyOidButton oid={commit.oid} />
-        <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={index < 0 || (index === 0 && preview.windowPreviousCursor === null)}
+        <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
           onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
-        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null)}
+        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={canMoveNext === undefined ? index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null) : !canMoveNext}
           onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
       </div>
 
@@ -75,7 +82,7 @@ export function CommitDetail({ preview, selectedOid, onSelect, onMoveSelection }
             <Section title="作者与时间">
               <IdentityBlock role="Author" identity={commit.author} />
               <IdentityBlock role="Committer" identity={commit.committer} />
-              {!sameIdentity(commit.author, commit.committer) ? <span className="text-xs text-fg3">作者与提交者不同；列表按提交时间分组。</span> : null}
+              {!sameIdentity(commit.author, commit.committer) ? <span className="text-xs text-fg3">作者与提交者不同；{timeField === "author" ? "搜索结果按作者时间排序。" : timeField === "committer" ? "搜索结果按提交者时间排序。" : "列表按提交时间分组。"}</span> : null}
             </Section>
             <Section title="标识与父提交">
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3.5 gap-y-2.5 text-[13px]">

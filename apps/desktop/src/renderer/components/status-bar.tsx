@@ -36,10 +36,13 @@ export function previewLabel(preview: RepositoryView): string {
   return "首屏已加载";
 }
 
-export function StatusBar({ status, preview, onIndexAction }: {
+export function StatusBar({ status, preview, onIndexAction, previewStatus, searchBusy, timeField }: {
   status: CoreStatus;
   preview: RepositoryView;
   onIndexAction(action: MetadataIndexAction): void;
+  previewStatus?: string;
+  searchBusy?: boolean;
+  timeField?: "author" | "committer";
 }): React.JSX.Element {
   const indexSupported = status.state === "ready" && status.core.capabilities.includes("metadataIndex");
   return <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-[18px] border-t border-line px-4 text-xs text-fg3">
@@ -48,10 +51,10 @@ export function StatusBar({ status, preview, onIndexAction }: {
       <span>{coreLabel(status)}</span>
     </span>
     <span>只读</span>
-    <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite">{previewLabel(preview)}</span>
-    {preview.session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} /> : null}
+      <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite">{previewStatus ?? previewLabel(preview)}</span>
+    {preview.session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} interactionBusy={Boolean(searchBusy)} /> : null}
     <span className="flex-1" />
-    <span>提交时间 · {zoneLabel()}</span>
+    <span>{timeField === "author" ? "作者时间" : timeField === "committer" ? "提交者时间" : "提交时间"} · {zoneLabel()}</span>
   </footer>;
 }
 
@@ -72,14 +75,15 @@ function metadataIndexLabel(status: MetadataIndexStatus | null, loading: boolean
   }
 }
 
-function MetadataIndexStatusControl({ view, supported, onAction }: {
+function MetadataIndexStatusControl({ view, supported, onAction, interactionBusy }: {
   view: RepositoryView;
   supported: boolean;
   onAction(action: MetadataIndexAction): void;
+  interactionBusy: boolean;
 }): React.JSX.Element {
   const status = view.metadataIndex;
   const actionLoading = view.metadataIndexAction !== null;
-  const busy = !isMetadataIndexRequestIdle(view) || view.metadataIndexLoading || actionLoading;
+  const busy = interactionBusy || !isMetadataIndexRequestIdle(view) || view.metadataIndexLoading || actionLoading;
   const label = metadataIndexLabel(status, view.metadataIndexLoading, supported);
   const button = (action: MetadataIndexAction, text: string) => <Button key={action} type="button" variant="ghost" size="sm"
     className="h-7 justify-start px-2 text-xs" data-testid={`index-action-${action}`} disabled={!supported || busy}

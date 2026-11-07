@@ -2,7 +2,7 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0、P1-01 至 P1-05 已完成本机 macOS 技术验收，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条、最多保留 2000 条摘要；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。搜索、Rust 图布局与 diff 尚未完成，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：M0、M1（P1-01 至 P1-06）已完成本机 macOS 技术验收，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条、最多保留 2000 条摘要；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过 500 MiB 目标，留待 P4-01 修复。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局、完整详情、diff、路径搜索等尚未完成，当前不是 MVP。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
@@ -52,8 +52,10 @@
 | [P1-04 验收记录](docs/validation/p1-04-scope-navigation.md) | 范围隔离、独立 Git 对照、失败恢复与真实窗口验证 |
 | [P1-05 代码级计划](docs/implementation/p1-05-metadata-index.md) | 可恢复 SQLite 元数据索引、快照 coverage、后台控制与配额 |
 | [P1-05 验收记录](docs/validation/p1-05-metadata-index.md) | SQLite 数据对照、恢复与安全边界、桌面控制和故障重建验证 |
+| [P1-06 代码级计划](docs/implementation/p1-06-metadata-search.md) | 字面搜索语义、组合筛选、版本化结果分页与锚点保持 |
+| [P1-06 验收记录](docs/validation/p1-06-metadata-search.md) | 搜索的数据对照、动态分页、桌面试用及当前验证状态 |
 
-建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M1 / P1-06` 元数据搜索。继续沿用 Claude 的界面设计，M1 内提前交付元数据搜索。
+建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。下一步是 `M2 / P2-01` Rust 图布局与跨页检查点，继续沿用 Claude 的界面设计。
 
 ## 本地运行
 
@@ -84,6 +86,8 @@ pnpm test:smoke:history
 pnpm test:smoke:virtual-history
 pnpm test:smoke:scope-navigation
 pnpm test:smoke:metadata-index
+pnpm test:search
+pnpm test:smoke:metadata-search
 node --test tests/repository/benchmark-process-tree.test.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
@@ -95,6 +99,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 `test:renderer` 用假接口测试会话、翻页与刷新状态（判旧、取消、记录时机），不启动 Electron。`test:sessions` 只构建 daemon，使用临时 Git fixture 与独立应用数据目录验证会话 / 查看记录；`test:history` 验证真实游标完整遍历、淘汰重放、取消和刷新，这些检查不启动 UI。`test:navigation` 使用临时真实仓库对照多范围历史、默认基准、合入状态、worktree 和失败恢复。`test:smoke:history` 使用已构建的 Electron 应用验证翻页、刷新、选择与锚点；`test:smoke:virtual-history` 验证 2205 条正反向遍历、2000 条上限、虚拟 DOM、键盘、复制及只读快照；`test:smoke:scope-navigation` 验证真实选择器、多范围切换、失败保留与恢复、原生窗口内容边界；先运行 `pnpm build`。滚动测量命令和 release 标记诊断见 [P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，应与构建、测试串行执行。旧预览的纯 headless 回归可运行 `node scripts/test-repository.mjs`。应用通过 main 把 `userData/repository-state` 传给核心；直接运行 daemon 时，未配置 `COMMITSCOPE_APP_DATA_DIR` 会禁用持久化，仍可浏览。存储不会因打开仓库就标记已读，调用方需在真实内容展示后显式记录查看。
 
 `test:indexing` 使用真实 Git 对照 SQLite 的完整元数据与固定快照成员，并验证暂停 / 取消、强退续建、缓存故障、配额和只读边界；`test:smoke:metadata-index` 验证实际窗口中的索引状态与控制。直接运行 daemon 可用 `COMMITSCOPE_INDEX_QUOTA_BYTES` 调整每库配额，范围为 256 KiB 至 2 GiB，默认 2 GiB；该配额包含数据库与事务侧文件。暂停和取消保留已提交批次，重建只清理当前仓库的应用缓存。
+
+`test:search` 对照真实 Git fixture 验证完整消息、Unicode 大小写、身份组合、日期、OID、部分结果版本和双向分页；实际项目仓库试用通过显式 `pnpm test:search -- --real-repository` 运行。`test:smoke:metadata-search` 检查真实窗口中的搜索和筛选流程。大仓搜索延迟仍需后续测量，每页扫描当前已索引前缀。
 
 ## 工程布局
 
@@ -150,7 +156,7 @@ pnpm benchmark:history --repository="$PWD/output/fixtures/local-100k/large" --ru
 
 2026-11-07 根据[《Git客户端替代方案》对话](chatgpt-conversation://6aee1e91-eb04-83e9-b710-302e29850b14)及本次要求整理。以对话后半段对需求的收敛为准：历史和搜索优先，merge 与 review 次要。本次明确选择 Electron，并取消此前“评估复用 GitComet 后端”的候选路线。
 
-同日用户通过四项选择确认：固定快照并点击刷新、提前交付元数据搜索、消息搜索框配合明确字段筛选、部分结果自动合并并保持选择和滚动锚点。随后授权由主代理制定代码级计划与验收、轻量模型代理实现；P0-01 至 P0-04、P1-01 至 P1-05 已完成，后续任务按实施计划推进。
+同日用户通过四项选择确认：固定快照并点击刷新、提前交付元数据搜索、消息搜索框配合明确字段筛选、部分结果自动合并并保持选择和滚动锚点。随后授权由主代理制定代码级计划与验收、轻量模型代理实现；截至 2026-11-08，P0-01 至 P0-04、P1-01 至 P1-06 已完成，后续任务按实施计划推进。
 
 同日用户在设计画布上比较多个方向后确认界面 v3：提交列表 + 详情双栏，分支与 worktree 收进范围选择器，文件改动放到详情第二层；并新增分支合入状态（对比 origin/main，识别 squash / rebase 合并）、按需计算的包含分支和按 Author 的活动分布。随后补充上次查看后新增标记、更新明细、merge 带入的提交、trailer、宽分支图、窄窗口、筛选弹层、定位横幅与 ⌘K 命令面板。产品、架构、计划与验收文档已同步。
 

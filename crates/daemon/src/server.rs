@@ -3,7 +3,8 @@ use commitscope_core::{
     ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage, EmptyParams, ErrorCode,
     MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadHistoryPageParams,
     ReadRepositoryPreviewParams, RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope,
-    ResponseData, SelectRepositoryScopeParams, ServerMessage,
+    ResponseData, SearchCommitsParams, SearchIdentitiesParams, SearchPage,
+    SelectRepositoryScopeParams, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -48,6 +49,8 @@ enum RequestOperation {
     RefMergeStatus(RefMergeStatusParams),
     GetMetadataIndexStatus,
     ControlMetadataIndex(MetadataIndexAction),
+    SearchCommits(SearchCommitsParams),
+    ListSearchIdentities(SearchIdentitiesParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -485,6 +488,8 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::RefMergeStatus(_)
             | RequestOperation::GetMetadataIndexStatus
             | RequestOperation::ControlMetadataIndex(_)
+            | RequestOperation::SearchCommits(_)
+            | RequestOperation::ListSearchIdentities(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
@@ -637,6 +642,52 @@ fn dispatch_request(
                     cancelled_for_worker,
                     metadata_tasks_worker,
                 )
+            }));
+        }
+        RequestOperation::SearchCommits(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled = Arc::clone(&cancelled);
+            let metadata_tasks = Arc::clone(metadata_tasks);
+            let request_id = request_id.clone();
+            workers.push(thread::spawn(move || {
+                execute_search_commits(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    session,
+                    params,
+                    metadata_tasks,
+                    cancelled,
+                );
+            }));
+        }
+        RequestOperation::ListSearchIdentities(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled = Arc::clone(&cancelled);
+            let metadata_tasks = Arc::clone(metadata_tasks);
+            let request_id = request_id.clone();
+            workers.push(thread::spawn(move || {
+                execute_search_identities(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    session,
+                    params,
+                    metadata_tasks,
+                    cancelled,
+                );
             }));
         }
         RequestOperation::RefreshRepository(params) => {
@@ -1477,6 +1528,8 @@ fn validate_request(
         | "refMergeStatus"
         | "getMetadataIndexStatus"
         | "controlMetadataIndex"
+        | "searchCommits"
+        | "listSearchIdentities"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -1530,6 +1583,24 @@ fn validate_request(
                             )
                         })
                 }
+                "searchCommits" => serde_json::from_value::<SearchCommitsParams>(params.clone())
+                    .map(RequestOperation::SearchCommits)
+                    .map_err(|_| {
+                        (
+                            ErrorCode::InvalidRequest,
+                            "searchCommits params 无效".into(),
+                        )
+                    }),
+                "listSearchIdentities" => {
+                    serde_json::from_value::<SearchIdentitiesParams>(params.clone())
+                        .map(RequestOperation::ListSearchIdentities)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "listSearchIdentities params 无效".into(),
+                            )
+                        })
+                }
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
@@ -1556,6 +1627,8 @@ fn validate_request(
         | "refMergeStatus"
         | "getMetadataIndexStatus"
         | "controlMetadataIndex"
+        | "searchCommits"
+        | "listSearchIdentities"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"
@@ -2141,6 +2214,367 @@ fn ensure_metadata_index(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_search_commits(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    session: Arc<session::RepositorySession>,
+    params: SearchCommitsParams,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let cache_epoch = metadata_tasks.search_cache_epoch(&session);
+    let result = crate::search::search_commits(
+        &session_store::SessionStore::from_env(),
+        &session,
+        &params,
+        cache_epoch,
+        &cancelled,
+        std::time::Instant::now() + PREVIEW_TIMEOUT,
+    );
+    let mut page = match result {
+        Ok(page) => page,
+        Err(error) => {
+            send_search_failure(
+                sender, shutdown, request_id, repo_id, generation, error, &cancelled,
+            );
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+    };
+    if metadata_tasks.search_cache_epoch(&session) != cache_epoch {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::SnapshotChanged,
+            "搜索缓存正在重建，请刷新搜索结果".into(),
+            true,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    let current_index = metadata_tasks.status(
+        &session_store::SessionStore::from_env(),
+        &session,
+        page.index.quota_bytes,
+    );
+    if let Some(error) = current_index.error.as_ref().filter(|error| {
+        matches!(
+            error.code,
+            ErrorCode::IndexCorrupt
+                | ErrorCode::IndexVersionUnsupported
+                | ErrorCode::IndexUnavailable
+        )
+    }) {
+        send_search_failure(
+            sender,
+            shutdown,
+            request_id,
+            repo_id,
+            generation,
+            crate::metadata_index::IndexError {
+                code: error.code,
+                message: error.message.clone(),
+            },
+            &cancelled,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    page.index = current_index;
+    let chunks =
+        match pack_search_page_chunks(request_id, repo_id.as_deref(), generation.as_deref(), &page)
+        {
+            Ok(chunks) => chunks,
+            Err(()) => {
+                send_terminal_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.to_owned()),
+                    repo_id,
+                    generation,
+                    ErrorCode::ResourceLimit,
+                    "搜索结果页超过单帧大小限制".into(),
+                    false,
+                );
+                remove_request(requests, request_id, &cancelled);
+                return;
+            }
+        };
+    let total = page.commits.len() as u32;
+    let mut processed = 0_u32;
+    for (index, commits) in chunks.iter().enumerate() {
+        if metadata_tasks.search_cache_epoch(&session) != cache_epoch {
+            send_terminal_error(
+                sender,
+                shutdown,
+                Some(request_id.to_owned()),
+                repo_id,
+                generation,
+                ErrorCode::SnapshotChanged,
+                "搜索缓存正在重建，请刷新搜索结果".into(),
+                true,
+            );
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+        processed = processed.saturating_add(commits.len() as u32);
+        let done = index + 1 == chunks.len();
+        let message = search_page_response(
+            request_id,
+            repo_id.clone(),
+            generation.clone(),
+            index as u32,
+            done,
+            if done { total } else { processed },
+            if done { page.next_cursor.clone() } else { None },
+            &page,
+            commits.clone(),
+        );
+        if !send_task_message(sender, shutdown, &cancelled, &message) {
+            finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+    }
+    remove_request(requests, request_id, &cancelled);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_search_identities(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    session: Arc<session::RepositorySession>,
+    params: SearchIdentitiesParams,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let cache_epoch = metadata_tasks.search_cache_epoch(&session);
+    let result = crate::search::list_search_identities(
+        &session_store::SessionStore::from_env(),
+        &session,
+        &params,
+        cache_epoch,
+        &cancelled,
+        std::time::Instant::now() + PREVIEW_TIMEOUT,
+    );
+    let mut result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            send_search_failure(
+                sender, shutdown, request_id, repo_id, generation, error, &cancelled,
+            );
+            remove_request(requests, request_id, &cancelled);
+            return;
+        }
+    };
+    if metadata_tasks.search_cache_epoch(&session) != cache_epoch {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::SnapshotChanged,
+            "搜索缓存正在重建，请重试身份建议".into(),
+            true,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    let current_index = metadata_tasks.status(
+        &session_store::SessionStore::from_env(),
+        &session,
+        result.index.quota_bytes,
+    );
+    if let Some(error) = current_index.error.as_ref().filter(|error| {
+        matches!(
+            error.code,
+            ErrorCode::IndexCorrupt
+                | ErrorCode::IndexVersionUnsupported
+                | ErrorCode::IndexUnavailable
+        )
+    }) {
+        send_search_failure(
+            sender,
+            shutdown,
+            request_id,
+            repo_id,
+            generation,
+            crate::metadata_index::IndexError {
+                code: error.code,
+                message: error.message.clone(),
+            },
+            &cancelled,
+        );
+        remove_request(requests, request_id, &cancelled);
+        return;
+    }
+    result.index = current_index;
+    let message = ServerMessage::Response {
+        request_id: request_id.to_owned(),
+        repo_id: repo_id.clone(),
+        generation: generation.clone(),
+        sequence: 0,
+        done: true,
+        coverage: Coverage {
+            complete: true,
+            processed: result.identities.len() as u32,
+        },
+        next_cursor: None,
+        data: ResponseData::SearchIdentities { result },
+    };
+    if serde_json::to_vec(&message).map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES) {
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            ErrorCode::ResourceLimit,
+            "身份建议响应超过大小限制".into(),
+            false,
+        );
+    } else {
+        if !send_task_message(sender, shutdown, &cancelled, &message) {
+            finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+        }
+    }
+    remove_request(requests, request_id, &cancelled);
+}
+
+fn send_search_failure(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    error: crate::metadata_index::IndexError,
+    cancelled: &AtomicBool,
+) {
+    if error.code == ErrorCode::Cancelled || cancelled.load(Ordering::Acquire) {
+        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
+    } else {
+        let retryable = matches!(error.code, ErrorCode::Busy | ErrorCode::Timeout);
+        send_terminal_error(
+            sender,
+            shutdown,
+            Some(request_id.to_owned()),
+            repo_id,
+            generation,
+            error.code,
+            error.message,
+            retryable,
+        );
+    }
+}
+
+fn pack_search_page_chunks(
+    request_id: &str,
+    repo_id: Option<&str>,
+    generation: Option<&str>,
+    page: &SearchPage,
+) -> Result<Vec<Vec<commitscope_core::CommitSummary>>, ()> {
+    if page.commits.is_empty() {
+        let candidate = search_page_response(
+            request_id,
+            repo_id.map(str::to_owned),
+            generation.map(str::to_owned),
+            1,
+            true,
+            0,
+            page.next_cursor.clone(),
+            page,
+            Vec::new(),
+        );
+        return (serde_json::to_vec(&candidate).map_err(|_| ())?.len() <= RESPONSE_TARGET_BYTES)
+            .then_some(vec![Vec::new()])
+            .ok_or(());
+    }
+    let mut chunks = Vec::<Vec<commitscope_core::CommitSummary>>::new();
+    let mut current = Vec::new();
+    for commit in &page.commits {
+        current.push(commit.clone());
+        let candidate = search_page_response(
+            request_id,
+            repo_id.map(str::to_owned),
+            generation.map(str::to_owned),
+            1,
+            true,
+            page.commits.len() as u32,
+            page.next_cursor.clone(),
+            page,
+            current.clone(),
+        );
+        if serde_json::to_vec(&candidate).map_err(|_| ())?.len() > RESPONSE_TARGET_BYTES {
+            let last = current.pop().ok_or(())?;
+            if current.is_empty() {
+                return Err(());
+            }
+            chunks.push(std::mem::take(&mut current));
+            current.push(last);
+            let single = search_page_response(
+                request_id,
+                repo_id.map(str::to_owned),
+                generation.map(str::to_owned),
+                1,
+                true,
+                page.commits.len() as u32,
+                page.next_cursor.clone(),
+                page,
+                current.clone(),
+            );
+            if serde_json::to_vec(&single).map_err(|_| ())?.len() > RESPONSE_TARGET_BYTES {
+                return Err(());
+            }
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    Ok(chunks)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_page_response(
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    sequence: u32,
+    done: bool,
+    processed: u32,
+    next_cursor: Option<String>,
+    page: &SearchPage,
+    commits: Vec<commitscope_core::CommitSummary>,
+) -> ServerMessage {
+    let mut page = page.clone();
+    page.commits = commits;
+    ServerMessage::Response {
+        request_id: request_id.to_owned(),
+        repo_id,
+        generation,
+        sequence,
+        done,
+        coverage: Coverage {
+            complete: done,
+            processed,
+        },
+        next_cursor,
+        data: ResponseData::SearchPage { page },
+    }
+}
+
 fn pack_history_chunks(
     request_id: &str,
     repo_id: Option<&str>,
@@ -2691,5 +3125,113 @@ fn reap_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
         } else {
             index += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod search_response_tests {
+    use super::*;
+    use commitscope_core::{
+        CommitIdentity, CommitSummary, MetadataIndexCoverage, MetadataIndexState,
+        MetadataIndexStatus,
+    };
+
+    #[test]
+    fn search_page_chunks_preserve_metadata_and_cumulative_envelope_coverage() {
+        let page = SearchPage {
+            query_key: "q".repeat(64),
+            snapshot_key: "s".repeat(64),
+            result_version: "v".repeat(64),
+            commits: (0..40)
+                .map(|index| CommitSummary {
+                    oid: format!("{index:040x}"),
+                    parents: Vec::new(),
+                    summary: "x".repeat(20 * 1024),
+                    summary_truncated: false,
+                    author: CommitIdentity {
+                        name: "Author".into(),
+                        email: "author@example.test".into(),
+                        timestamp: "1".into(),
+                        offset: "+0000".into(),
+                    },
+                    committer: CommitIdentity {
+                        name: "Committer".into(),
+                        email: "committer@example.test".into(),
+                        timestamp: "2".into(),
+                        offset: "+0000".into(),
+                    },
+                    text_lossy: false,
+                })
+                .collect(),
+            page_offset: 10,
+            previous_cursor: Some("previous".into()),
+            next_cursor: Some("next".into()),
+            matched_count: 100,
+            coverage: MetadataIndexCoverage {
+                processed: 200,
+                complete: false,
+            },
+            anchor_found: None,
+            index: MetadataIndexStatus {
+                snapshot_key: Some("s".repeat(64)),
+                state: MetadataIndexState::Running,
+                coverage: MetadataIndexCoverage {
+                    processed: 200,
+                    complete: false,
+                },
+                disk_bytes: 1024,
+                quota_bytes: 4096,
+                error: None,
+            },
+        };
+        let chunks =
+            pack_search_page_chunks("request", Some("repo"), Some("generation"), &page).unwrap();
+        assert!(chunks.len() > 1);
+
+        let mut processed = 0_u32;
+        for (index, commits) in chunks.iter().enumerate() {
+            processed += commits.len() as u32;
+            let done = index + 1 == chunks.len();
+            let message = search_page_response(
+                "request",
+                Some("repo".into()),
+                Some("generation".into()),
+                index as u32,
+                done,
+                processed,
+                if done { page.next_cursor.clone() } else { None },
+                &page,
+                commits.clone(),
+            );
+            let encoded = serde_json::to_vec(&message).unwrap();
+            assert!(encoded.len() <= RESPONSE_TARGET_BYTES);
+            let ServerMessage::Response {
+                sequence,
+                coverage,
+                next_cursor,
+                done: actual_done,
+                data: ResponseData::SearchPage { page: actual_page },
+                ..
+            } = message
+            else {
+                panic!("unexpected response variant");
+            };
+            assert_eq!(actual_done, done);
+            assert_eq!(sequence, index as u32);
+            assert_eq!(coverage.complete, done);
+            assert_eq!(coverage.processed, processed);
+            assert_eq!(
+                next_cursor,
+                if done { page.next_cursor.clone() } else { None }
+            );
+            assert_eq!(actual_page.query_key, page.query_key);
+            assert_eq!(actual_page.result_version, page.result_version);
+            assert_eq!(actual_page.page_offset, page.page_offset);
+            assert_eq!(actual_page.matched_count, page.matched_count);
+            assert_eq!(actual_page.coverage, page.coverage);
+            assert_eq!(actual_page.next_cursor, page.next_cursor);
+            assert_eq!(actual_page.commits.len(), commits.len());
+        }
+        assert_eq!(processed, page.commits.len() as u32);
     }
 }

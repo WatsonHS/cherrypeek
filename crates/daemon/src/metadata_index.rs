@@ -7,7 +7,7 @@ use commitscope_core::{
     ErrorCode, MetadataIndexAction, MetadataIndexCoverage, MetadataIndexFailure,
     MetadataIndexState, MetadataIndexStatus,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -59,6 +59,7 @@ pub struct TaskManager {
     status: Arc<Mutex<CachedStatus>>,
     operation: Mutex<()>,
     active_context: Arc<Mutex<Option<(String, String)>>>,
+    rebuild_epochs: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +90,109 @@ impl FileStamp {
             true
         }
     }
+
+    fn identity_token(&self) -> String {
+        #[cfg(unix)]
+        {
+            format!("{:x}.{:x}", self.device, self.inode)
+        }
+        #[cfg(not(unix))]
+        {
+            format!("{:x}.{:x}", self.length, self.modified_ns)
+        }
+    }
+}
+
+fn check_search_active(cancelled: &AtomicBool, deadline: Instant) -> Result<(), IndexError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(IndexError {
+            code: ErrorCode::Cancelled,
+            message: "Metadata search was cancelled".into(),
+        });
+    }
+    if Instant::now() >= deadline {
+        return Err(IndexError {
+            code: ErrorCode::Timeout,
+            message: "Metadata search timed out".into(),
+        });
+    }
+    Ok(())
+}
+
+fn empty_search_snapshot(
+    snapshot_key: String,
+    quota: u64,
+    file_identity: &str,
+) -> Result<SearchSnapshot, IndexError> {
+    Ok(SearchSnapshot {
+        snapshot_key: snapshot_key.clone(),
+        file_identity: file_identity.to_owned(),
+        watermark: 0,
+        complete: false,
+        index_status: MetadataIndexStatus {
+            snapshot_key: Some(snapshot_key),
+            state: MetadataIndexState::Idle,
+            coverage: MetadataIndexCoverage {
+                processed: 0,
+                complete: false,
+            },
+            disk_bytes: 0,
+            quota_bytes: quota,
+            error: None,
+        },
+    })
+}
+
+fn readonly_database_path(
+    store: &SessionStore,
+    session: &session::RepositorySession,
+) -> Result<Option<PathBuf>, IndexError> {
+    let root = store
+        .existing_metadata_cache_root(&session.info.repository)
+        .map_err(|_| {
+            unavailable("Application metadata cache directory is unavailable or unsafe")
+        })?;
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let digest = hex(&Sha256::digest(session.info.repository_key.as_bytes()));
+    let repository_dir = root.join(digest);
+    let directory = match fs::symlink_metadata(&repository_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unavailable("Could not inspect metadata index directory")),
+    };
+    if directory.file_type().is_symlink() || !directory.is_dir() {
+        return Err(unavailable("Metadata index directory is unsafe"));
+    }
+    let canonical = fs::canonicalize(&repository_dir)
+        .map_err(|_| unavailable("Could not resolve metadata index directory"))?;
+    if canonical != repository_dir {
+        return Err(unavailable(
+            "Metadata index directory changed during search",
+        ));
+    }
+    let path = repository_dir.join("index.sqlite3");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            check_known_files(&path)?;
+            let _ = file_stamp(&path)?;
+            Ok(Some(path))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(unavailable("Could not inspect metadata index database")),
+    }
+}
+
+fn map_search_sql_error(error: rusqlite::Error) -> IndexError {
+    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    {
+        return IndexError {
+            code: ErrorCode::Busy,
+            message: "Metadata index is busy; retry the search shortly".into(),
+        };
+    }
+    map_sql_error(error)
 }
 
 fn file_stamp(path: &Path) -> Result<FileStamp, IndexError> {
@@ -179,6 +283,15 @@ impl TaskManager {
             task.cancelled.store(true, Ordering::Release);
             let _ = task.handle.join();
         }
+    }
+
+    pub fn search_cache_epoch(&self, session: &session::RepositorySession) -> u64 {
+        self.rebuild_epochs
+            .lock()
+            .expect("metadata rebuild epoch mutex poisoned")
+            .get(&session.info.repository_key)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn status(
@@ -380,6 +493,16 @@ impl TaskManager {
                 let _ = set_persisted_state(&store, &session, quota, MetadataIndexState::Cancelled);
             }
             MetadataIndexAction::Rebuild => {
+                {
+                    let mut epochs = self
+                        .rebuild_epochs
+                        .lock()
+                        .expect("metadata rebuild epoch mutex poisoned");
+                    let epoch = epochs
+                        .entry(session.info.repository_key.clone())
+                        .or_default();
+                    *epoch = epoch.saturating_add(1);
+                }
                 self.stop_locked(StopKind::External, &session);
                 let rebuilt = match reset_for_rebuild(&store, &session, quota) {
                     Ok(status) => {
@@ -661,6 +784,171 @@ pub fn status(
         Ok(index) => index.status(session),
         Err(error) => idle_status(quota, Some(error)),
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct SearchSnapshot {
+    pub snapshot_key: String,
+    pub file_identity: String,
+    pub watermark: u64,
+    pub complete: bool,
+    pub index_status: MetadataIndexStatus,
+}
+
+pub(crate) fn with_readonly_search_snapshot<T>(
+    store: &SessionStore,
+    session: &session::RepositorySession,
+    quota: u64,
+    cache_epoch: u64,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    read: impl FnOnce(Option<&Connection>, &SearchSnapshot) -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
+    check_search_active(cancelled, deadline)?;
+    repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+        .map_err(map_repository_error)?;
+    let (snapshot_key, _) = snapshot_identity(session)?;
+    let Some(path) = readonly_database_path(store, session)? else {
+        let snapshot =
+            empty_search_snapshot(snapshot_key, quota, &format!("missing.{cache_epoch}"))?;
+        let result = read(None, &snapshot)?;
+        repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+            .map_err(map_repository_error)?;
+        return Ok(result);
+    };
+    let opened_identity = file_stamp(&path)?;
+    let connection = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(map_search_sql_error)?;
+    connection
+        .busy_timeout(Duration::from_millis(80))
+        .map_err(map_search_sql_error)?;
+    connection
+        .pragma_update(None, "trusted_schema", "OFF")
+        .map_err(map_search_sql_error)?;
+    connection
+        .pragma_update(None, "query_only", "ON")
+        .map_err(map_search_sql_error)?;
+    connection
+        .pragma_update(None, "cache_size", -1024_i64)
+        .map_err(map_search_sql_error)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(map_search_sql_error)?;
+    let schema_version: i32 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(map_search_sql_error)?;
+    let application_id: i32 = transaction
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(map_search_sql_error)?;
+    if schema_version != SCHEMA_VERSION || application_id != APPLICATION_ID {
+        let user_tables: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_search_sql_error)?;
+        if is_empty_initialization_state(schema_version, application_id, user_tables) {
+            let snapshot = empty_search_snapshot(
+                snapshot_key,
+                quota,
+                &format!("{}.{cache_epoch}", opened_identity.identity_token()),
+            )?;
+            check_search_active(cancelled, deadline)?;
+            let result = read(None, &snapshot)?;
+            drop(transaction);
+            check_search_active(cancelled, deadline)?;
+            if !opened_identity.same_file(&file_stamp(&path)?) {
+                return Err(corrupt(
+                    "Metadata index database was replaced during search",
+                ));
+            }
+            repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+                .map_err(map_repository_error)?;
+            return Ok(result);
+        }
+        return Err(IndexError {
+            code: ErrorCode::IndexVersionUnsupported,
+            message: "Metadata index schema version is unsupported".into(),
+        });
+    }
+    let row = transaction
+        .query_row(
+            "SELECT processed,complete,state FROM snapshots WHERE snapshot_key=?1",
+            [&snapshot_key],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_search_sql_error)?;
+    let current_stamp = file_stamp(&path)?;
+    if !opened_identity.same_file(&current_stamp) {
+        return Err(corrupt(
+            "Metadata index database was replaced during search",
+        ));
+    }
+    let snapshot = match row {
+        Some((processed, complete, state)) => {
+            let watermark = u64::try_from(processed)
+                .map_err(|_| corrupt("Metadata index watermark is invalid"))?;
+            let complete = complete != 0;
+            let mut index_status = MetadataIndexStatus {
+                snapshot_key: Some(snapshot_key.clone()),
+                state: parse_state(&state),
+                coverage: MetadataIndexCoverage {
+                    processed: watermark,
+                    complete,
+                },
+                disk_bytes: disk_bytes(&path)?,
+                quota_bytes: quota,
+                error: None,
+            };
+            if complete && index_status.state != MetadataIndexState::Complete {
+                index_status.state = MetadataIndexState::Complete;
+            }
+            SearchSnapshot {
+                snapshot_key,
+                file_identity: format!("{}.{cache_epoch}", opened_identity.identity_token()),
+                watermark,
+                complete,
+                index_status,
+            }
+        }
+        None => empty_search_snapshot(
+            snapshot_key,
+            quota,
+            &format!("{}.{cache_epoch}", opened_identity.identity_token()),
+        )?,
+    };
+    check_search_active(cancelled, deadline)?;
+    let result = read(Some(&transaction), &snapshot)?;
+    drop(transaction);
+    check_search_active(cancelled, deadline)?;
+    let latest_identity = file_stamp(&path)?;
+    if !opened_identity.same_file(&latest_identity) {
+        return Err(corrupt(
+            "Metadata index database was replaced during search",
+        ));
+    }
+    repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+        .map_err(map_repository_error)?;
+    Ok(result)
+}
+
+fn is_empty_initialization_state(
+    schema_version: i32,
+    application_id: i32,
+    user_tables: i64,
+) -> bool {
+    schema_version == 0 && application_id == 0 && user_tables == 0
 }
 
 pub fn reset_for_rebuild(
@@ -1633,6 +1921,19 @@ mod tests {
         *manager.active_context.lock().unwrap() = Some(("repo".into(), "generation".into()));
         manager.shutdown();
         assert_eq!(*manager.active_context.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn only_a_blank_zero_version_database_is_treated_as_initializing() {
+        assert!(is_empty_initialization_state(0, 0, 0));
+        assert!(!is_empty_initialization_state(0, 0, 1));
+        assert!(!is_empty_initialization_state(0, APPLICATION_ID, 0));
+        assert!(!is_empty_initialization_state(SCHEMA_VERSION, 0, 0));
+        assert!(!is_empty_initialization_state(
+            SCHEMA_VERSION + 1,
+            APPLICATION_ID,
+            0
+        ));
     }
 
     fn temporary_db() -> PathBuf {

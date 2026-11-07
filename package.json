@@ -27,7 +27,10 @@
     "test:history": "node scripts/test-history.mjs",
     "test:navigation": "node scripts/test-navigation.mjs",
     "test:indexing": "node scripts/test-indexing.mjs",
+    "test:search": "node scripts/test-search.mjs",
+    "test:search:project": "node scripts/test-search.mjs --real-repository",
     "test:smoke:metadata-index": "node tests/smoke/metadata-index-smoke.mjs",
+    "test:smoke:metadata-search": "node tests/smoke/metadata-search-smoke.mjs",
     "benchmark:history": "node scripts/benchmark-history.mjs",
     "benchmark:history-scroll": "node scripts/benchmark-history-scroll.mjs",
     "test:renderer": "node scripts/test-renderer.mjs"

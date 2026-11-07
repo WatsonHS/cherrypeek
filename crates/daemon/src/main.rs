@@ -5,6 +5,7 @@ mod metadata_index;
 mod navigation;
 mod repository;
 mod runtime;
+mod search;
 mod server;
 mod session;
 mod session_store;

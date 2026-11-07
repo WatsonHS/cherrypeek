@@ -1,6 +1,6 @@
 # 技术架构
 
-日期：2026-11-07。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。P1-03 的有界虚拟窗口、新增标记及[滚动测量](benchmarks/p1-03-history-scroll.md)已交付，短时空闲整树 RSS 尚未达到目标。P1-04 的多范围快照、worktree 导航与按需合入状态已通过[验收](validation/p1-04-scope-navigation.md)。P1-05 的可恢复 SQLite 索引及控制已通过[验收](validation/p1-05-metadata-index.md)。下述事件、搜索查询缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
+日期：2026-11-08。P0-01 已验证 Electron / Rust 启动与隔离，P0-02 已验证版本握手、请求分块、取消、超时、上下文判旧与进程回收，证据见 [P0-01](validation/p0-01-bootstrap.md)、[P0-02 验收记录](validation/p0-02-protocol.md)。P0-03 已增加真实仓库首屏与[测量记录](benchmarks/p0-03-first-screen.md)，P0-04 已完成[读取路线决策](decisions/0001-git-reader.md)和[M0 基线](benchmarks/m0-baseline.md)，保留 Git CLI 进入 M1。P1-01 的 head 会话与本地查看记录已通过[验收](validation/p1-01-repository-sessions.md)；P1-02 的固定 HEAD 分页、有界页缓存、取消与手动刷新已通过[验收](validation/p1-02-history-pagination.md)及[核心分页测量](benchmarks/p1-02-history-pagination.md)。P1-03 的有界虚拟窗口、新增标记及[滚动测量](benchmarks/p1-03-history-scroll.md)已交付，短时空闲整树 RSS 尚未达到目标。P1-04 的多范围快照、worktree 导航与按需合入状态已通过[验收](validation/p1-04-scope-navigation.md)。P1-05 的可恢复 SQLite 索引及控制已通过[验收](validation/p1-05-metadata-index.md)。P1-06 的只读元数据搜索、组合筛选与动态结果分页已通过[验收](validation/p1-06-metadata-search.md)。下述事件、持久搜索结果缓存与 Rust 图布局仍属设计，不代表发布性能已验收。
 
 ## 技术路线
 
@@ -104,7 +104,7 @@ Rust 生成每行的 lane、父边与跨页连接信息；React 仅渲染可见�
 
 P1-05 的具体契约见[代码级计划](implementation/p1-05-metadata-index.md)，完成证据见[验收记录](validation/p1-05-metadata-index.md)。SQLite schema v1 将完整提交元数据、固定快照、按序成员分成三表；快照键由对象库身份、对象格式、排序后的冻结 tips 和 shallow / grafts 边界派生，与临时 generation 分离。每批最多 64 个提交，元数据、成员和 processed 检查点在同一事务提交；恢复时重放并核对持久前缀，不宣称常数时间恢复。最多保留 8 个快照成员集合，只有正常遍历结束才标记 complete。
 
-每个 daemon 只有一个后台索引任务，与两条交互请求额度分开；首屏之后启动，交互忙时让出下一批。数据库打开、恢复及完整性检查在后台执行；`getMetadataIndexStatus` 只读内存和少量文件状态，`controlMetadataIndex` 提供 pause / resume / cancel / rebuild。暂停和取消等待 Git 子进程回收并保留检查点，重建仅清除当前对象库的派生缓存。renderer 可见且会话请求空闲时轮询，终态降低频率；索引错误保留历史视图。查询接口仍属于 P1-06。
+每个 daemon 只有一个后台索引任务，与两条交互请求额度分开；首屏之后启动，交互忙时让出下一批。数据库打开、恢复及完整性检查在后台执行；`getMetadataIndexStatus` 只读内存和少量文件状态，`controlMetadataIndex` 提供 pause / resume / cancel / rebuild。暂停和取消等待 Git 子进程回收并保留检查点，重建仅清除当前对象库的派生缓存。renderer 可见且会话请求空闲时轮询，终态降低频率；索引错误保留历史视图。搜索查询接口由 P1-06 接入。
 
 每库默认配额 2 GiB，包含 SQLite 侧文件；主 DB 页预算最多占三分之一，给事务日志留空间，达到上限保留已提交批次并报告 quotaLimited。缓存文件拒绝 symlink、异常类型和 Unix 多硬链接；损坏或未知 schema 不静默替换，需显式重建。磁盘索引覆盖与历史页 coverage、单条状态响应 coverage 分开表达。
 
@@ -113,6 +113,8 @@ FTS5 是加速候选，不能改变产品约定的字面子串语义。M1 先建
 索引未完整时立即返回已覆盖结果，明确标记 partial，同时继续补齐所选快照范围。新命中按完整 OID 去重，按选定时间降序、完整 OID 作为稳定次序自动合并；完成前没有命中不等于最终空结果。只有覆盖完整的快照才能显示“该快照全部结果”或精确统计；后台扫描可取消。磁盘配额淘汰数据时必须同步回退 coverage。
 
 动态搜索结果由 Rust 维护排序和结果版本，分页游标绑定查询、快照及结果版本。新批次插入造成页边界变化时，按所选 OID、视口顶部 OID 与行内偏移重新取得有界窗口和游标，不把不同版本的页直接拼接。renderer 只保留有界页面；搜索结果总量不能转化为前端全量数组。此处的结果版本变化仅表示同一快照发现更多命中，不表示已经刷新仓库引用快照。
+
+P1-06 已按[代码级计划](implementation/p1-06-metadata-search.md)实现并通过[本机验收](validation/p1-06-metadata-search.md)：只读事务捕获索引成员的 ordinal 前缀，Rust 逐行执行统一谓词，并以最多 pageSize 个候选选取时间降序 / OID 升序窗口。旧 watermark 可重现稳定分页，新的 anchor 请求读取最新前缀；重建代号与文件身份隔离旧游标。暂不落地查询结果库或 FTS，每页可能重扫已覆盖前缀，具体耗时需实测。索引被暂停或不可用时明确保留部分结果 / 报错，不把后台状态当完整搜索证明。进入搜索释放隐藏历史页，返回时按保留的游标与锚点恢复，避免两个列表同时突破摘要预算。
 
 时间过滤应遍历所需可达集合再按选定时间字段过滤，避免遇到乱序时间就提前停止。Git `--since-as-filter` 与普通 `--since` 行为不同；Author time 筛选不能直接等同于默认 Git 日期筛选。[Git log 文档](https://git-scm.com/docs/git-log)。
 

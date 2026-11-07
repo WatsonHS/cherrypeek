@@ -29,6 +29,9 @@ const IPC_REF_MERGE_STATUS = "commitscope:refs:merge-status";
 const IPC_REF_MERGE_STATUS_CANCEL = "commitscope:refs:merge-status:cancel";
 const IPC_INDEX_STATUS = "commitscope:index:status";
 const IPC_INDEX_CONTROL = "commitscope:index:control";
+const IPC_SEARCH_COMMITS = "commitscope:search:commits";
+const IPC_SEARCH_IDENTITIES = "commitscope:search:identities";
+const IPC_SEARCH_CANCEL = "commitscope:search:cancel";
 const IPC_HISTORY_READ = "commitscope:history:read-page";
 const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
 const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
@@ -127,6 +130,18 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_INDEX_CONTROL, (event, action: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.controlMetadataIndex(action));
+  });
+  ipcMain.handle(IPC_SEARCH_COMMITS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.searchCommits(params));
+  });
+  ipcMain.handle(IPC_SEARCH_IDENTITIES, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.listSearchIdentities(params));
+  });
+  ipcMain.handle(IPC_SEARCH_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelSearch());
   });
   ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

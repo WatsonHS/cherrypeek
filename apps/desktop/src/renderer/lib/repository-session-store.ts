@@ -722,6 +722,78 @@ export class RepositorySessionStore {
     }
   }
 
+  suspendHistoryWindow(selectedOid: string | undefined, anchor: { oid: string; offset: number } | null): {
+    cursor: string | null;
+    selectedOid: string | undefined;
+    selectedCommit: HistoryCommit | null;
+    anchor: { oid: string; offset: number } | null;
+  } {
+    const anchorPage = anchor ? this.pages.find(page => page.commits.some(commit => commit.oid === anchor.oid)) : undefined;
+    const selectedCommit = this.view.commits.find(commit => commit.oid === selectedOid) ??
+      (this.view.oldSelectedCommit?.oid === selectedOid ? this.view.oldSelectedCommit : null);
+    const point = { cursor: anchorPage?.cursor ?? this.activePageCursor, selectedOid, selectedCommit, anchor };
+    const pending = this.pageRequest;
+    ++this.pageOperation;
+    this.pageRequest = undefined;
+    if (pending) void this.api.cancelHistoryRead();
+    this.pages = [];
+    this.activePageCursor = null;
+    this.viewportAnchorOid = undefined;
+    this.update({ ...this.view, commits: [], pageOffset: null, pageCursor: null, previousCursor: null, nextCursor: null,
+      windowPreviousCursor: null, windowNextCursor: null, hasMore: false, canNavigatePrevious: false, canNavigateNext: false,
+      pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: null, pageErrorKind: null,
+      oldSelectedCommit: null, oldSelectedObservedAtUnixMs: null, selectionMissingOnPage: false, anchorMissing: false,
+      anchorRestorationSpace: 0, windowPageCount: 0 });
+    return point;
+  }
+
+  async restoreHistoryWindow(point: {
+    cursor: string | null;
+    selectedOid: string | undefined;
+    selectedCommit: HistoryCommit | null;
+    anchor: { oid: string; offset: number } | null;
+  }): Promise<boolean> {
+    const session = this.view.session;
+    if (!session || this.view.state !== "ready") return false;
+    if (this.pageRequest) await this.cancelPage();
+    const operation = ++this.pageOperation;
+    this.update({ ...this.view, pageLoading: true, pageRequestDirection: null, pageRequestKind: null, pageError: null });
+    const done = (async (): Promise<boolean> => {
+      let result = await settle(this.api.readHistoryPage(point.cursor, this.view.pageSize));
+      if (!result.ok && point.cursor !== null && ["INVALID_CURSOR", "SNAPSHOT_CHANGED"].includes(result.error.code)) {
+        result = await settle(this.api.readHistoryPage(null, this.view.pageSize));
+      }
+      if (operation !== this.pageOperation || !sameSession(this.view.session, session)) return false;
+      if (!result.ok || !validHistoryPage(result.value, this.view.pageSize)) {
+        this.update({ ...this.view, pageLoading: false, pageError: result.ok
+          ? { code: "PROTOCOL_ERROR", message: "恢复的历史页不完整" } : result.error, pageErrorKind: "read" });
+        return false;
+      }
+      const page = result.value;
+      this.pages = [page];
+      this.activePageCursor = page.cursor;
+      this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
+      this.selectedOid = point.selectedOid;
+      const selectedStillLoaded = Boolean(point.selectedOid && page.commits.some(commit => commit.oid === point.selectedOid));
+      const anchorOid = point.anchor?.oid;
+      const anchorStillLoaded = Boolean(anchorOid && page.commits.some(commit => commit.oid === anchorOid));
+      this.applyWindow(session, this.pages, "ready", {
+        pageRevision: this.view.pageRevision + 1,
+        oldSelectedCommit: selectedStillLoaded ? null : point.selectedCommit,
+        oldSelectedObservedAtUnixMs: selectedStillLoaded || !point.selectedCommit ? null : session.observedAtUnixMs,
+        selectionMissingOnPage: Boolean(point.selectedOid && !selectedStillLoaded),
+        anchorMissing: Boolean(point.anchor && !anchorStillLoaded),
+        anchorRestorationSpace: 0,
+      });
+      return true;
+    })();
+    const tracked = done.then(() => undefined);
+    this.pageRequest = { cursor: point.cursor, done: tracked };
+    const restored = await done;
+    if (this.pageRequest?.done === tracked) this.pageRequest = undefined;
+    return restored;
+  }
+
   setViewportAnchor(oid: string | undefined): void {
     this.viewportAnchorOid = oid;
   }

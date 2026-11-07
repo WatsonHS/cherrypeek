@@ -25,7 +25,9 @@ export type RequestParams =
   | RefreshRepositoryParams
   | SelectRepositoryScopeParams
   | RefMergeStatusParams
-  | ControlMetadataIndexParams;
+  | ControlMetadataIndexParams
+  | SearchCommitsParams
+  | SearchIdentitiesParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -35,6 +37,7 @@ export type RepositoryScope =
       worktree: string;
     };
 export type MetadataIndexAction = "pause" | "resume" | "cancel" | "rebuild";
+export type SearchTimeField = "author" | "committer";
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -63,4 +66,36 @@ export interface RefMergeStatusParams {
 }
 export interface ControlMetadataIndexParams {
   action: MetadataIndexAction;
+}
+export interface SearchCommitsParams {
+  anchorOid: string | null;
+  cursor: string | null;
+  pageSize: number;
+  query: SearchQuery;
+}
+export interface SearchQuery {
+  /**
+   * @maxItems 50
+   */
+  authors: SearchIdentity[];
+  caseSensitive: boolean;
+  /**
+   * @maxItems 50
+   */
+  committers: SearchIdentity[];
+  fromTimestamp: number | null;
+  message: string;
+  oidPrefix: string;
+  timeField: SearchTimeField;
+  timeZone: string;
+  toTimestamp: number | null;
+}
+export interface SearchIdentity {
+  email: string;
+  name: string;
+}
+export interface SearchIdentitiesParams {
+  field: SearchTimeField;
+  limit: number;
+  text: string;
 }

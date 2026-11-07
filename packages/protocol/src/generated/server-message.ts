@@ -32,7 +32,8 @@ export type Capability =
   | "historyPagination"
   | "historyNewSinceLastSeen"
   | "repositoryScopes"
-  | "metadataIndex";
+  | "metadataIndex"
+  | "metadataSearch";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -42,6 +43,14 @@ export type ResponseData =
   | {
       section: "metadataIndex";
       status: MetadataIndexStatus;
+    }
+  | {
+      page: SearchPage;
+      section: "searchPage";
+    }
+  | {
+      result: SearchIdentities;
+      section: "searchIdentities";
     }
   | {
       git: GitInfo;
@@ -124,6 +133,7 @@ export type ErrorCode =
   | "INDEX_VERSION_UNSUPPORTED";
 export type MetadataIndexState =
   "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
+export type SearchTimeField = "author" | "committer";
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type RepositoryScope =
@@ -169,6 +179,51 @@ export interface MetadataIndexFailure {
   code: ErrorCode;
   message: string;
 }
+export interface SearchPage {
+  anchorFound: boolean | null;
+  /**
+   * @maxItems 500
+   */
+  commits: CommitSummary[];
+  coverage: MetadataIndexCoverage;
+  index: MetadataIndexStatus;
+  matchedCount: number;
+  nextCursor: string | null;
+  pageOffset: number;
+  previousCursor: string | null;
+  queryKey: string;
+  resultVersion: string;
+  snapshotKey: string;
+}
+export interface CommitSummary {
+  author: CommitIdentity;
+  committer: CommitIdentity;
+  oid: string;
+  parents: string[];
+  summary: string;
+  summaryTruncated: boolean;
+  textLossy: boolean;
+}
+export interface CommitIdentity {
+  email: string;
+  name: string;
+  offset: string;
+  timestamp: string;
+}
+export interface SearchIdentities {
+  coverage: MetadataIndexCoverage;
+  field: SearchTimeField;
+  /**
+   * @maxItems 100
+   */
+  identities: SearchIdentity[];
+  index: MetadataIndexStatus;
+  truncated: boolean;
+}
+export interface SearchIdentity {
+  email: string;
+  name: string;
+}
 export interface RefInfo {
   kind: RefKind;
   name: string;
@@ -186,21 +241,6 @@ export interface RepositoryInfo {
   objectFormat: string;
   path: string;
   worktreePath: string | null;
-}
-export interface CommitSummary {
-  author: CommitIdentity;
-  committer: CommitIdentity;
-  oid: string;
-  parents: string[];
-  summary: string;
-  summaryTruncated: boolean;
-  textLossy: boolean;
-}
-export interface CommitIdentity {
-  email: string;
-  name: string;
-  offset: string;
-  timestamp: string;
 }
 export interface RepositorySessionInfo {
   generation: string;

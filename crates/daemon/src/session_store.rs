@@ -68,6 +68,28 @@ struct LastViewedDocument {
 }
 
 impl SessionStore {
+    pub fn existing_metadata_cache_root(
+        &self,
+        repository: &RepositoryInfo,
+    ) -> Result<Option<PathBuf>, ()> {
+        let data_dir = self.data_dir.as_deref().ok_or(())?;
+        let checked = safe_data_dir(data_dir, repository)?;
+        let root = checked.join("metadata-index");
+        let metadata = match fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(());
+        }
+        let canonical = fs::canonicalize(&root).map_err(|_| ())?;
+        if canonical != root || safe_data_dir(&canonical, repository)? != canonical {
+            return Err(());
+        }
+        Ok(Some(canonical))
+    }
+
     pub fn metadata_cache_root(&self, repository: &RepositoryInfo) -> Result<PathBuf, ()> {
         let data_dir = self.data_dir.as_deref().ok_or(())?;
         let checked = safe_data_dir(data_dir, repository)?;

@@ -10,7 +10,8 @@
         "historyPagination",
         "historyNewSinceLastSeen",
         "repositoryScopes",
-        "metadataIndex"
+        "metadataIndex",
+        "metadataSearch"
       ],
       "type": "string"
     },

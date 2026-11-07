@@ -187,6 +187,12 @@
           "$ref": "#/definitions/ControlMetadataIndexParams"
         },
         {
+          "$ref": "#/definitions/SearchCommitsParams"
+        },
+        {
+          "$ref": "#/definitions/SearchIdentitiesParams"
+        },
+        {
           "$ref": "#/definitions/EmptyParams"
         },
         {
@@ -196,6 +202,159 @@
           "$ref": "#/definitions/EmptyParams"
         }
       ]
+    },
+    "SearchCommitsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "anchorOid": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor": {
+          "maxLength": 1024,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "$ref": "#/definitions/SearchQuery"
+        }
+      },
+      "required": [
+        "query",
+        "cursor",
+        "anchorOid",
+        "pageSize"
+      ],
+      "type": "object"
+    },
+    "SearchIdentitiesParams": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "$ref": "#/definitions/SearchTimeField"
+        },
+        "limit": {
+          "format": "uint16",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "text": {
+          "maxLength": 1024,
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "text",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "SearchIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "type": "object"
+    },
+    "SearchQuery": {
+      "additionalProperties": false,
+      "properties": {
+        "authors": {
+          "items": {
+            "$ref": "#/definitions/SearchIdentity"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "caseSensitive": {
+          "type": "boolean"
+        },
+        "committers": {
+          "items": {
+            "$ref": "#/definitions/SearchIdentity"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "fromTimestamp": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "oidPrefix": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "timeField": {
+          "$ref": "#/definitions/SearchTimeField"
+        },
+        "timeZone": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "toTimestamp": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "message",
+        "caseSensitive",
+        "authors",
+        "committers",
+        "oidPrefix",
+        "timeField",
+        "fromTimestamp",
+        "toTimestamp",
+        "timeZone"
+      ],
+      "type": "object"
+    },
+    "SearchTimeField": {
+      "enum": [
+        "author",
+        "committer"
+      ],
+      "type": "string"
     },
     "SelectRepositoryScopeParams": {
       "additionalProperties": false,

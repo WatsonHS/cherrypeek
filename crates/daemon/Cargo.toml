@@ -17,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 rusqlite = { version = "=0.41.1", features = ["bundled"] }
+caseless = "=0.2.2"
+base64 = "=0.22.1"
 
 [dev-dependencies]
 gix = { version = "=0.90.0", default-features = false, features = ["sha1", "sha256", "max-performance"] }

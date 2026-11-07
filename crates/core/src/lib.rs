@@ -82,6 +82,40 @@ impl JsonSchema for NullableMetadataIndexFailureSchema {
     }
 }
 
+struct NullableTimestampSchema;
+
+impl JsonSchema for NullableTimestampSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableTimestamp".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({"anyOf":[{"type":"integer"},{"type":"null"}]}))
+            .expect("valid nullable timestamp schema")
+    }
+}
+
+struct NullableBooleanSchema;
+
+impl JsonSchema for NullableBooleanSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableBoolean".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({"type":["boolean","null"]}))
+            .expect("valid nullable boolean schema")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename = "GitInfo")]
@@ -119,6 +153,7 @@ pub enum Capability {
     HistoryNewSinceLastSeen,
     RepositoryScopes,
     MetadataIndex,
+    MetadataSearch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -150,6 +185,7 @@ impl CoreReady {
                 Capability::HistoryNewSinceLastSeen,
                 Capability::RepositoryScopes,
                 Capability::MetadataIndex,
+                Capability::MetadataSearch,
             ],
         }
     }
@@ -204,6 +240,8 @@ pub enum RequestParams {
     RefMergeStatus(RefMergeStatusParams),
     GetMetadataIndexStatus(EmptyParams),
     ControlMetadataIndex(ControlMetadataIndexParams),
+    SearchCommits(SearchCommitsParams),
+    ListSearchIdentities(SearchIdentitiesParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -323,6 +361,117 @@ pub struct MetadataIndexStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchIdentity {
+    #[schemars(length(max = 4096))]
+    pub name: String,
+    #[schemars(length(max = 4096))]
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchTimeField {
+    Author,
+    Committer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchQuery {
+    #[schemars(length(max = 4096))]
+    pub message: String,
+    pub case_sensitive: bool,
+    #[schemars(length(max = 50))]
+    pub authors: Vec<SearchIdentity>,
+    #[schemars(length(max = 50))]
+    pub committers: Vec<SearchIdentity>,
+    #[schemars(length(max = 64))]
+    pub oid_prefix: String,
+    pub time_field: SearchTimeField,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableTimestampSchema")]
+    pub from_timestamp: Option<i64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableTimestampSchema")]
+    pub to_timestamp: Option<i64>,
+    #[schemars(length(max = 128))]
+    pub time_zone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchCommitsParams {
+    pub query: SearchQuery,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 1024))]
+    pub cursor: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 64))]
+    pub anchor_oid: Option<String>,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPage {
+    #[schemars(length(min = 1, max = 128))]
+    pub query_key: String,
+    #[schemars(length(min = 1, max = 128))]
+    pub snapshot_key: String,
+    #[schemars(length(min = 1, max = 512))]
+    pub result_version: String,
+    #[schemars(length(max = 500))]
+    pub commits: Vec<CommitSummary>,
+    pub page_offset: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 1024))]
+    pub previous_cursor: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 1024))]
+    pub next_cursor: Option<String>,
+    pub matched_count: u64,
+    pub coverage: MetadataIndexCoverage,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableBooleanSchema")]
+    pub anchor_found: Option<bool>,
+    pub index: MetadataIndexStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchIdentitiesParams {
+    pub field: SearchTimeField,
+    #[schemars(length(max = 1024))]
+    pub text: String,
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchIdentities {
+    pub field: SearchTimeField,
+    #[schemars(length(max = 100))]
+    pub identities: Vec<SearchIdentity>,
+    pub truncated: bool,
+    pub coverage: MetadataIndexCoverage,
+    pub index: MetadataIndexStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[serde(rename_all_fields = "camelCase")]
 #[schemars(rename = "ServerMessage")]
 #[serde(tag = "type")]
@@ -392,6 +541,10 @@ pub enum ResponseData {
     Core { core_version: String, pid: u32 },
     #[serde(rename = "metadataIndex")]
     MetadataIndex { status: MetadataIndexStatus },
+    #[serde(rename = "searchPage")]
+    SearchPage { page: SearchPage },
+    #[serde(rename = "searchIdentities")]
+    SearchIdentities { result: SearchIdentities },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]

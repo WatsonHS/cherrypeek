@@ -196,8 +196,9 @@ export class ProtocolTransport {
     if (options.retainResultAfterAbort && method !== "openRepository" && method !== "refreshRepository" && method !== "selectRepositoryScope") {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开、刷新和范围切换可保留迟到的成功终态"));
     }
-    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus") {
-      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅历史页、合入状态和索引状态请求可取消并排空终态"));
+    if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
+      method !== "searchCommits" && method !== "listSearchIdentities") {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "refreshRepository", "selectRepositoryScope"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅会话变更请求可因超时关闭连接"));
@@ -574,10 +575,40 @@ function validRequestParams(method: string, params: unknown): boolean {
     params.refNames.every(name => typeof name === "string" && name.length > 0 && Buffer.byteLength(name, "utf8") <= 16 * 1024)) return true;
   if (method === "controlMetadataIndex" && isRecord(params) && Object.keys(params).length === 1 &&
     ["pause", "resume", "cancel", "rebuild"].includes(params.action as string)) return true;
+  if (method === "searchCommits" && isRecord(params) && hasExactKeys(params, ["anchorOid", "cursor", "pageSize", "query"]) &&
+    (params.cursor === null || typeof params.cursor === "string" && Buffer.byteLength(params.cursor, "utf8") <= 1024) &&
+    !(params.cursor !== null && params.anchorOid !== null) &&
+    (params.anchorOid === null || typeof params.anchorOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.anchorOid)) &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500 &&
+    isSearchQuery(params.query)) return true;
+  if (method === "listSearchIdentities" && isRecord(params) && hasExactKeys(params, ["field", "limit", "text"]) &&
+    (params.field === "author" || params.field === "committer") && typeof params.text === "string" &&
+    Buffer.byteLength(params.text, "utf8") <= 1024 && Number.isInteger(params.limit) &&
+    (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   return false;
+}
+
+function isSearchQuery(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "timeField", "timeZone", "toTimestamp"])) return false;
+  const timestamp = (item: unknown) => item === null || Number.isSafeInteger(item);
+  const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
+    isRecord(identity) && hasExactKeys(identity, ["email", "name"]) &&
+    typeof identity.name === "string" && Buffer.byteLength(identity.name, "utf8") <= 4096 &&
+    typeof identity.email === "string" && Buffer.byteLength(identity.email, "utf8") <= 4096);
+  return typeof value.message === "string" && Buffer.byteLength(value.message, "utf8") <= 4096 &&
+    typeof value.caseSensitive === "boolean" && identities(value.authors) && identities(value.committers) &&
+    typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
+    (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
+    (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
+    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128;
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === expected.length && expected.every(key => Object.hasOwn(value, key));
 }
 
 type RequestMode = "legacy" | "control" | "session";
@@ -585,7 +616,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities"].includes(method)) return "session";
   return undefined;
 }
 
