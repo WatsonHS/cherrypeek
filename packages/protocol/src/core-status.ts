@@ -1,5 +1,4 @@
 import type { CoreReady } from "./core-ready.js";
-import type { RepositoryPreviewState } from "./repository-preview.js";
 import type { RepositorySessionApi } from "./repository-session.js";
 
 export type CoreStatus =
@@ -12,9 +11,7 @@ export interface CommitScopeApi extends RepositorySessionApi {
   getCoreStatus(): Promise<CoreStatus>;
   onCoreStatusChanged(listener: (status: CoreStatus) => void): () => void;
   chooseRepository(): Promise<string | null>;
-  openRepositoryPreview(path: string): Promise<void>;
-  cancelRepositoryPreview(): Promise<void>;
-  getRepositoryPreview(): Promise<RepositoryPreviewState>;
-  onRepositoryPreviewChanged(listener: (state: RepositoryPreviewState) => void): () => void;
+  /** Absolute path given with `--repository=` at launch, or null. */
+  getLaunchRepository(): Promise<string | null>;
   copyText(text: string): Promise<void>;
 }

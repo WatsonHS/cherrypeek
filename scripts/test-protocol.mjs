@@ -19,7 +19,6 @@ try {
       "core-process": resolve(root, "apps/desktop/src/main/core-process.ts"),
       "json-line-framer": resolve(root, "apps/desktop/src/main/json-line-framer.ts"),
       "protocol-transport": resolve(root, "apps/desktop/src/main/protocol-transport.ts"),
-      "repository-preview-controller": resolve(root, "apps/desktop/src/main/repository-preview-controller.ts"),
       "repository-session-controller": resolve(root, "apps/desktop/src/main/repository-session-controller.ts"),
       "view-context-gate": resolve(root, "apps/desktop/src/main/view-context-gate.ts"),
     },

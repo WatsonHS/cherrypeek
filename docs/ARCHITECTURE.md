@@ -43,7 +43,7 @@ P0-02 的已实现契约见 [代码级计划](implementation/p0-02-protocol.md)�
 
 P1-01 的会话契约见[代码级计划](implementation/p1-01-repository-sessions.md)：新增 `repositorySessions` capability，提供打开、读取会话、有界预览、显式记录查看、关闭与最近仓库六个方法。每个连接保留一个当前会话；打开时冻结 HEAD，尚不覆盖多引用范围、游标或自动刷新。稳定的 repositoryKey / worktreeId 区分对象库与 worktree，本次打开的 repoId / generation 使用随机标识并在重启后失效。server 主循环串行提交会话变更，Git 发现和历史读取仍在可取消 worker 中执行。
 
-main 持有会话上下文，preload 不接受 renderer 指定的 repoId / generation。open 的取消会等到核心最终响应，以同步可能已提交的状态；会话变更超时导致核心连接失败并回收，避免继续使用不确定的句柄。六个 IPC 接口返回可序列化的成功 / 错误结果。旧预览接口保留独立的 null 上下文；新接口是否接入界面与后端验收分开记录。
+main 持有会话上下文，preload 不接受 renderer 指定的 repoId / generation。open 的取消会等到核心最终响应，以同步可能已提交的状态；会话变更超时导致核心连接失败并回收，避免继续使用不确定的句柄。六个 IPC 接口返回可序列化的成功 / 错误结果。旧预览接口保留独立的 null 上下文；新接口是否接入界面与后端验收分开记录。UI-02 起 renderer 只用会话接口：打开、读取、取消（即关闭会话）与记录查看都由 renderer 发起，并按操作号丢弃过期结果；旧的 renderer 预览接口已移除，daemon 的 `readRepositoryPreview` 仍供 headless 测试与基准使用。`--repository=` 启动参数经 `getLaunchRepository` 交给 renderer，按正常路径打开。
 
 | 消息 | 必备字段和行为 |
 | --- | --- |

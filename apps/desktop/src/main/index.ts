@@ -1,13 +1,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, type IpcMainInvokeEvent } from "electron";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CoreProcess } from "./core-process.js";
 import { ProtocolClientError } from "./protocol-transport.js";
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { ErrorCode } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositorySessionResult } from "../../../../packages/protocol/src/repository-session.js";
-import type { RepositoryPreviewState } from "../../../../packages/protocol/src/repository-preview.js";
-import { RepositoryPreviewController } from "./repository-preview-controller.js";
 import { RepositorySessionController } from "./repository-session-controller.js";
 
 const APP_ROOT = resolve(__dirname, "..");
@@ -18,10 +16,7 @@ const APP_URL = pathToFileURL(RENDERER_ENTRY).href;
 const IPC_GET_STATUS = "commitscope:core:get-status";
 const IPC_STATUS_CHANGED = "commitscope:core:status-changed";
 const IPC_CHOOSE_REPOSITORY = "commitscope:repository:choose";
-const IPC_OPEN_REPOSITORY = "commitscope:repository:open";
-const IPC_CANCEL_REPOSITORY = "commitscope:repository:cancel";
-const IPC_GET_REPOSITORY = "commitscope:repository:get";
-const IPC_REPOSITORY_CHANGED = "commitscope:repository:changed";
+const IPC_LAUNCH_REPOSITORY = "commitscope:repository:launch";
 const IPC_SESSION_OPEN = "commitscope:session:open";
 const IPC_SESSION_GET = "commitscope:session:get";
 const IPC_SESSION_PREVIEW = "commitscope:session:preview";
@@ -30,9 +25,9 @@ const IPC_SESSION_CLOSE = "commitscope:session:close";
 const IPC_SESSION_LIST_RECENT = "commitscope:session:list-recent";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
+const MAX_PATH_BYTES = 16 * 1024;
 let window: BrowserWindow | undefined;
 let core: CoreProcess | undefined;
-let preview: RepositoryPreviewController | undefined;
 let repositorySessions: RepositorySessionController | undefined;
 let quitting = false;
 
@@ -57,26 +52,22 @@ function registerStatusIpc(): void {
     const result = await dialog.showOpenDialog(window, { properties: ["openDirectory"] });
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
-  ipcMain.handle(IPC_OPEN_REPOSITORY, async (event, path: unknown) => {
+  ipcMain.handle(IPC_LAUNCH_REPOSITORY, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    if (preview) void preview.open(path);
-  });
-  ipcMain.handle(IPC_CANCEL_REPOSITORY, event => {
-    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    preview?.cancel();
+    return launchRepository();
   });
   ipcMain.handle(IPC_COPY_TEXT, (event, text: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     if (typeof text !== "string" || text.length === 0 || text.length > MAX_COPY_TEXT_LENGTH) throw new Error("Invalid clipboard text");
     clipboard.writeText(text);
   });
-  ipcMain.handle(IPC_GET_REPOSITORY, event => {
-    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return preview?.getState();
-  });
-  preview?.subscribe((state: RepositoryPreviewState) => {
-    if (window && !window.isDestroyed()) window.webContents.send(IPC_REPOSITORY_CHANGED, state);
-  });
+}
+
+/** The repository passed with `--repository=` at launch; the renderer opens it like any other path. */
+function launchRepository(): string | null {
+  const path = process.argv.find(arg => arg.startsWith("--repository="))?.slice("--repository=".length);
+  if (!path || !isAbsolute(path) || path.includes("\0") || Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES) return null;
+  return path;
 }
 
 function registerRepositorySessionIpc(): void {
@@ -156,7 +147,6 @@ async function quitApplication(): Promise<void> {
   quitting = true;
   repositorySessions?.dispose();
   await core?.stop();
-  preview?.dispose();
   app.quit();
 }
 
@@ -181,21 +171,14 @@ void app.whenReady().then(async () => {
   core = new CoreProcess(executable, {
     env: { ...process.env, COMMITSCOPE_APP_DATA_DIR: appDataDir },
   });
-  preview = new RepositoryPreviewController(core);
   repositorySessions = new RepositorySessionController(core);
   registerStatusIpc();
   registerRepositorySessionIpc();
   await createWindow();
-  if (!quitting) {
-    await core.start();
-    const repositoryArg = process.argv.find(arg => arg.startsWith("--repository="));
-    const repositoryPath = repositoryArg?.slice("--repository=".length);
-    if (!quitting && repositoryPath) await preview.open(repositoryPath);
-  }
+  if (!quitting) await core.start();
 }).catch(async error => {
   process.stderr.write(`Desktop startup failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   repositorySessions?.dispose();
   await core?.stop();
-  preview?.dispose();
   app.quit();
 });

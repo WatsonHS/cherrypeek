@@ -1,6 +1,6 @@
 import * as React from "react";
 import type { CommitSummary, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
-import type { RepositoryPreviewState } from "../../../../../packages/protocol/src/repository-preview.js";
+import type { RepositoryView } from "../lib/repository-session-store.js";
 import { TriangleAlert } from "lucide-react";
 import { clock, dayKey, dayLabel, parseGitTime, refTarget, shortRefName } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
@@ -48,11 +48,12 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, onCancel }: {
-  preview: RepositoryPreviewState;
+export function CommitList({ preview, selectedOid, onSelect, onCancel, onRetry }: {
+  preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
   onCancel(): Promise<void>;
+  onRetry(): Promise<void>;
 }): React.JSX.Element {
   const listRef = React.useRef<HTMLDivElement>(null);
   const layout = React.useMemo(() => layoutGraph(preview.commits, ROW), [preview.commits]);
@@ -95,7 +96,8 @@ export function CommitList({ preview, selectedOid, onSelect, onCancel }: {
 
     {preview.error && preview.repository ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
-      <span className="flex min-w-0 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>
+      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>
+      {preview.session ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetry(); }}>重试</Button> : null}
     </div> : null}
 
     <div ref={listRef} role="listbox" aria-label="提交" className="min-h-0 flex-1 overflow-auto px-2 pb-6 outline-none"

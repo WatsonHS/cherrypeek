@@ -2,7 +2,7 @@
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：M0 及 P1-01 后端与非视觉接口已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；核心新增固定 HEAD 的仓库会话、最近打开与按 worktree 保存的上次查看记录，窄接口已提供，界面尚待接入。界面已按 v3 设计换成 Tailwind + shadcn 外壳（UI-01），后端未接入的区域显示标注“占位”的示例内容。已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、Rust 图布局与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
+**当前状态：M0 及 P1-01 后端与非视觉接口已完成本机 macOS 技术验收。** 可打开本地 Git 仓库、读取当前 HEAD 的首批 200 条真实提交、选择元数据详情并取消读取；核心新增固定 HEAD 的仓库会话、最近打开与按 worktree 保存的上次查看记录，界面已按 v3 设计换成 Tailwind + shadcn 外壳（UI-01），并接入最近打开与查看记录（UI-02）；后端未接入的区域显示标注“占位”的示例内容。已有固定种子 fixture、首屏及 180 项读取对比基线，生产路线继续使用 Git CLI。分页、搜索、Rust 图布局与 diff 尚未实现，当前不是 MVP。`CommitScope` 是暂定工作名。
 
 ## 已确定的方向
 
@@ -23,6 +23,7 @@
 | [界面规范](docs/DESIGN.md) | 颜色、字体、间距、组件与状态的实现规范（以此为准） |
 | [交给 Agent 模板](docs/HANDOFF.md) | 各场景 prompt 的文案、变量与防注入规则 |
 | [UI-01 验收记录](docs/validation/ui-01-foundation.md) | 界面基础的实现范围、真实数据与占位划分、测试与未验证项 |
+| [UI-02 验收记录](docs/validation/ui-02-sessions.md) | 界面接入仓库会话、最近打开与查看记录 |
 | [技术架构](docs/ARCHITECTURE.md) | Electron / Rust 分工、通信、Git 读取、分页、索引与刷新 |
 | [路线图](docs/ROADMAP.md) | 从技术验证到可日用版本的阶段和验收关卡 |
 | [实施计划](docs/PLAN.md) | 可直接开始执行的任务、依赖、交付物和完成条件 |
@@ -62,6 +63,7 @@ pnpm typecheck
 pnpm build
 pnpm test:protocol
 pnpm test:sessions
+pnpm test:renderer
 pnpm test:repository
 pnpm test:smoke
 node --test tests/repository/benchmark-process-tree.test.mjs
@@ -72,7 +74,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 `pnpm protocol:generate` 从 Rust 类型导出三份 schema 和 TypeScript，`protocol:check` 只校验产物一致性。`test:protocol` 覆盖真实 daemon、受控故障协议和慢 Git 子进程回收。Smoke 会启动并关闭真实 Electron 窗口，覆盖正常启动、失败状态、隔离与进程退出；本地截图写入已忽略的 `output/playwright/`。`test:repository` 自动生成临时真实 Git 仓库，完成独立字段对照、只读快照与 Electron 界面验证。性能实测见首屏基线；发布预算尚未验收。
 
-`test:sessions` 只构建 daemon，使用临时 Git fixture 与独立应用数据目录验证会话 / 查看记录，不启动 UI。旧预览的纯 headless 回归可运行 `node scripts/test-repository.mjs`。应用通过 main 把 `userData/repository-state` 传给核心；直接运行 daemon 时，未配置 `COMMITSCOPE_APP_DATA_DIR` 会禁用持久化，仍可浏览。存储不会因打开仓库就标记已读，调用方需在真实内容展示后显式记录查看。
+`test:renderer` 用假接口测试界面的会话状态（判旧、取消、记录时机），不启动 Electron。`test:sessions` 只构建 daemon，使用临时 Git fixture 与独立应用数据目录验证会话 / 查看记录，不启动 UI。旧预览的纯 headless 回归可运行 `node scripts/test-repository.mjs`。应用通过 main 把 `userData/repository-state` 传给核心；直接运行 daemon 时，未配置 `COMMITSCOPE_APP_DATA_DIR` 会禁用持久化，仍可浏览。存储不会因打开仓库就标记已读，调用方需在真实内容展示后显式记录查看。
 
 ## 工程布局
 
@@ -85,6 +87,7 @@ scripts/                    协议生成、构建、启动、fixture 与测量�
 tests/smoke/                真实 Electron 集成检查
 tests/protocol/             客户端协议、判旧与生命周期测试
 tests/sessions/             仓库会话、查看记录、存储降级与取消集成测试
+tests/renderer/             界面会话状态的单元测试（假接口，不启动 Electron）
 tests/repository/           独立 Git 对照、只读快照和取消测试
 tests/readers/              CLI / gix 实验的 headless 正确性与取消测试
 tests/fixtures/             fixture 生成和使用说明

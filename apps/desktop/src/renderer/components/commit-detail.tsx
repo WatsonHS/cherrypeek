@@ -1,8 +1,8 @@
 import * as React from "react";
 import { Check, ChevronDown, ChevronUp, Copy, ExternalLink } from "lucide-react";
 import type { CommitIdentity, CommitSummary, RepositoryInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
-import type { RepositoryPreviewState } from "../../../../../packages/protocol/src/repository-preview.js";
-import { identityTime, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
+import type { RepositoryView } from "../lib/repository-session-store.js";
+import { homeAbbreviated, identityTime, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { refsByTarget, RefTags } from "./commit-list.js";
 import { IdentityAvatar } from "./identity-avatar.js";
@@ -13,7 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
 export function CommitDetail({ preview, selectedOid, onSelect }: {
-  preview: RepositoryPreviewState;
+  preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
 }): React.JSX.Element {
@@ -168,10 +168,6 @@ const SCENARIOS = [
 ] as const;
 
 /** HANDOFF.md asks for the home directory to be shown as "~". */
-function homeAbbreviated(path: string): string {
-  return path.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, "~");
-}
-
 function HandoffMenu({ commit, repository }: { commit: CommitSummary; repository: RepositoryInfo }): React.JSX.Element {
   const branch = repository.headReference ? shortRefName(repository.headReference) : "detached HEAD";
   const prompt = [

@@ -20,7 +20,8 @@
     "build:reader-bench": "cargo build --release --locked -p commitscope-daemon --example reader_bench",
     "benchmark:readers": "node scripts/benchmark-readers.mjs",
     "test:readers": "node scripts/test-readers.mjs",
-    "test:sessions": "node scripts/test-sessions.mjs"
+    "test:sessions": "node scripts/test-sessions.mjs",
+    "test:renderer": "node scripts/test-renderer.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.5",
