@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { CommitSummary, HistoryCommit, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
-import { LoaderCircle, TriangleAlert } from "lucide-react";
+import { FoldHorizontal, LoaderCircle, TriangleAlert } from "lucide-react";
 import { clock, dayKey, dayLabel, parseGitTime, refTarget } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
 import { graphAboveLanes, graphPaths, graphWidth as measureGraphWidth, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
@@ -16,6 +16,8 @@ import type { SelectionIntentToken } from "../lib/selection-intent.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
+/** Height of the full-graph bar (h-9). */
+const GRAPH_BAR_HEIGHT = 36;
 
 type ListEntry =
   | { kind: "day"; key: string; dayKey: string; label: string; graph: HistoryCommit["graph"]; height: number }
@@ -276,6 +278,28 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     requestAnimationFrame(() => listRef.current?.focus());
   };
 
+  const collapseGraph = () => {
+    if (listRef.current) {
+      listRef.current.scrollLeft = 0;
+      listRef.current.focus({ preventScroll: true });
+    }
+    setGraphExpanded(false);
+  };
+
+  // The full-graph bar sits above the list. Scroll by its height when it appears or goes,
+  // so the rows stay where they were on screen.
+  const graphBarShown = React.useRef(false);
+  React.useLayoutEffect(() => {
+    if (graphBarShown.current === graphExpanded) return;
+    graphBarShown.current = graphExpanded;
+    const element = listRef.current;
+    if (!element) return;
+    element.scrollTop = Math.max(0, element.scrollTop + (graphExpanded ? GRAPH_BAR_HEIGHT : -GRAPH_BAR_HEIGHT));
+    programmaticScrollTop.current = element.scrollTop;
+    lastScrollTop.current = element.scrollTop;
+    setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
+  }, [graphExpanded, virtual]);
+
   const loadingEmpty = preview.state === "loading" && preview.commits.length === 0;
   const finishedEmpty = preview.state === "ready" && preview.commits.length === 0;
   const interrupted = (preview.state === "error" || preview.state === "cancelled") && preview.commits.length > 0;
@@ -302,6 +326,15 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       <Button variant="outline" size="sm" onClick={() => { void onCancelPage(); }}>取消</Button>
     </div> : null}
 
+    {graphExpanded ? <div data-testid="graph-mode-bar" className="flex h-9 shrink-0 items-center gap-2 border-b border-line pr-2 pl-4 text-xs">
+      <span className="min-w-0 flex-1 truncate"><span className="font-semibold text-fg2">全部图线</span><span className="text-fg3"> · {visibleLaneCount} 列</span></span>
+      <Button data-testid="graph-collapse" variant="ghost" size="sm" className="shrink-0 gap-1 px-2"
+        aria-label="收起完整提交图" title="收起完整提交图，回到前 6 列（Esc）" onClick={event => {
+          event.stopPropagation();
+          collapseGraph();
+        }}><FoldHorizontal className="size-3.5" strokeWidth={1.75} aria-hidden="true" />收起</Button>
+    </div> : null}
+
     <div className="relative flex min-h-0 flex-1">
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
       data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
@@ -310,6 +343,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none" style={{ overflowAnchor: "none" }} onScroll={handleScroll}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (event.key === "Escape" && graphExpanded) {
+          event.preventDefault();
+          collapseGraph();
+          return;
+        }
         const keys: Record<string, number | "first" | "last"> = { ArrowDown: 1, ArrowUp: -1, PageDown: 8, PageUp: -8, Home: "first", End: "last" };
         const delta = keys[event.key];
         if (delta === undefined) return;
@@ -337,15 +375,6 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {preview.anchorRestorationSpace > 0 ? <div aria-hidden="true" style={{ height: preview.anchorRestorationSpace }} /> : null}
       </div>
     </div>
-    {graphExpanded ? <Button data-testid="graph-collapse" variant="outline" size="sm" className="absolute right-3 top-2 z-10 shadow-pop"
-      aria-label="收起完整提交图" title="收起完整提交图" onClick={event => {
-        event.stopPropagation();
-        if (listRef.current) {
-          listRef.current.scrollLeft = 0;
-          listRef.current.focus({ preventScroll: true });
-        }
-        setGraphExpanded(false);
-      }}>收起图线</Button> : null}
     </div>
   </nav>;
 }
@@ -506,7 +535,7 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
         <IdentityAvatar identity={commit.author} />
         <span className="min-w-0 flex-1 truncate">{commit.author.name}</span>
         {labels.length ? <span data-testid="commit-ref-tags" className="flex max-w-[65%] min-w-0 shrink-0 items-center justify-end gap-1">
-          <RefChips labels={labels} limit={1} chipClassName={() => "max-w-[150px] shrink"} />
+          <RefChips labels={labels} limit={1} wholeGroup chipClassName={() => "max-w-[150px] shrink"} />
         </span> : null}
       </span>
     </span>

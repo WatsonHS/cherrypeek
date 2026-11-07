@@ -48,7 +48,9 @@ try {
   await targetRow.click();
   const selectedBefore = await list.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid");
   const compactSignature = await targetRow.getByTestId("commit-graph").getAttribute("data-graph-signature");
-  const anchorBefore = await readViewportAnchor(list);
+  // The +N buttons go away once expanded, so follow the row by its OID.
+  const stableTargetRow = list.locator(`[data-testid="commit-row"][data-oid="${targetOid}"]`);
+  const anchorBefore = await readScreenTop(stableTargetRow);
   assert.equal(selectedBefore, targetOid, "the expanded row is selected before toggling its graph");
   assert.ok(anchorBefore);
   await page.screenshot({ path: join(screenshotDirectory, "compact.png") });
@@ -75,10 +77,15 @@ try {
     "expansion preserves the immutable backend graph signature");
   assert.equal(await list.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid"), selectedBefore,
     "expansion does not change commit selection");
-  const anchorAfter = await readViewportAnchor(list);
-  assert.equal(anchorAfter?.oid, anchorBefore.oid, "expansion preserves the visible OID anchor");
-  assert.ok(Math.abs(anchorAfter.offset - anchorBefore.offset) <= 4,
-    `expansion preserves the anchor's vertical position: before=${anchorBefore.offset}, after=${anchorAfter.offset}`);
+  const anchorAfter = await readScreenTop(stableTargetRow);
+  assert.ok(Math.abs(anchorAfter - anchorBefore) <= 4,
+    `expansion keeps the row where it was on screen: before=${anchorBefore}, after=${anchorAfter}`);
+  // The collapse control lives in a bar above the list instead of floating over rows.
+  const bar = page.getByTestId("graph-mode-bar");
+  assert.match(await bar.innerText(), new RegExp(`全部图线 · ${expandedState.lanes} 列`));
+  const [barBox, listBox] = await Promise.all([bar.boundingBox(), list.boundingBox()]);
+  assert.ok(barBox && listBox && barBox.y + barBox.height <= listBox.y + 0.5, `the full-graph bar does not cover the list: ${JSON.stringify({ barBox, listBox })}`);
+  assert.equal(await bar.getByTestId("graph-collapse").count(), 1, "the collapse button sits in the full-graph bar");
 
   const expandedLanes = await list.locator('[data-testid="commit-graph"][data-graph-expanded="true"]').evaluateAll(graphs => ({
     hiddenThroughDrawn: graphs.some(graph => {
@@ -127,6 +134,21 @@ try {
     "collapsing after page traversal restores the original compact graph signature");
   assert.equal(await list.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid"), selectedBefore);
   await page.screenshot({ path: join(screenshotDirectory, "collapsed.png") });
+
+  // Esc on the list also collapses, and the rows stay put when the bar goes away.
+  const escapeButton = list.getByTestId("graph-expand").first();
+  const escapeOid = await escapeButton.locator("xpath=ancestor::*[@data-testid='commit-row']").getAttribute("data-oid");
+  const escapeRow = list.locator(`[data-testid="commit-row"][data-oid="${escapeOid}"]`);
+  await escapeButton.click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交"]')?.dataset.graphExpanded === "true", null, { timeout: 5_000 });
+  const escapeTop = await readScreenTop(escapeRow);
+  await list.focus();
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交"]')?.dataset.graphExpanded === "false", null, { timeout: 5_000 });
+  assert.equal(await page.getByTestId("graph-mode-bar").count(), 0, "collapsing removes the full-graph bar");
+  const escapeTopAfter = await readScreenTop(escapeRow);
+  assert.ok(Math.abs(escapeTopAfter - escapeTop) <= 4, `collapse keeps the row where it was on screen: before=${escapeTop}, after=${escapeTopAfter}`);
+
   assert.deepEqual(await snapshotTree(repository), before, "expanding and browsing the graph never writes to the repository");
 
   await app.close();
@@ -143,14 +165,7 @@ try {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
 
-async function readViewportAnchor(list) {
-  return list.evaluate(element => {
-    const bounds = element.getBoundingClientRect();
-    const row = [...element.querySelectorAll('[data-testid="commit-row"]')].find(candidate => {
-      const rect = candidate.getBoundingClientRect();
-      return rect.bottom > bounds.top && rect.top < bounds.bottom;
-    });
-    if (!row) return null;
-    return { oid: row.getAttribute("data-oid"), offset: row.getBoundingClientRect().top - bounds.top };
-  });
+/** A row's top edge in window coordinates, i.e. where the reader sees it. */
+async function readScreenTop(row) {
+  return row.evaluate(element => element.getBoundingClientRect().top);
 }

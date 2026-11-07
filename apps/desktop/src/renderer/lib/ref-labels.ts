@@ -10,6 +10,10 @@ export interface RefLabel {
   text: string;
   /** Full description for the tooltip and screen readers. */
   description: string;
+  /** Short kind, shown next to the label in the full list, e.g. "本窗口 HEAD" or "标签". */
+  kindText: string;
+  /** The other worktree's path, for worktree labels. */
+  path: string | null;
   /** Remote branches at the same commit folded into this label (short names). */
   remotes: string[];
 }
@@ -56,18 +60,20 @@ export function refLabels({ refs, headReference, isHeadCommit, otherWorktrees = 
 
   if (isHere) {
     const text = headReference ? shortRefName(headReference) : "HEAD";
-    const label = add({ key: "HEAD", kind: "head", text, description: headReference ? `本窗口 HEAD：${text}` : "本窗口 HEAD（detached）" }, RANK.head, 0);
+    const label = add({ key: "HEAD", kind: "head", text, description: headReference ? `本窗口 HEAD：${text}` : "本窗口 HEAD（detached）",
+      kindText: headReference ? "本窗口 HEAD" : "本窗口 HEAD · detached", path: null }, RANK.head, 0);
     if (headReference) localByName.set(text, label);
   }
 
   refs.forEach((ref, order) => {
     const text = shortRefName(ref.name);
-    if (ref.kind === "tag") add({ key: ref.name, kind: "tag", text, description: `标签：${text}` }, RANK.tag, order);
+    if (ref.kind === "tag") add({ key: ref.name, kind: "tag", text, description: `标签：${text}`, kindText: "标签", path: null }, RANK.tag, order);
     if (ref.kind !== "localBranch" || ref.name === headReference) return;
     const worktree = checkedOut.get(ref.name);
     localByName.set(text, worktree
-      ? add({ key: ref.name, kind: "worktree", text, description: `本地分支 ${text}，已在${worktree.isMain ? "主" : ""}工作区 ${folderName(worktree.path)} 检出（${worktree.path}）` }, RANK.checkedOut, order)
-      : add({ key: ref.name, kind: "branch", text, description: `本地分支：${text}` }, RANK.branch, order));
+      ? add({ key: ref.name, kind: "worktree", text, description: `本地分支 ${text}，已在${worktree.isMain ? "主" : ""}工作区 ${folderName(worktree.path)} 检出（${worktree.path}）`,
+        kindText: `本地分支 · 在${worktree.isMain ? "主" : ""}工作区 ${folderName(worktree.path)} 检出`, path: worktree.path }, RANK.checkedOut, order)
+      : add({ key: ref.name, kind: "branch", text, description: `本地分支：${text}`, kindText: "本地分支", path: null }, RANK.branch, order));
   });
 
   otherWorktrees.forEach((worktree, order) => {
@@ -76,6 +82,7 @@ export function refLabels({ refs, headReference, isHeadCommit, otherWorktrees = 
     add({
       key: `worktree:${worktree.path}`, kind: "worktree", text: worktree.headReference ? shortRefName(worktree.headReference) : name,
       description: `${worktree.isMain ? "主" : ""}工作区 ${name} 的 HEAD${worktree.headReference ? `（${shortRefName(worktree.headReference)}）` : "（detached）"}指向这里：${worktree.path}`,
+      kindText: `${worktree.isMain ? "主" : ""}工作区 ${name} 的 HEAD${worktree.headReference ? "" : " · detached"}`, path: worktree.path,
     }, RANK.worktreeHead, order);
   });
 
@@ -91,7 +98,7 @@ export function refLabels({ refs, headReference, isHeadCommit, otherWorktrees = 
       into.remotes.push(text);
       continue;
     }
-    remoteByName.set(ref.name, add({ key: ref.name, kind: "remote", text, description: `远端分支：${text}` }, RANK.remote, refs.indexOf(ref)));
+    remoteByName.set(ref.name, add({ key: ref.name, kind: "remote", text, description: `远端分支：${text}`, kindText: "远端分支", path: null }, RANK.remote, refs.indexOf(ref)));
   }
 
   return labels.sort((a, b) => a.rank - b.rank || a.order - b.order).map(entry => entry.label);

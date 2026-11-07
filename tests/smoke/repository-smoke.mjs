@@ -49,6 +49,19 @@ try {
   const hostileRow = page.getByTestId("commit-row").filter({ hasText: hostileSummary });
   await page.getByText(hostileSummary, { exact: true }).first().waitFor({ state: "visible" });
   assert.equal(await hostileRow.locator("img, script").count(), 0, "HTML-like commit summary must remain a text node");
+  // The HEAD row shows "main" (origin/main folded in) and "+1" for the tag; the label group opens the
+  // full list of refs on that commit without changing the selection.
+  const selectedBeforeRefs = await page.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid");
+  const headRow = page.getByTestId("commit-row").filter({ has: page.locator('[data-testid="ref-label"][data-ref-kind="head"]') });
+  assert.match(await headRow.getByTestId("ref-label").innerText(), /本窗口 HEAD：main；origin\/main 也指向这里\s+main$/);
+  assert.equal(await headRow.getByTestId("ref-label-overflow").innerText(), "+1");
+  await headRow.getByTestId("ref-label-trigger").click();
+  const refList = page.getByTestId("ref-label-list");
+  await refList.waitFor({ state: "visible" });
+  assert.match(await refList.innerText(), /main[\s\S]*本窗口 HEAD[\s\S]*origin\/main 也指向这里[\s\S]*annotated-release[\s\S]*标签/);
+  assert.equal(await page.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid"), selectedBeforeRefs);
+  await page.keyboard.press("Escape");
+  await refList.waitFor({ state: "hidden" });
   await row.click();
   await page.getByText(oid, { exact: true }).last().waitFor({ state: "visible" });
   assert.equal(await row.getAttribute("aria-selected"), "true");
