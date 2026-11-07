@@ -480,26 +480,26 @@ test("selecting a commit after scrolling back moves the active page without anot
   assert.deepEqual(fake.pending.readHistoryPage, [], "navigating to a retained page issues no RPC");
 });
 
-test("the renderer retains at most 2,000 commits and can reread a trimmed edge", async () => {
+test("the renderer retains at most 1,800 commits for the detail-page budget and can reread a trimmed edge", async () => {
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);
   const session = await openReady(fake, store, "window", { count: 200, nextCursor: "cursor-200" });
 
-  for (let offset = 200; offset <= 2_000; offset += 200) {
+  for (let offset = 200; offset <= 1_800; offset += 200) {
     const loading = store.nextPage();
     await settled();
     await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
       offset, count: 200, cursor: `cursor-${offset}`, previousCursor: `cursor-${offset - 200}`,
-      nextCursor: offset === 2_000 ? null : `cursor-${offset + 200}`,
+      nextCursor: offset === 1_800 ? null : `cursor-${offset + 200}`,
     })));
     await loading;
   }
-  assert.equal(store.getView().commits.length, 2_000);
+  assert.equal(store.getView().commits.length, 1_800);
   assert.equal(store.getView().pageOffset, 200);
-  assert.equal(store.getView().windowPageCount, 10);
+  assert.equal(store.getView().windowPageCount, 9);
   assert.equal(store.getView().commits[0].summary, "summary 201");
 
-  for (let index = 0; index < 9; index += 1) await store.previousPage();
+  for (let index = 0; index < 8; index += 1) await store.previousPage();
   assert.equal(store.getView().pageCursor, "cursor-200");
   const previous = store.previousPage();
   await settled();
@@ -507,10 +507,10 @@ test("the renderer retains at most 2,000 commits and can reread a trimmed edge",
   await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { count: 200, cursor: "cursor-0", nextCursor: "cursor-200" })));
   const selected = await previous;
   assert.equal(selected, store.getView().commits[199].oid);
-  assert.equal(store.getView().commits.length, 2_000);
+  assert.equal(store.getView().commits.length, 1_800);
   assert.equal(store.getView().pageOffset, 0);
-  assert.equal(store.getView().windowPageCount, 10);
-  assert.equal(store.getView().commits.at(-1).summary, "summary 2000");
+  assert.equal(store.getView().windowPageCount, 9);
+  assert.equal(store.getView().commits.at(-1).summary, "summary 1800");
 });
 
 test("a newer reverse intent drains and supersedes a pending forward prefetch", async () => {

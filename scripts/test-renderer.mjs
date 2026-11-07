@@ -11,6 +11,7 @@ try {
   await build({
     entryPoints: {
       "repository-session-store": resolve(root, "apps/desktop/src/renderer/lib/repository-session-store.ts"),
+      "commit-detail-store": resolve(root, "apps/desktop/src/renderer/lib/commit-detail-store.ts"),
       "metadata-search-store": resolve(root, "apps/desktop/src/renderer/lib/metadata-search-store.ts"),
       "search-date": resolve(root, "apps/desktop/src/renderer/lib/search-date.ts"),
       "selection-intent": resolve(root, "apps/desktop/src/renderer/lib/selection-intent.ts"),

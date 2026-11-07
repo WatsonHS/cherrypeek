@@ -54,7 +54,7 @@ test("changing query clears old results and detail selection before the new resp
   assert.equal(view.loading, false);
 });
 
-test("search paging slides a bounded 2,000-row window in both directions without losing selection", async () => {
+test("search paging slides a bounded 1,800-row window in both directions without losing selection", async () => {
   const pageSize = 200;
   const pageAt = offset => ({
     queryKey: "query-key", snapshotKey: "snapshot-key", resultVersion: "v1",
@@ -78,16 +78,16 @@ test("search paging slides a bounded 2,000-row window in both directions without
   store.setSelectedOid("oid-0000");
   store.setHistoryAnchor({ oid: "oid-0000", offset: -7 });
 
-  for (let index = 0; index < 10; index += 1) await store.loadNext();
+  for (let index = 0; index < 9; index += 1) await store.loadNext();
   let view = store.getView();
-  assert.equal(view.window.commits.length, 2_000);
+  assert.equal(view.window.commits.length, 1_800);
   assert.equal(view.window.pageOffset, 200);
   assert.equal(view.oldSelectedCommit.oid, "oid-0000");
   assert.equal(view.anchorOid, view.window.commits[0].oid);
 
   await store.loadPrevious();
   view = store.getView();
-  assert.equal(view.window.commits.length, 2_000);
+  assert.equal(view.window.commits.length, 1_800);
   assert.equal(view.window.pageOffset, 0);
   assert.equal(view.window.commits[0].oid, "oid-0000");
   assert.equal(view.selectedOid, "oid-0000");

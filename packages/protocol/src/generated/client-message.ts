@@ -27,7 +27,12 @@ export type RequestParams =
   | RefMergeStatusParams
   | ControlMetadataIndexParams
   | SearchCommitsParams
-  | SearchIdentitiesParams;
+  | SearchIdentitiesParams
+  | GetCommitParams
+  | ListChangedFilesParams
+  | ReadMergeCommitsParams
+  | BranchesContainingParams
+  | ReadDiffParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -98,4 +103,28 @@ export interface SearchIdentitiesParams {
   field: SearchTimeField;
   limit: number;
   text: string;
+}
+export interface GetCommitParams {
+  oid: string;
+}
+export interface ListChangedFilesParams {
+  offset: number;
+  oid: string;
+  pageSize: number;
+  parentIndex: number | null;
+}
+export interface ReadMergeCommitsParams {
+  offset: number;
+  oid: string;
+  pageSize: number;
+  parentIndex: number;
+}
+export interface BranchesContainingParams {
+  oid: string;
+}
+export interface ReadDiffParams {
+  newPathHex: string | null;
+  oid: string;
+  oldPathHex: string | null;
+  parentIndex: number | null;
 }

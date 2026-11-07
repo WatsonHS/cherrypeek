@@ -54,7 +54,7 @@ function makeCore({ rejectOnAbort = false } = {}) {
   const listeners = new Set();
   const requests = [];
   const core = {
-    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex"] } },
+    status: { state: "ready", revision: 1, core: { capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex", "commitDetails"] } },
     currentContext: NULL_CONTEXT,
     getStatus() { return this.status; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
@@ -276,7 +276,15 @@ test("the real controller accepts daemon navigation and merge-status coverage", 
     await writeFile(join(repository, "README.txt"), "scope navigation fixture\n");
     await git(["add", "README.txt"]);
     await git(["commit", "-m", "initial"]);
-    await git(["branch", "feature/merged"]);
+    await git(["checkout", "-b", "feature/merged"]);
+    await writeFile(join(repository, "feature.txt"), "feature side\n");
+    await git(["add", "feature.txt"]);
+    await git(["commit", "-m", "feature change"]);
+    await git(["checkout", "main"]);
+    await writeFile(join(repository, "main.txt"), "main side\n");
+    await git(["add", "main.txt"]);
+    await git(["commit", "-m", "main change"]);
+    await git(["merge", "--no-ff", "feature/merged", "-m", "merge feature"]);
     await core.start();
 
     const opened = await controller.open(repository);
@@ -290,6 +298,21 @@ test("the real controller accepts daemon navigation and merge-status coverage", 
     const result = await controller.getRefMergeStatus(localBranchNames);
     assert.deepEqual(result.statuses.map(status => status.name).sort(), [...localBranchNames].sort());
     assert.ok(result.statuses.length >= 2);
+
+    const headOid = opened.repository.headOid;
+    const details = await controller.getCommit({ oid: headOid.toUpperCase() });
+    assert.equal(details.commit.oid, headOid);
+    assert.equal(details.commit.parents.length, 2);
+    assert.equal(details.observedAtUnixMs, opened.observedAtUnixMs);
+    const filePage = await controller.listChangedFiles({ oid: headOid, parentIndex: 0, offset: 0, pageSize: 200 });
+    assert.equal(filePage.oid, headOid);
+    assert.equal(filePage.parentOid, details.commit.parents[0]);
+    const mergePage = await controller.readMergeCommits({ oid: headOid, parentIndex: 1, offset: 0, pageSize: 200 });
+    assert.equal(mergePage.oid, headOid);
+    assert.equal(mergePage.parentOid, details.commit.parents[1]);
+    const containing = await controller.branchesContaining({ oid: headOid });
+    assert.equal(containing.observedAtUnixMs, opened.observedAtUnixMs);
+    assert.ok(containing.branches.some(ref => ref.name === "refs/heads/main"));
 
     const selected = await controller.selectScope({ ref: "refs/heads/feature/merged" }, 50);
     assert.equal(selected.session.scope.ref, "refs/heads/feature/merged");
@@ -359,6 +382,88 @@ test("a core without historyGraph is rejected before opening a session", async (
   const controller = new RepositorySessionController(core);
   await assert.rejects(controller.open("/tmp/repo-a"), error => error.code === "UNKNOWN_METHOD" && /历史图布局/.test(error.message));
   assert.equal(core.requests.length, 0);
+  controller.dispose();
+});
+
+test("a core without commitDetails is rejected before opening a session", async () => {
+  const core = makeCore();
+  core.status.core.capabilities = ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph"];
+  const controller = new RepositorySessionController(core);
+  await assert.rejects(controller.open("/tmp/repo-a"), error => error.code === "UNKNOWN_METHOD" && /提交详情/.test(error.message));
+  assert.equal(core.requests.length, 0);
+  controller.dispose();
+});
+
+test("commit details requests validate inputs, preserve captured time, and drain cancelled late success", async () => {
+  const core = makeCore();
+  const controller = new RepositorySessionController(core);
+  const opening = controller.open("/tmp/repo-a");
+  const openRequest = await waitFor(() => core.requests[0]);
+  const opened = session("/tmp/repo-a", "a");
+  send(openRequest, { section: "repositorySession", session: opened });
+  await opening;
+
+  await assert.rejects(controller.getCommit({ oid: "abcd" }), error => error.code === "INVALID_REQUEST");
+  await assert.rejects(controller.listChangedFiles({ oid: opened.repository.headOid, parentIndex: -1, offset: 0, pageSize: 20 }), error => error.code === "INVALID_REQUEST");
+  assert.equal(core.requests.length, 1);
+
+  const oid = opened.repository.headOid;
+  const parents = ["b".repeat(40), "c".repeat(40)];
+  const commitDetails = {
+    commit: { oid, parents, summary: "merge title", summaryTruncated: false, textLossy: false,
+      author: { name: "Author", email: "author@example.invalid", timestamp: "1", offset: "+0000" },
+      committer: { name: "Committer", email: "committer@example.invalid", timestamp: "2", offset: "+0000" } },
+    message: "merge title\nbody", messageWithoutTrailers: "merge title\nbody", trailers: [], refs: [], worktrees: [],
+    observedAtUnixMs: opened.observedAtUnixMs, refsTruncated: false, worktreesTruncated: false,
+    update: { state: "unaffected", reason: null, checkedAtUnixMs: 200 },
+  };
+  const pending = controller.getCommit({ oid: oid.toUpperCase() });
+  const lateRequest = await waitFor(() => core.requests[1]);
+  assert.equal(lateRequest.method, "getCommit");
+  assert.deepEqual(lateRequest.params, { oid });
+  assert.equal(lateRequest.options.drainAfterAbort, true);
+  const cancel = controller.cancelCommitDetails();
+  assert.equal(lateRequest.options.signal.aborted, true);
+  lateRequest.options.onChunk({ data: { section: "commitDetails", details: commitDetails }, done: true, sequence: 0,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 1 }, nextCursor: null });
+  lateRequest.resolve({ coverage: { complete: true, processed: 1 }, nextCursor: null });
+  await assert.rejects(pending, error => error.code === "CANCELLED");
+  assert.deepEqual(await cancel, { cancelled: true });
+
+  const reading = controller.getCommit({ oid });
+  const detailsRequest = await waitFor(() => core.requests[2]);
+  detailsRequest.options.onChunk({ data: { section: "commitDetails", details: commitDetails }, done: true, sequence: 0,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 1 }, nextCursor: null });
+  detailsRequest.resolve({ coverage: { complete: true, processed: 1 }, nextCursor: null });
+  assert.deepEqual(await reading, commitDetails);
+
+  const fileParams = { oid, parentIndex: 0, offset: 0, pageSize: 200 };
+  const filePromise = controller.listChangedFiles(fileParams);
+  const filesRequest = await waitFor(() => core.requests[3]);
+  assert.equal(filesRequest.method, "listChangedFiles");
+  const filePage = { oid, parentIndex: 0, parentOid: parents[0], offset: 0, pageSize: 200, totalFiles: 0, hasMore: false, files: [],
+    overview: { totalFiles: 0, counts: { added: 0, modified: 0, deleted: 0, renamed: 0, copied: 0, typeChanged: 0 }, additions: 0, deletions: 0, binaryFiles: 0, gitlinkFiles: 0, directories: [] } };
+  filesRequest.options.onChunk({ data: { section: "changedFiles", page: filePage }, done: true, sequence: 0,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 0 }, nextCursor: null });
+  filesRequest.resolve({ coverage: { complete: true, processed: 0 }, nextCursor: null });
+  assert.deepEqual(await filePromise, filePage);
+
+  const mergePromise = controller.readMergeCommits({ oid, parentIndex: 1, offset: 0, pageSize: 200 });
+  const mergeRequest = await waitFor(() => core.requests[4]);
+  const mergePage = { oid, parentIndex: 1, parentOid: parents[1], firstParentOid: parents[0], offset: 0, pageSize: 200,
+    totalCommits: 0, hasMore: false, commits: [], authors: [] };
+  mergeRequest.options.onChunk({ data: { section: "mergeCommits", page: mergePage }, done: true, sequence: 0,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 0 }, nextCursor: null });
+  mergeRequest.resolve({ coverage: { complete: true, processed: 0 }, nextCursor: null });
+  assert.deepEqual(await mergePromise, mergePage);
+
+  const containingPromise = controller.branchesContaining({ oid });
+  const containingRequest = await waitFor(() => core.requests[5]);
+  const containing = { oid, branches: [], observedAtUnixMs: opened.observedAtUnixMs, complete: true, refsTruncated: false, boundaryLimited: false };
+  containingRequest.options.onChunk({ data: { section: "branchesContaining", result: containing }, done: true, sequence: 0,
+    repoId: opened.repoId, generation: opened.generation, coverage: { complete: true, processed: 0 }, nextCursor: null });
+  containingRequest.resolve({ coverage: { complete: true, processed: 0 }, nextCursor: null });
+  assert.deepEqual(await containingPromise, containing);
   controller.dispose();
 });
 

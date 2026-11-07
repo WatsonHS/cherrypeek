@@ -39,7 +39,7 @@ function makeCore() {
       state: "ready",
       revision: 1,
       core: {
-        capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex", "metadataSearch"],
+        capabilities: ["repositorySessions", "repositoryScopes", "historyPagination", "historyNewSinceLastSeen", "historyGraph", "metadataIndex", "metadataSearch", "commitDetails"],
       },
     },
     currentContext: NULL_CONTEXT,

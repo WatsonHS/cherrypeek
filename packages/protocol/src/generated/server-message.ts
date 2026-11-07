@@ -34,7 +34,8 @@ export type Capability =
   | "repositoryScopes"
   | "metadataIndex"
   | "metadataSearch"
-  | "historyGraph";
+  | "historyGraph"
+  | "commitDetails";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -52,6 +53,26 @@ export type ResponseData =
   | {
       result: SearchIdentities;
       section: "searchIdentities";
+    }
+  | {
+      details: CommitDetails;
+      section: "commitDetails";
+    }
+  | {
+      page: ChangedFilesPage;
+      section: "changedFiles";
+    }
+  | {
+      page: MergeCommitsPage;
+      section: "mergeCommits";
+    }
+  | {
+      result: BranchesContainingResult;
+      section: "branchesContaining";
+    }
+  | {
+      diff: FileDiff;
+      section: "fileDiff";
     }
   | {
       git: GitInfo;
@@ -136,6 +157,10 @@ export type MetadataIndexState =
   "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
 export type SearchTimeField = "author" | "committer";
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
+export type CommitUpdateReason = "scopeUnavailable" | "noLongerReachable";
+export type CommitUpdateState = "unaffected" | "affected" | "unknown";
+export type ChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "typeChanged";
+export type FileDiffKind = "text" | "binary" | "gitlink" | "lfs" | "tooLarge";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type RepositoryScope =
   | ("head" | "allBranches")
@@ -226,12 +251,160 @@ export interface SearchIdentity {
   email: string;
   name: string;
 }
+export interface CommitDetails {
+  commit: CommitSummary;
+  message: string;
+  messageWithoutTrailers: string;
+  observedAtUnixMs: number;
+  /**
+   * @maxItems 2000
+   */
+  refs: RefInfo[];
+  refsTruncated: boolean;
+  /**
+   * @maxItems 4096
+   */
+  trailers: Trailer[];
+  update: CommitUpdate;
+  /**
+   * @maxItems 128
+   */
+  worktrees: WorktreeInfo[];
+  worktreesTruncated: boolean;
+}
 export interface RefInfo {
   kind: RefKind;
   name: string;
   oid: string;
   peeledOid: string | null;
   symbolicTarget: string | null;
+}
+export interface Trailer {
+  key: string;
+  value: string;
+}
+export interface CommitUpdate {
+  checkedAtUnixMs: number;
+  reason: CommitUpdateReason | null;
+  state: CommitUpdateState;
+}
+export interface WorktreeInfo {
+  available: boolean;
+  headOid: string | null;
+  headReference: string | null;
+  id: string;
+  isBare: boolean;
+  isCurrent: boolean;
+  isDetached: boolean;
+  isMain: boolean;
+  lockedReason: string | null;
+  path: string;
+  prunableReason: string | null;
+}
+export interface ChangedFilesPage {
+  /**
+   * @maxItems 200
+   */
+  files: ChangedFile[];
+  hasMore: boolean;
+  offset: number;
+  oid: string;
+  overview: ChangeOverview;
+  pageSize: number;
+  parentIndex: number | null;
+  parentOid: string | null;
+  totalFiles: number;
+}
+export interface ChangedFile {
+  additions: number | null;
+  binary: boolean;
+  deletions: number | null;
+  gitlink: boolean;
+  newMode: string;
+  newOid: string | null;
+  newPath: GitPath | null;
+  oldMode: string;
+  oldOid: string | null;
+  oldPath: GitPath | null;
+  similarity: number | null;
+  status: ChangedFileStatus;
+}
+export interface GitPath {
+  display: string;
+  rawHex: string;
+  textLossy: boolean;
+}
+export interface ChangeOverview {
+  additions: number;
+  binaryFiles: number;
+  counts: ChangeCounts;
+  deletions: number;
+  /**
+   * @maxItems 20000
+   */
+  directories: DirectoryChangeOverview[];
+  gitlinkFiles: number;
+  totalFiles: number;
+}
+export interface ChangeCounts {
+  added: number;
+  copied: number;
+  deleted: number;
+  modified: number;
+  renamed: number;
+  typeChanged: number;
+}
+export interface DirectoryChangeOverview {
+  additions: number;
+  deletions: number;
+  path: GitPath | null;
+  totalFiles: number;
+}
+export interface MergeCommitsPage {
+  /**
+   * @maxItems 1000
+   */
+  authors: MergeAuthorCount[];
+  /**
+   * @maxItems 200
+   */
+  commits: CommitSummary[];
+  firstParentOid: string;
+  hasMore: boolean;
+  offset: number;
+  oid: string;
+  pageSize: number;
+  parentIndex: number;
+  parentOid: string;
+  totalCommits: number;
+}
+export interface MergeAuthorCount {
+  count: number;
+  email: string;
+  name: string;
+}
+export interface BranchesContainingResult {
+  boundaryLimited: boolean;
+  /**
+   * @maxItems 2000
+   */
+  branches: RefInfo[];
+  complete: boolean;
+  observedAtUnixMs: number;
+  oid: string;
+  refsTruncated: boolean;
+}
+export interface FileDiff {
+  file: ChangedFile;
+  kind: FileDiffKind;
+  newSize: number | null;
+  oid: string;
+  oldSize: number | null;
+  parentIndex: number | null;
+  parentOid: string | null;
+  patch: string;
+  textLossy: boolean;
+  truncated: boolean;
 }
 export interface RepositoryInfo {
   commonDir: string;
@@ -330,19 +503,6 @@ export interface RepositoryNavigation {
 export interface DefaultBase {
   name: string;
   oid: string;
-}
-export interface WorktreeInfo {
-  available: boolean;
-  headOid: string | null;
-  headReference: string | null;
-  id: string;
-  isBare: boolean;
-  isCurrent: boolean;
-  isDetached: boolean;
-  isMain: boolean;
-  lockedReason: string | null;
-  path: string;
-  prunableReason: string | null;
 }
 export interface RefMergeStatusResult {
   defaultBase: DefaultBase | null;

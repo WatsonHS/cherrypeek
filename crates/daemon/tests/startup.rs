@@ -293,7 +293,8 @@ fn handshake_and_runtime_info_are_real_two_chunk_response() {
             "repositoryScopes",
             "metadataIndex",
             "metadataSearch",
-            "historyGraph"
+            "historyGraph",
+            "commitDetails"
         ])
     );
     assert_eq!(handshake["core"]["git"]["available"], true);

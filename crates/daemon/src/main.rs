@@ -1,3 +1,4 @@
+mod details;
 mod framing;
 mod git_command;
 mod graph;

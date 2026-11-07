@@ -29,6 +29,12 @@ const api: CommitScopeApi = {
   searchCommits: params => ipcRenderer.invoke("commitscope:search:commits", params),
   listSearchIdentities: params => ipcRenderer.invoke("commitscope:search:identities", params),
   cancelSearch: () => ipcRenderer.invoke("commitscope:search:cancel"),
+  getCommit: params => ipcRenderer.invoke("commitscope:details:get", params),
+  listChangedFiles: params => ipcRenderer.invoke("commitscope:details:files", params),
+  readMergeCommits: params => ipcRenderer.invoke("commitscope:details:merge", params),
+  branchesContaining: params => ipcRenderer.invoke("commitscope:details:branches", params),
+  readDiff: params => ipcRenderer.invoke("commitscope:details:diff", params),
+  cancelCommitDetails: () => ipcRenderer.invoke("commitscope:details:cancel"),
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

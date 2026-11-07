@@ -1,10 +1,11 @@
 use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
-    ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage, EmptyParams, ErrorCode,
-    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadHistoryPageParams,
-    ReadRepositoryPreviewParams, RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope,
-    ResponseData, SearchCommitsParams, SearchIdentitiesParams, SearchPage,
-    SelectRepositoryScopeParams, ServerMessage,
+    BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
+    EmptyParams, ErrorCode, GetCommitParams, ListChangedFilesParams, MetadataIndexAction,
+    OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams, ReadHistoryPageParams,
+    ReadMergeCommitsParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
+    RefreshRepositoryParams, RepositoryScope, ResponseData, SearchCommitsParams,
+    SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -51,6 +52,11 @@ enum RequestOperation {
     ControlMetadataIndex(MetadataIndexAction),
     SearchCommits(SearchCommitsParams),
     ListSearchIdentities(SearchIdentitiesParams),
+    GetCommit(GetCommitParams),
+    ListChangedFiles(ListChangedFilesParams),
+    ReadMergeCommits(ReadMergeCommitsParams),
+    BranchesContaining(BranchesContainingParams),
+    ReadDiff(ReadDiffParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -490,9 +496,110 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ControlMetadataIndex(_)
             | RequestOperation::SearchCommits(_)
             | RequestOperation::ListSearchIdentities(_)
+            | RequestOperation::GetCommit(_)
+            | RequestOperation::ListChangedFiles(_)
+            | RequestOperation::ReadMergeCommits(_)
+            | RequestOperation::BranchesContaining(_)
+            | RequestOperation::ReadDiff(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_commit_detail_worker<F>(
+    workers: &mut Vec<JoinHandle<()>>,
+    sender: SyncSender<OutFrame>,
+    shutdown: Arc<AtomicBool>,
+    requests: ActiveRequests,
+    request_id: String,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    git_path: Option<std::path::PathBuf>,
+    session: Arc<session::RepositorySession>,
+    operation: F,
+) where
+    F: FnOnce(
+            &std::path::Path,
+            &session::RepositorySession,
+            &AtomicBool,
+            std::time::Instant,
+        ) -> Result<(ResponseData, u32), crate::details::DetailError>
+        + Send
+        + 'static,
+{
+    workers.push(thread::spawn(move || {
+        let Some(git_path) = git_path else {
+            send_terminal_error(
+                &sender,
+                &shutdown,
+                Some(request_id.clone()),
+                repo_id,
+                generation,
+                ErrorCode::GitUnavailable,
+                "Git executable was not found".into(),
+                false,
+            );
+            remove_request(&requests, &request_id, &cancelled);
+            return;
+        };
+        let result = operation(
+            &git_path,
+            &session,
+            &cancelled,
+            std::time::Instant::now() + PREVIEW_TIMEOUT,
+        );
+        let (data, processed) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if error.code == ErrorCode::Cancelled || cancelled.load(Ordering::Acquire) {
+                    finish_cancelled(&sender, &shutdown, &request_id, repo_id, generation);
+                } else {
+                    send_terminal_error(
+                        &sender,
+                        &shutdown,
+                        Some(request_id.clone()),
+                        repo_id,
+                        generation,
+                        error.code,
+                        error.message,
+                        error.retryable,
+                    );
+                }
+                remove_request(&requests, &request_id, &cancelled);
+                return;
+            }
+        };
+        let message = ServerMessage::Response {
+            request_id: request_id.clone(),
+            repo_id: repo_id.clone(),
+            generation: generation.clone(),
+            sequence: 0,
+            done: true,
+            coverage: Coverage {
+                complete: true,
+                processed,
+            },
+            next_cursor: None,
+            data,
+        };
+        if serde_json::to_vec(&message).map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES) {
+            send_terminal_error(
+                &sender,
+                &shutdown,
+                Some(request_id.clone()),
+                repo_id,
+                generation,
+                ErrorCode::ResourceLimit,
+                "Commit details response exceeds the 512 KiB target".into(),
+                false,
+            );
+        } else if !send_task_message(&sender, &shutdown, &cancelled, &message) {
+            finish_cancelled(&sender, &shutdown, &request_id, repo_id, generation);
+        }
+        remove_request(&requests, &request_id, &cancelled);
+    }));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -689,6 +796,112 @@ fn dispatch_request(
                     cancelled,
                 );
             }));
+        }
+        RequestOperation::GetCommit(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let details =
+                        crate::details::get_commit(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::CommitDetails { details }, 1))
+                },
+            );
+        }
+        RequestOperation::ListChangedFiles(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let page = crate::details::list_changed_files(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    let processed = page.files.len() as u32;
+                    Ok((ResponseData::ChangedFiles { page }, processed))
+                },
+            );
+        }
+        RequestOperation::ReadMergeCommits(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let page = crate::details::read_merge_commits(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    let processed = page.commits.len() as u32;
+                    Ok((ResponseData::MergeCommits { page }, processed))
+                },
+            );
+        }
+        RequestOperation::BranchesContaining(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let result = crate::details::branches_containing(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    let processed = result.branches.len() as u32;
+                    Ok((ResponseData::BranchesContaining { result }, processed))
+                },
+            );
+        }
+        RequestOperation::ReadDiff(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let diff =
+                        crate::details::read_file_diff(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::FileDiff { diff }, 1))
+                },
+            );
         }
         RequestOperation::RefreshRepository(params) => {
             let session = bound_session.expect("session context was checked before dispatch");
@@ -1530,6 +1743,11 @@ fn validate_request(
         | "controlMetadataIndex"
         | "searchCommits"
         | "listSearchIdentities"
+        | "getCommit"
+        | "listChangedFiles"
+        | "readMergeCommits"
+        | "branchesContaining"
+        | "readDiff"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -1601,6 +1819,63 @@ fn validate_request(
                             )
                         })
                 }
+                "getCommit" => serde_json::from_value::<GetCommitParams>(params.clone())
+                    .map(RequestOperation::GetCommit)
+                    .map_err(|_| (ErrorCode::InvalidRequest, "getCommit params 无效".into())),
+                "listChangedFiles" => {
+                    serde_json::from_value::<ListChangedFilesParams>(params.clone())
+                        .and_then(|params| {
+                            if (1..=200).contains(&params.page_size)
+                                && params.parent_index.is_none_or(|index| index <= 127)
+                            {
+                                Ok(params)
+                            } else {
+                                Err(serde::de::Error::custom("pageSize must be 1..=200"))
+                            }
+                        })
+                        .map(RequestOperation::ListChangedFiles)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "listChangedFiles params 无效".into(),
+                            )
+                        })
+                }
+                "readMergeCommits" => {
+                    serde_json::from_value::<ReadMergeCommitsParams>(params.clone())
+                        .and_then(|params| {
+                            if (1..=200).contains(&params.page_size)
+                                && params.parent_index > 0
+                                && params.parent_index <= 127
+                            {
+                                Ok(params)
+                            } else {
+                                Err(serde::de::Error::custom(
+                                    "parentIndex/pageSize out of range",
+                                ))
+                            }
+                        })
+                        .map(RequestOperation::ReadMergeCommits)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readMergeCommits params 无效".into(),
+                            )
+                        })
+                }
+                "branchesContaining" => {
+                    serde_json::from_value::<BranchesContainingParams>(params.clone())
+                        .map(RequestOperation::BranchesContaining)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "branchesContaining params 无效".into(),
+                            )
+                        })
+                }
+                "readDiff" => serde_json::from_value::<ReadDiffParams>(params.clone())
+                    .map(RequestOperation::ReadDiff)
+                    .map_err(|_| (ErrorCode::InvalidRequest, "readDiff params 无效".into())),
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
@@ -1629,6 +1904,11 @@ fn validate_request(
         | "controlMetadataIndex"
         | "searchCommits"
         | "listSearchIdentities"
+        | "getCommit"
+        | "listChangedFiles"
+        | "readMergeCommits"
+        | "branchesContaining"
+        | "readDiff"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"

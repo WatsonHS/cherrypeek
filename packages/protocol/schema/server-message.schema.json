@@ -1,6 +1,46 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "BranchesContainingResult": {
+      "additionalProperties": false,
+      "properties": {
+        "boundaryLimited": {
+          "type": "boolean"
+        },
+        "branches": {
+          "items": {
+            "$ref": "#/definitions/RefInfo"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "refsTruncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oid",
+        "branches",
+        "observedAtUnixMs",
+        "complete",
+        "refsTruncated",
+        "boundaryLimited"
+      ],
+      "type": "object"
+    },
     "Capability": {
       "enum": [
         "getRuntimeInfo",
@@ -11,9 +51,368 @@
         "repositoryScopes",
         "metadataIndex",
         "metadataSearch",
-        "historyGraph"
+        "historyGraph",
+        "commitDetails"
       ],
       "type": "string"
+    },
+    "ChangeCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "added": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "copied": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deleted": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "modified": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "renamed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "typeChanged": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "typeChanged"
+      ],
+      "type": "object"
+    },
+    "ChangeOverview": {
+      "additionalProperties": false,
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "binaryFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "counts": {
+          "$ref": "#/definitions/ChangeCounts"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "directories": {
+          "items": {
+            "$ref": "#/definitions/DirectoryChangeOverview"
+          },
+          "maxItems": 20000,
+          "type": "array"
+        },
+        "gitlinkFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "totalFiles",
+        "counts",
+        "additions",
+        "deletions",
+        "binaryFiles",
+        "gitlinkFiles",
+        "directories"
+      ],
+      "type": "object"
+    },
+    "ChangedFile": {
+      "additionalProperties": false,
+      "properties": {
+        "additions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "deletions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gitlink": {
+          "type": "boolean"
+        },
+        "newMode": {
+          "maxLength": 6,
+          "minLength": 6,
+          "type": "string"
+        },
+        "newOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "newPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldMode": {
+          "maxLength": 6,
+          "minLength": 6,
+          "type": "string"
+        },
+        "oldOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "similarity": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ChangedFileStatus"
+        }
+      },
+      "required": [
+        "status",
+        "oldPath",
+        "newPath",
+        "oldOid",
+        "newOid",
+        "oldMode",
+        "newMode",
+        "similarity",
+        "additions",
+        "deletions",
+        "binary",
+        "gitlink"
+      ],
+      "type": "object"
+    },
+    "ChangedFileStatus": {
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "typeChanged"
+      ],
+      "type": "string"
+    },
+    "ChangedFilesPage": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/definitions/ChangedFile"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "overview": {
+          "$ref": "#/definitions/ChangeOverview"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "parentOid",
+        "offset",
+        "pageSize",
+        "totalFiles",
+        "hasMore",
+        "files",
+        "overview"
+      ],
+      "type": "object"
+    },
+    "CommitDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "$ref": "#/definitions/CommitSummary"
+        },
+        "message": {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "messageWithoutTrailers": {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refs": {
+          "items": {
+            "$ref": "#/definitions/RefInfo"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "refsTruncated": {
+          "type": "boolean"
+        },
+        "trailers": {
+          "items": {
+            "$ref": "#/definitions/Trailer"
+          },
+          "maxItems": 4096,
+          "type": "array"
+        },
+        "update": {
+          "$ref": "#/definitions/CommitUpdate"
+        },
+        "worktrees": {
+          "items": {
+            "$ref": "#/definitions/WorktreeInfo"
+          },
+          "maxItems": 128,
+          "type": "array"
+        },
+        "worktreesTruncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "commit",
+        "message",
+        "messageWithoutTrailers",
+        "trailers",
+        "refs",
+        "worktrees",
+        "observedAtUnixMs",
+        "refsTruncated",
+        "worktreesTruncated",
+        "update"
+      ],
+      "type": "object"
     },
     "CommitIdentity": {
       "additionalProperties": false,
@@ -77,6 +476,50 @@
         "textLossy"
       ],
       "type": "object"
+    },
+    "CommitUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "checkedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CommitUpdateReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/CommitUpdateState"
+        }
+      },
+      "required": [
+        "state",
+        "reason",
+        "checkedAtUnixMs"
+      ],
+      "type": "object"
+    },
+    "CommitUpdateReason": {
+      "enum": [
+        "scopeUnavailable",
+        "noLongerReachable"
+      ],
+      "type": "string"
+    },
+    "CommitUpdateState": {
+      "enum": [
+        "unaffected",
+        "affected",
+        "unknown"
+      ],
+      "type": "string"
     },
     "CoreReady": {
       "additionalProperties": false,
@@ -148,6 +591,43 @@
       ],
       "type": "object"
     },
+    "DirectoryChangeOverview": {
+      "additionalProperties": false,
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deletions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalFiles": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "totalFiles",
+        "additions",
+        "deletions"
+      ],
+      "type": "object"
+    },
     "ErrorCode": {
       "enum": [
         "PROTOCOL_MISMATCH",
@@ -176,6 +656,100 @@
       ],
       "type": "string"
     },
+    "FileDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "$ref": "#/definitions/ChangedFile"
+        },
+        "kind": {
+          "$ref": "#/definitions/FileDiffKind"
+        },
+        "newSize": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "oldSize": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patch": {
+          "maxLength": 131072,
+          "type": "string"
+        },
+        "textLossy": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "parentOid",
+        "file",
+        "kind",
+        "patch",
+        "truncated",
+        "textLossy",
+        "oldSize",
+        "newSize"
+      ],
+      "type": "object"
+    },
+    "FileDiffKind": {
+      "enum": [
+        "text",
+        "binary",
+        "gitlink",
+        "lfs",
+        "tooLarge"
+      ],
+      "type": "string"
+    },
     "GitInfo": {
       "additionalProperties": false,
       "properties": {
@@ -201,6 +775,28 @@
         "available",
         "version",
         "error"
+      ],
+      "type": "object"
+    },
+    "GitPath": {
+      "additionalProperties": false,
+      "properties": {
+        "display": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "rawHex": {
+          "maxLength": 32768,
+          "type": "string"
+        },
+        "textLossy": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "display",
+        "rawHex",
+        "textLossy"
       ],
       "type": "object"
     },
@@ -374,6 +970,102 @@
       "required": [
         "tips",
         "viewedAtUnixMs"
+      ],
+      "type": "object"
+    },
+    "MergeAuthorCount": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "email": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email",
+        "count"
+      ],
+      "type": "object"
+    },
+    "MergeCommitsPage": {
+      "additionalProperties": false,
+      "properties": {
+        "authors": {
+          "items": {
+            "$ref": "#/definitions/MergeAuthorCount"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "commits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "firstParentOid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentIndex": {
+          "format": "uint8",
+          "maximum": 127,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentOid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "totalCommits": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "parentOid",
+        "firstParentOid",
+        "offset",
+        "pageSize",
+        "totalCommits",
+        "hasMore",
+        "commits",
+        "authors"
       ],
       "type": "object"
     },
@@ -924,6 +1616,91 @@
         {
           "additionalProperties": false,
           "properties": {
+            "details": {
+              "$ref": "#/definitions/CommitDetails"
+            },
+            "section": {
+              "const": "commitDetails",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "details"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/definitions/ChangedFilesPage"
+            },
+            "section": {
+              "const": "changedFiles",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/definitions/MergeCommitsPage"
+            },
+            "section": {
+              "const": "mergeCommits",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/BranchesContainingResult"
+            },
+            "section": {
+              "const": "branchesContaining",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "diff": {
+              "$ref": "#/definitions/FileDiff"
+            },
+            "section": {
+              "const": "fileDiff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "diff"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -1330,6 +2107,22 @@
         "corrupt"
       ],
       "type": "string"
+    },
+    "Trailer": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "type": "object"
     },
     "WorktreeInfo": {
       "additionalProperties": false,

@@ -17,6 +17,7 @@ import { repositoryName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
+import { CommitDetailStore } from "./lib/commit-detail-store.js";
 
 export interface RepositoryActions {
   path: string;
@@ -156,9 +157,11 @@ export function App(): React.JSX.Element {
   const { status, readError } = useCoreStatus();
   const store = React.useMemo(() => new RepositorySessionStore(window.commitScope), []);
   const searchStore = React.useMemo(() => new MetadataSearchStore(window.commitScope), []);
+  const detailStore = React.useMemo(() => new CommitDetailStore(window.commitScope), []);
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   const searchView = React.useSyncExternalStore(searchStore.subscribe, searchStore.getView);
+  const detailView = React.useSyncExternalStore(detailStore.subscribe, detailStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
@@ -384,6 +387,17 @@ export function App(): React.JSX.Element {
   const displayedCommit = searchView.active
     ? searchView.window?.commits.find(commit => commit.oid === displayedOid) ?? searchView.oldSelectedCommit
     : null;
+  const detailSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}:${JSON.stringify(view.session.scope)}` : null;
+  const detailSelectionIsLoaded = searchView.active
+    ? Boolean(displayedOid && searchView.window?.commits.some(commit => commit.oid === displayedOid))
+    : Boolean(displayedOid && view.commits.some(commit => commit.oid === displayedOid));
+  React.useEffect(() => detailStore.bind(detailSessionKey, displayedOid, detailSelectionIsLoaded), [detailStore, detailSessionKey, displayedOid, detailSelectionIsLoaded]);
+  React.useEffect(() => {
+    const refreshDetailHint = () => { void detailStore.refreshUpdate(); };
+    window.addEventListener("focus", refreshDetailHint);
+    return () => window.removeEventListener("focus", refreshDetailHint);
+  }, [detailStore]);
+  React.useEffect(() => () => { void detailStore.cancel(); }, [detailStore]);
   const statusView = searchView.active && searchPartialBusy && searchView.window
     ? { ...view, metadataIndex: searchView.window.index, metadataIndexLoading: false } : view;
   const moveSearchSelection = async (delta: -1 | 1) => {
@@ -442,7 +456,12 @@ export function App(): React.JSX.Element {
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
             onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />}
-          <CommitDetail preview={view} selectedOid={displayedOid} onSelect={selectDisplayedCommit}
+          <CommitDetail preview={view} detail={detailView} onRetryDetails={() => detailStore.retryDetails()}
+            onRetryFiles={() => detailStore.retryFiles()} onLoadFiles={(parentIndex, offset) => detailStore.loadFiles(parentIndex, offset)}
+            onRetryMerge={() => detailStore.retryMerge()} onLoadMerge={(parentIndex, offset) => detailStore.loadMerge(parentIndex, offset)}
+            onToggleDiff={(file, parentIndex) => { void detailStore.toggleDiff(file, parentIndex); }}
+            onLoadContaining={() => detailStore.loadContaining()} onRetryContaining={() => detailStore.retryContaining()}
+            selectedOid={displayedOid} onSelect={selectDisplayedCommit}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}

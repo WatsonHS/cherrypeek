@@ -77,7 +77,7 @@ try {
       throw new Error(`forward scroll did not load beyond ${previousEnd}: ${JSON.stringify(diagnostic)}`, { cause: error });
     }
     const next = await readWindowMetrics(page);
-    assert.ok(next.loadedCount <= 2_000, `retained summaries exceeded the 2000 commit cap: ${JSON.stringify(next)}`);
+    assert.ok(next.loadedCount <= 1_800, `retained summaries exceeded the 1800-summary cap: ${JSON.stringify(next)}`);
     peakLoadedCount = Math.max(peakLoadedCount, next.loadedCount);
     assert.ok(next.domRows <= 60, `virtual DOM expanded beyond viewport plus overscan: ${next.domRows}`);
     assert.ok(next.offset + next.loadedCount >= previousEnd, "forward window moved without losing its latest loaded boundary");
@@ -104,8 +104,8 @@ try {
   }
   assert.equal(previousEnd, commitCount, `should traverse to the end of ${commitCount} commits; got ${previousEnd}`);
   const afterForward = await readWindowMetrics(page);
-  assert.equal(peakLoadedCount, 2_000, "the forward traversal should exercise whole-page eviction at the cache cap");
-  assert.ok(afterForward.loadedCount <= 2_000, "the final short page can evict a whole page and leave fewer than 2000 retained summaries");
+  assert.equal(peakLoadedCount, 1_800, "the forward traversal should exercise whole-page eviction at the 1800-summary cap");
+  assert.ok(afterForward.loadedCount <= 1_800, "the final short page can evict a whole page and leave fewer than 1800 retained summaries");
   assert.ok(afterForward.offset > 0, "the retained window should have evicted the oldest page");
 
   const firstVisibleRow = page.getByTestId("commit-row").first();
@@ -125,7 +125,7 @@ try {
       return element && Number(element.dataset.loadedOffset) < previous;
     }, offset, { timeout: 10_000 });
     const next = await readWindowMetrics(page);
-    assert.ok(next.loadedCount <= 2_000);
+    assert.ok(next.loadedCount <= 1_800);
     assert.ok(next.domRows <= 60);
     offset = next.offset;
   }
@@ -159,7 +159,7 @@ try {
   await app.evaluate(({ clipboard }, value) => clipboard.writeText(value), originalClipboard);
   await app.close();
   app = undefined;
-  process.stdout.write(`Virtual history Electron smoke passed: ${commitCount} commits, 2000-summary cap, reverse re-read, keyboard, copy, read-only repository. Screenshot: ${screenshotPath}\n`);
+  process.stdout.write(`Virtual history Electron smoke passed: ${commitCount} commits, 1800-summary cap, reverse re-read, keyboard, copy, read-only repository. Screenshot: ${screenshotPath}\n`);
 } catch (error) {
   failure = error;
   if (page) {

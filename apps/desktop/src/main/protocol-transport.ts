@@ -197,7 +197,8 @@ export class ProtocolTransport {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅打开、刷新和范围切换可保留迟到的成功终态"));
     }
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
-      method !== "searchCommits" && method !== "listSearchIdentities") {
+      method !== "searchCommits" && method !== "listSearchIdentities" &&
+      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "refreshRepository", "selectRepositoryScope"].includes(method)) {
@@ -585,6 +586,22 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.field === "author" || params.field === "committer") && typeof params.text === "string" &&
     Buffer.byteLength(params.text, "utf8") <= 1024 && Number.isInteger(params.limit) &&
     (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
+  if (["getCommit", "branchesContaining"].includes(method) && isRecord(params) && hasExactKeys(params, ["oid"]) &&
+    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid)) return true;
+  if (["listChangedFiles", "readMergeCommits"].includes(method) && isRecord(params) &&
+    hasExactKeys(params, ["offset", "oid", "pageSize", "parentIndex"]) &&
+    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
+    Number.isInteger(params.offset) && (params.offset as number) >= 0 && (params.offset as number) <= 0xffff_ffff &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 200 &&
+    (method === "listChangedFiles"
+      ? params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127
+      : Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 1 && (params.parentIndex as number) <= 127)) return true;
+  if (method === "readDiff" && isRecord(params) && hasExactKeys(params, ["newPathHex", "oid", "oldPathHex", "parentIndex"]) &&
+    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
+    (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
+    (params.oldPathHex === null || typeof params.oldPathHex === "string" && params.oldPathHex.length > 0 && params.oldPathHex.length <= 32 * 1024 && params.oldPathHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(params.oldPathHex)) &&
+    (params.newPathHex === null || typeof params.newPathHex === "string" && params.newPathHex.length > 0 && params.newPathHex.length <= 32 * 1024 && params.newPathHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(params.newPathHex)) &&
+    (params.oldPathHex !== null || params.newPathHex !== null)) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
@@ -616,7 +633,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
   return undefined;
 }
 

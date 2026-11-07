@@ -32,6 +32,12 @@ const IPC_INDEX_CONTROL = "commitscope:index:control";
 const IPC_SEARCH_COMMITS = "commitscope:search:commits";
 const IPC_SEARCH_IDENTITIES = "commitscope:search:identities";
 const IPC_SEARCH_CANCEL = "commitscope:search:cancel";
+const IPC_COMMIT_GET = "commitscope:details:get";
+const IPC_CHANGED_FILES = "commitscope:details:files";
+const IPC_MERGE_COMMITS = "commitscope:details:merge";
+const IPC_BRANCHES_CONTAINING = "commitscope:details:branches";
+const IPC_READ_DIFF = "commitscope:details:diff";
+const IPC_COMMIT_DETAILS_CANCEL = "commitscope:details:cancel";
 const IPC_HISTORY_READ = "commitscope:history:read-page";
 const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
 const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
@@ -142,6 +148,30 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_SEARCH_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.cancelSearch());
+  });
+  ipcMain.handle(IPC_COMMIT_GET, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getCommit(params));
+  });
+  ipcMain.handle(IPC_CHANGED_FILES, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.listChangedFiles(params));
+  });
+  ipcMain.handle(IPC_MERGE_COMMITS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readMergeCommits(params));
+  });
+  ipcMain.handle(IPC_BRANCHES_CONTAINING, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.branchesContaining(params));
+  });
+  ipcMain.handle(IPC_READ_DIFF, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readDiff(params));
+  });
+  ipcMain.handle(IPC_COMMIT_DETAILS_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelCommitDetails());
   });
   ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

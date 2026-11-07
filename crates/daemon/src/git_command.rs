@@ -310,6 +310,7 @@ impl ReadOnlyGit {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", empty_global_config_path())
+            .env("GIT_ATTR_NOSYSTEM", "1")
             .env("LC_ALL", "C")
             .env("LANG", "C")
             .stdin(if has_input {

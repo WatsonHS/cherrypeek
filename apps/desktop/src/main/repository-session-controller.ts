@@ -1,6 +1,11 @@
 import { isAbsolute } from "node:path";
 import type {
   CommitSummary,
+  CommitDetails,
+  ChangedFilesPage,
+  MergeCommitsPage,
+  BranchesContainingResult,
+  FileDiff,
   HistoryCommit,
   RefInfo,
   RepositoryInfo,
@@ -8,7 +13,8 @@ import type {
   SearchPage,
   SearchIdentities,
 } from "../../../../packages/protocol/src/generated/server-message.js";
-import type { MetadataIndexAction, SearchCommitsParams, SearchIdentitiesParams, SearchQuery } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { MetadataIndexAction, SearchCommitsParams, SearchIdentitiesParams, SearchQuery,
+  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   RefreshedRepository,
@@ -71,6 +77,12 @@ interface ActiveSearchRequest {
   done: Promise<SearchPage | SearchIdentities>;
 }
 
+interface ActiveCommitDetailRequest {
+  kind: "commit" | "files" | "merge" | "branches" | "diff";
+  abort: AbortController;
+  done: Promise<unknown>;
+}
+
 export class RepositorySessionController {
   private current?: RepositorySessionInfo;
   private operation = 0;
@@ -86,6 +98,9 @@ export class RepositorySessionController {
   private activeMetadataIndexRequest?: ActiveMetadataIndexRequest;
   private searchIntent = 0;
   private activeSearchRequest?: ActiveSearchRequest;
+  private commitDetailsIntent = 0;
+  private activeCommitDetailRequest?: ActiveCommitDetailRequest;
+  private currentCommitDetails?: { session: RepositorySessionInfo; details: CommitDetails };
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -100,10 +115,13 @@ export class RepositorySessionController {
     this.requireCapability("repositorySessions");
     this.requireCapability("repositoryScopes");
     this.requireCapability("historyGraph");
+    this.requireCapability("commitDetails");
 
     const operation = ++this.operation;
     ++this.pageIntent;
     if (this.activeSearchRequest) await this.cancelSearch();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
@@ -252,6 +270,8 @@ export class RepositorySessionController {
     ++this.pageIntent;
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -284,6 +304,7 @@ export class RepositorySessionController {
 
   async getNavigation(): Promise<RepositoryNavigation> {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取导航清单", true);
+    this.ensurePassiveRequestCapacity("仓库导航");
     const session = this.requireCurrent();
     this.requireCapability("repositoryScopes");
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
@@ -318,6 +339,8 @@ export class RepositorySessionController {
     ++this.pageIntent;
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -346,6 +369,7 @@ export class RepositorySessionController {
 
   async getRefMergeStatus(refNames: unknown): Promise<RefMergeStatusResult> {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能计算合入状态", true);
+    this.ensurePassiveRequestCapacity("分支合入状态");
     const session = this.requireCurrent();
     this.requireCapability("repositoryScopes");
     if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
@@ -387,6 +411,7 @@ export class RepositorySessionController {
 
   async getMetadataIndexStatus(): Promise<MetadataIndexStatus> {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取索引状态", true);
+    this.ensurePassiveRequestCapacity("索引状态");
     const session = this.requireCurrent();
     this.requireMetadataIndexCapability();
     if (this.activeMetadataIndexRequest) throw new ProtocolClientError("BUSY", "索引状态或控制请求正在执行", true);
@@ -407,6 +432,7 @@ export class RepositorySessionController {
 
   async controlMetadataIndex(action: unknown): Promise<MetadataIndexStatus> {
     if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能控制索引", true);
+    this.ensurePassiveRequestCapacity("索引控制");
     if (action !== "pause" && action !== "resume" && action !== "cancel" && action !== "rebuild") {
       throw new ProtocolClientError("INVALID_REQUEST", "索引操作无效");
     }
@@ -462,6 +488,227 @@ export class RepositorySessionController {
     await active.done.catch(() => undefined);
     if (this.activeSearchRequest === active) this.activeSearchRequest = undefined;
     return { cancelled: true };
+  }
+
+  async getCommit(input: unknown): Promise<CommitDetails> {
+    const params = validateGetCommitParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    return this.runCommitDetailsRequest("commit", session, signal => this.readCommitDetails(session, params, signal));
+  }
+
+  async listChangedFiles(input: unknown): Promise<ChangedFilesPage> {
+    const params = validateListChangedFilesParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    const details = this.requireLoadedCommitDetails(session, params.oid);
+    validateFileParent(params.parentIndex, details.commit.parents.length);
+    return this.runCommitDetailsRequest("files", session, signal => this.readChangedFiles(session, params, details, signal));
+  }
+
+  async readMergeCommits(input: unknown): Promise<MergeCommitsPage> {
+    const params = validateReadMergeCommitsParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    const details = this.requireLoadedCommitDetails(session, params.oid);
+    if (details.commit.parents.length < 2 || params.parentIndex < 1 || params.parentIndex >= details.commit.parents.length) {
+      throw new ProtocolClientError("INVALID_REQUEST", "merge 父提交序号无效");
+    }
+    return this.runCommitDetailsRequest("merge", session, signal => this.readMergeCommitPage(session, params, details, signal));
+  }
+
+  async branchesContaining(input: unknown): Promise<BranchesContainingResult> {
+    const params = validateBranchesContainingParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    return this.runCommitDetailsRequest("branches", session, signal => this.readBranchesContaining(session, params, signal));
+  }
+
+  async readDiff(input: unknown): Promise<FileDiff> {
+    const params = validateReadDiffParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    const details = this.requireLoadedCommitDetails(session, params.oid);
+    validateFileParent(params.parentIndex, details.commit.parents.length);
+    return this.runCommitDetailsRequest("diff", session, signal => this.readFileDiff(session, params, details, signal));
+  }
+
+  async cancelCommitDetails(): Promise<{ cancelled: boolean }> {
+    ++this.commitDetailsIntent;
+    const active = this.activeCommitDetailRequest;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("提交详情请求已取消"));
+    await active.done.catch(() => undefined);
+    if (this.activeCommitDetailRequest === active) this.activeCommitDetailRequest = undefined;
+    return { cancelled: true };
+  }
+
+  private async runCommitDetailsRequest<T>(
+    kind: ActiveCommitDetailRequest["kind"],
+    session: RepositorySessionInfo,
+    read: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库范围正在更新，暂不能读取提交详情", true);
+    if (this.activeMetadataIndexRequest?.kind === "control") throw new ProtocolClientError("BUSY", "索引控制操作完成后再读取提交详情", true);
+    const intent = ++this.commitDetailsIntent;
+    const previous = this.activeCommitDetailRequest;
+    if (previous) {
+      previous.abort.abort(new Error("提交详情请求已被新选择取代"));
+      await previous.done.catch(() => undefined);
+    }
+    if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
+    if (this.activeMergeStatus) await this.cancelRefMergeStatus();
+    if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveCommitDetailRequest = { kind, abort, done: Promise.resolve(undefined) };
+    active.done = read(abort.signal);
+    this.activeCommitDetailRequest = active;
+    try {
+      const result = await active.done as T;
+      if (intent !== this.commitDetailsIntent) throw new ProtocolClientError("CANCELLED", "提交详情请求已被新选择取代", true);
+      this.ensureCurrent(session);
+      if (kind === "commit") this.currentCommitDetails = { session, details: result as CommitDetails };
+      return result;
+    } finally {
+      if (this.activeCommitDetailRequest === active) this.activeCommitDetailRequest = undefined;
+    }
+  }
+
+  private async readCommitDetails(session: RepositorySessionInfo, params: GetCommitParams, signal: AbortSignal): Promise<CommitDetails> {
+    let details: CommitDetails | undefined;
+    const completion = await this.core.request("getCommit", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (details || chunk.data.section !== "commitDetails" || !chunk.done) throw invalidSessionResponse("提交详情响应无效");
+        details = chunk.data.details;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!details || !completion.coverage.complete || completion.coverage.processed !== 1 || completion.nextCursor !== null ||
+      details.observedAtUnixMs !== session.observedAtUnixMs || !validCommitDetails(details, params.oid, session.repository.objectFormat)) {
+      throw invalidSessionResponse("提交详情响应不完整或不一致");
+    }
+    return details;
+  }
+
+  private async readChangedFiles(
+    session: RepositorySessionInfo,
+    params: ListChangedFilesParams,
+    details: CommitDetails,
+    signal: AbortSignal,
+  ): Promise<ChangedFilesPage> {
+    let page: ChangedFilesPage | undefined;
+    const completion = await this.core.request("listChangedFiles", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (page || chunk.data.section !== "changedFiles" || !chunk.done) throw invalidSessionResponse("文件清单响应无效");
+        page = chunk.data.page;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!page || !Array.isArray(page.files) || !completion.coverage.complete || completion.coverage.processed !== page.files.length || completion.nextCursor !== null ||
+      !validChangedFilesPage(page, params, details, session.repository.objectFormat)) throw invalidSessionResponse("文件清单响应不完整或不一致");
+    return page;
+  }
+
+  private async readMergeCommitPage(
+    session: RepositorySessionInfo,
+    params: ReadMergeCommitsParams,
+    details: CommitDetails,
+    signal: AbortSignal,
+  ): Promise<MergeCommitsPage> {
+    let page: MergeCommitsPage | undefined;
+    const completion = await this.core.request("readMergeCommits", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (page || chunk.data.section !== "mergeCommits" || !chunk.done) throw invalidSessionResponse("merge 带入提交响应无效");
+        page = chunk.data.page;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!page || !Array.isArray(page.commits) || !completion.coverage.complete || completion.coverage.processed !== page.commits.length || completion.nextCursor !== null ||
+      !validMergeCommitsPage(page, params, details, session.repository.objectFormat)) throw invalidSessionResponse("merge 带入提交响应不完整或不一致");
+    return page;
+  }
+
+  private async readBranchesContaining(
+    session: RepositorySessionInfo,
+    params: BranchesContainingParams,
+    signal: AbortSignal,
+  ): Promise<BranchesContainingResult> {
+    let result: BranchesContainingResult | undefined;
+    const completion = await this.core.request("branchesContaining", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (result || chunk.data.section !== "branchesContaining" || !chunk.done) throw invalidSessionResponse("包含分支响应无效");
+        result = chunk.data.result;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!result || !Array.isArray(result.branches) || result.oid !== params.oid || !completion.coverage.complete || completion.coverage.processed !== result.branches.length || completion.nextCursor !== null ||
+      result.branches.length > MAX_REFS || result.observedAtUnixMs !== session.observedAtUnixMs || typeof result.complete !== "boolean" ||
+      typeof result.refsTruncated !== "boolean" || typeof result.boundaryLimited !== "boolean" || !Number.isSafeInteger(result.observedAtUnixMs) ||
+      result.complete && (result.refsTruncated || result.boundaryLimited) ||
+      !result.branches.every(ref => validRefInfo(ref, session.repository.objectFormat) && ref.kind !== "tag")) throw invalidSessionResponse("包含分支响应不完整或不一致");
+    return result;
+  }
+
+  private async readFileDiff(session: RepositorySessionInfo, params: ReadDiffParams, details: CommitDetails, signal: AbortSignal): Promise<FileDiff> {
+    let diff: FileDiff | undefined;
+    const completion = await this.core.request("readDiff", params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        if (diff || chunk.data.section !== "fileDiff" || !chunk.done) throw invalidSessionResponse("文件 diff 响应无效");
+        diff = chunk.data.diff;
+      },
+    });
+    this.ensureCurrent(session);
+    if (!diff || !completion.coverage.complete || completion.coverage.processed !== 1 || completion.nextCursor !== null ||
+      !validFileDiff(diff, params, details, session.repository.objectFormat)) throw invalidSessionResponse("文件 diff 响应不完整或不一致");
+    return diff;
+  }
+
+  private requireCommitDetailsCapability(): RepositorySessionInfo {
+    const session = this.requireCurrent();
+    this.requireCapability("commitDetails");
+    return session;
+  }
+
+  private ensurePassiveRequestCapacity(label: string): void {
+    if (this.activeCommitDetailRequest && (this.activeHistoryRead || this.activeSearchRequest)) {
+      throw new ProtocolClientError("BUSY", `历史/搜索和提交详情请求进行中，暂不能读取${label}`, true);
+    }
+  }
+
+  private validateOidForSession(oid: string, session: RepositorySessionInfo): void {
+    const length = session.repository.objectFormat === "sha256" ? 64 : 40;
+    if (oid.length !== length || !/^[0-9a-f]+$/i.test(oid)) throw new ProtocolClientError("INVALID_REQUEST", "提交 OID 必须与当前仓库对象格式一致");
+  }
+
+  private requireLoadedCommitDetails(session: RepositorySessionInfo, oid: string): CommitDetails {
+    const current = this.currentCommitDetails;
+    if (!current || current.session !== session || current.details.commit.oid !== oid) {
+      throw new ProtocolClientError("STALE_CONTEXT", "请先读取当前提交详情", true);
+    }
+    return current.details;
   }
 
   private async runSearchRequest(
@@ -598,6 +845,8 @@ export class RepositorySessionController {
     ++this.pageIntent;
     if (this.activeSearchRequest) await this.cancelSearch();
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     if (this.activeMetadataIndexRequest) await this.settleMetadataIndexForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     const mergeCancellation = this.activeMergeStatus ? this.cancelRefMergeStatus() : undefined;
@@ -625,6 +874,7 @@ export class RepositorySessionController {
       throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     }
     this.current = undefined;
+    this.currentCommitDetails = undefined;
     this.core.switchCurrentContext({ repoId: null, generation: null });
     return { closed: true };
   }
@@ -660,6 +910,10 @@ export class RepositorySessionController {
     ++this.searchIntent;
     this.activeSearchRequest?.abort.abort(new Error("应用正在关闭"));
     this.activeSearchRequest = undefined;
+    ++this.commitDetailsIntent;
+    this.activeCommitDetailRequest?.abort.abort(new Error("应用正在关闭"));
+    this.activeCommitDetailRequest = undefined;
+    this.currentCommitDetails = undefined;
     ++this.mergeIntent;
     ++this.metadataIndexIntent;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("应用正在关闭"));
@@ -690,6 +944,7 @@ export class RepositorySessionController {
       throw new ProtocolClientError("CORE_EXITED", "核心已关闭，忽略迟到的仓库会话", true);
     }
     this.current = sessionData.session;
+    this.currentCommitDetails = undefined;
     this.core.observeLatestContext(contextOf(sessionData.session));
     this.core.switchCurrentContext(contextOf(sessionData.session));
   }
@@ -846,6 +1101,7 @@ export class RepositorySessionController {
       throw new ProtocolClientError("CORE_EXITED", "核心已关闭，忽略迟到的刷新会话", true);
     }
     this.current = nextSession;
+    this.currentCommitDetails = undefined;
     this.core.observeLatestContext(contextOf(nextSession));
     this.core.switchCurrentContext(contextOf(nextSession));
     const historyPage: HistoryPage = { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };
@@ -940,7 +1196,8 @@ export class RepositorySessionController {
       throw new ProtocolClientError("UNKNOWN_METHOD", capability === "metadataIndex"
         ? "核心不支持元数据索引，请更新核心版本" : capability === "metadataSearch"
           ? "核心不支持元数据搜索，请更新核心版本" : capability === "historyGraph"
-            ? "核心不支持历史图布局，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
+            ? "核心不支持历史图布局，请更新核心版本" : capability === "commitDetails"
+              ? "核心不支持提交详情，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -964,10 +1221,14 @@ export class RepositorySessionController {
     ++this.searchIntent;
     this.activeSearchRequest?.abort.abort(new Error("核心已退出"));
     this.activeSearchRequest = undefined;
+    ++this.commitDetailsIntent;
+    this.activeCommitDetailRequest?.abort.abort(new Error("核心已退出"));
+    this.activeCommitDetailRequest = undefined;
     if (this.activeMetadataIndexRequest?.kind === "status") this.activeMetadataIndexRequest.abort?.abort(new Error("核心已退出"));
     ++this.metadataIndexIntent;
     this.activeOpen = undefined;
     this.current = undefined;
+    this.currentCommitDetails = undefined;
     this.core.switchCurrentContext(NULL_CONTEXT);
   }
 }
@@ -1020,6 +1281,64 @@ function validateSearchIdentitiesParams(value: unknown): SearchIdentitiesParams 
     throw new ProtocolClientError("INVALID_REQUEST", "身份建议请求参数无效");
   }
   return value as unknown as SearchIdentitiesParams;
+}
+
+function validateGetCommitParams(value: unknown): GetCommitParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["oid"]) || typeof value.oid !== "string" ||
+    !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "提交详情请求参数无效");
+  }
+  return { oid: value.oid.toLowerCase() };
+}
+
+function validateBranchesContainingParams(value: unknown): BranchesContainingParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["oid"]) || typeof value.oid !== "string" ||
+    !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "包含分支请求参数无效");
+  }
+  return { oid: value.oid.toLowerCase() };
+}
+
+function validateReadDiffParams(value: unknown): ReadDiffParams {
+  const validPathHex = (item: unknown) => item === null || typeof item === "string" && item.length > 0 &&
+    item.length <= MAX_PATH_BYTES * 2 && item.length % 2 === 0 && /^[0-9a-f]+$/i.test(item);
+  if (!isRecord(value) || !hasExactKeys(value, ["newPathHex", "oid", "oldPathHex", "parentIndex"]) ||
+    typeof value.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid) ||
+    value.parentIndex !== null && (!Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 0 || (value.parentIndex as number) > 127) ||
+    !validPathHex(value.oldPathHex) || !validPathHex(value.newPathHex) || value.oldPathHex === null && value.newPathHex === null) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件 diff 请求参数无效");
+  }
+  return { oid: value.oid.toLowerCase(), parentIndex: value.parentIndex as number | null,
+    oldPathHex: typeof value.oldPathHex === "string" ? value.oldPathHex.toLowerCase() : null,
+    newPathHex: typeof value.newPathHex === "string" ? value.newPathHex.toLowerCase() : null };
+}
+
+function validateListChangedFilesParams(value: unknown): ListChangedFilesParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["offset", "oid", "pageSize", "parentIndex"]) ||
+    typeof value.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid) ||
+    !Number.isInteger(value.offset) || (value.offset as number) < 0 || (value.offset as number) > 0xffff_ffff ||
+    !Number.isInteger(value.pageSize) || (value.pageSize as number) < 1 || (value.pageSize as number) > 200 ||
+    value.parentIndex !== null && (!Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 0 || (value.parentIndex as number) > 127)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件清单请求参数无效");
+  }
+  return { ...value, oid: value.oid.toLowerCase() } as unknown as ListChangedFilesParams;
+}
+
+function validateReadMergeCommitsParams(value: unknown): ReadMergeCommitsParams {
+  if (!isRecord(value) || !hasExactKeys(value, ["offset", "oid", "pageSize", "parentIndex"]) ||
+    typeof value.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid) ||
+    !Number.isInteger(value.offset) || (value.offset as number) < 0 || (value.offset as number) > 0xffff_ffff ||
+    !Number.isInteger(value.pageSize) || (value.pageSize as number) < 1 || (value.pageSize as number) > 200 ||
+    !Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 1 || (value.parentIndex as number) > 127) {
+    throw new ProtocolClientError("INVALID_REQUEST", "merge 提交分页请求参数无效");
+  }
+  return { ...value, oid: value.oid.toLowerCase() } as unknown as ReadMergeCommitsParams;
+}
+
+function validateFileParent(parentIndex: number | null, parentCount: number): void {
+  if (parentCount === 0 ? parentIndex !== null : parentIndex === null || parentIndex >= parentCount) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件比较父提交序号无效");
+  }
 }
 
 function isSearchQuery(value: unknown): value is SearchQuery {
@@ -1125,6 +1444,153 @@ function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean 
   }
   if ((graph.hiddenLaneCount as number) < hiddenLanes.size) return false;
   return true;
+}
+
+function validCommitDetails(details: CommitDetails, oid: string, objectFormat: string): boolean {
+  const oidLength = objectFormat === "sha256" ? 64 : 40;
+  if (!isRecord(details) || !hasExactKeys(details, ["commit", "message", "messageWithoutTrailers", "observedAtUnixMs", "refs", "refsTruncated", "trailers", "update", "worktrees", "worktreesTruncated"]) ||
+    !validCommitSummary(details.commit, oidLength) || details.commit.oid !== oid ||
+    typeof details.message !== "string" || Buffer.byteLength(details.message, "utf8") > 512 * 1024 ||
+    typeof details.messageWithoutTrailers !== "string" || Buffer.byteLength(details.messageWithoutTrailers, "utf8") > 512 * 1024 ||
+    !Number.isSafeInteger(details.observedAtUnixMs) || typeof details.refsTruncated !== "boolean" ||
+    !Array.isArray(details.refs) || details.refs.length > MAX_REFS || !details.refs.every(ref => validRefInfo(ref, objectFormat)) ||
+    !Array.isArray(details.trailers) || details.trailers.length > 4_096 || !details.trailers.every(trailer => isRecord(trailer) &&
+      hasExactKeys(trailer, ["key", "value"]) && typeof trailer.key === "string" && typeof trailer.value === "string") ||
+    typeof details.worktreesTruncated !== "boolean" || !Array.isArray(details.worktrees) || details.worktrees.length > 128 ||
+    !details.worktrees.every(worktree => validWorktreeInfo(worktree)) || !isRecord(details.update) ||
+    !hasExactKeys(details.update, ["checkedAtUnixMs", "reason", "state"]) || !Number.isSafeInteger(details.update.checkedAtUnixMs) ||
+    !["unaffected", "affected", "unknown"].includes(details.update.state as string) ||
+    details.update.reason !== null && !["scopeUnavailable", "noLongerReachable"].includes(details.update.reason as string) ||
+    details.update.state === "affected" && details.update.reason === null ||
+    details.update.state !== "affected" && details.update.reason !== null) return false;
+  return true;
+}
+
+function validCommitSummary(value: unknown, oidLength: number): value is CommitSummary {
+  if (!isRecord(value) || !hasExactKeys(value, ["author", "committer", "oid", "parents", "summary", "summaryTruncated", "textLossy"]) ||
+    typeof value.oid !== "string" || value.oid.length !== oidLength || !/^[0-9a-f]+$/i.test(value.oid) ||
+    !Array.isArray(value.parents) || value.parents.length > 128 || !value.parents.every(parent => typeof parent === "string" && parent.length === oidLength && /^[0-9a-f]+$/i.test(parent)) ||
+    typeof value.summary !== "string" || Buffer.byteLength(value.summary, "utf8") > 4_096 ||
+    typeof value.summaryTruncated !== "boolean" || typeof value.textLossy !== "boolean") return false;
+  const identity = (item: unknown) => isRecord(item) && hasExactKeys(item, ["email", "name", "offset", "timestamp"]) &&
+    typeof item.name === "string" && Buffer.byteLength(item.name, "utf8") <= 4_096 &&
+    typeof item.email === "string" && Buffer.byteLength(item.email, "utf8") <= 4_096 &&
+    typeof item.timestamp === "string" && /^-?\d{1,16}$/.test(item.timestamp) &&
+    typeof item.offset === "string" && /^[+-]\d{4}$/.test(item.offset);
+  return identity(value.author) && identity(value.committer);
+}
+
+function validRefInfo(value: unknown, objectFormat: string): value is RefInfo {
+  const oidLength = objectFormat === "sha256" ? 64 : 40;
+  return isRecord(value) && hasExactKeys(value, ["kind", "name", "oid", "peeledOid", "symbolicTarget"]) &&
+    ["localBranch", "remoteBranch", "tag"].includes(value.kind as string) && typeof value.name === "string" &&
+    Buffer.byteLength(value.name, "utf8") <= 16 * 1024 && typeof value.oid === "string" && value.oid.length === oidLength && /^[0-9a-f]+$/i.test(value.oid) &&
+    (value.peeledOid === null || typeof value.peeledOid === "string" && value.peeledOid.length === oidLength && /^[0-9a-f]+$/i.test(value.peeledOid)) &&
+    (value.symbolicTarget === null || typeof value.symbolicTarget === "string" && Buffer.byteLength(value.symbolicTarget, "utf8") <= 16 * 1024);
+}
+
+function validWorktreeInfo(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ["available", "headOid", "headReference", "id", "isBare", "isCurrent", "isDetached", "isMain", "lockedReason", "path", "prunableReason"]) &&
+    typeof value.available === "boolean" && (value.headOid === null || typeof value.headOid === "string" && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(value.headOid)) &&
+    (value.headReference === null || typeof value.headReference === "string" && Buffer.byteLength(value.headReference, "utf8") <= 16 * 1024) &&
+    typeof value.id === "string" && value.id.length > 0 && Buffer.byteLength(value.id, "utf8") <= 256 &&
+    typeof value.isBare === "boolean" && typeof value.isCurrent === "boolean" && typeof value.isDetached === "boolean" && typeof value.isMain === "boolean" &&
+    (value.lockedReason === null || typeof value.lockedReason === "string" && Buffer.byteLength(value.lockedReason, "utf8") <= 16 * 1024) &&
+    typeof value.path === "string" && Buffer.byteLength(value.path, "utf8") <= MAX_PATH_BYTES && !value.path.includes("\0") &&
+    (value.prunableReason === null || typeof value.prunableReason === "string" && Buffer.byteLength(value.prunableReason, "utf8") <= 16 * 1024);
+}
+
+function validGitPath(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ["display", "rawHex", "textLossy"]) ||
+    typeof value.display !== "string" || Buffer.byteLength(value.display, "utf8") > MAX_PATH_BYTES * 3 ||
+    typeof value.rawHex !== "string" || value.rawHex.length > MAX_PATH_BYTES * 2 || value.rawHex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value.rawHex) ||
+    typeof value.textLossy !== "boolean") return false;
+  const bytes = Buffer.from(value.rawHex, "hex");
+  let decoded: string;
+  let lossy = false;
+  try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch { decoded = bytes.toString("utf8"); lossy = true; }
+  return value.display === decoded && value.textLossy === lossy;
+}
+
+function validChangedFilesPage(page: ChangedFilesPage, params: ListChangedFilesParams, details: CommitDetails, objectFormat: string): boolean {
+  const parents = details.commit.parents;
+  const expectedParent = params.parentIndex === null ? null : parents[params.parentIndex] ?? null;
+  if (!isRecord(page) || !hasExactKeys(page, ["files", "hasMore", "offset", "oid", "overview", "pageSize", "parentIndex", "parentOid", "totalFiles"]) ||
+    page.oid !== params.oid || page.parentIndex !== params.parentIndex || page.parentOid !== expectedParent || page.offset !== params.offset ||
+    page.pageSize !== params.pageSize || !Number.isSafeInteger(page.totalFiles) || page.totalFiles < 0 || page.totalFiles > 20_000 ||
+    !Array.isArray(page.files) || page.files.length > params.pageSize || page.offset > page.totalFiles ||
+    page.files.length !== Math.min(params.pageSize, page.totalFiles - page.offset) ||
+    typeof page.hasMore !== "boolean" || page.hasMore !== (page.offset + page.files.length < page.totalFiles) ||
+    !validChangeOverview(page.overview) || page.overview.totalFiles !== page.totalFiles ||
+    !page.files.every(file => validChangedFile(file, objectFormat)) || new Set(page.files.map(file => `${file.status}:${file.oldPath?.rawHex ?? ""}:${file.newPath?.rawHex ?? ""}`)).size !== page.files.length) return false;
+  return true;
+}
+
+function validChangeOverview(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ["additions", "binaryFiles", "counts", "deletions", "directories", "gitlinkFiles", "totalFiles"]) ||
+    !isNonnegativeSafeInteger(value.additions) || !isNonnegativeSafeInteger(value.deletions) ||
+    !isNonnegativeSafeInteger(value.binaryFiles) || !isNonnegativeSafeInteger(value.gitlinkFiles) || !isNonnegativeSafeInteger(value.totalFiles) ||
+    value.binaryFiles > value.totalFiles || value.gitlinkFiles > value.totalFiles || !isRecord(value.counts) ||
+    !hasExactKeys(value.counts, ["added", "copied", "deleted", "modified", "renamed", "typeChanged"]) ||
+    !Object.values(value.counts).every(isNonnegativeSafeInteger) || Object.values(value.counts).reduce<number>((sum, count) => sum + Number(count), 0) !== value.totalFiles ||
+    !Array.isArray(value.directories) || value.directories.length > 20_000 || !value.directories.every(directory => isRecord(directory) &&
+      hasExactKeys(directory, ["additions", "deletions", "path", "totalFiles"]) && isNonnegativeSafeInteger(directory.additions) &&
+      isNonnegativeSafeInteger(directory.deletions) && isNonnegativeSafeInteger(directory.totalFiles) &&
+      (directory.path === null || validGitPath(directory.path)))) return false;
+  const directoryTotals = value.directories.reduce((sum, directory) => sum + directory.totalFiles, 0);
+  return directoryTotals === value.totalFiles &&
+    value.directories.reduce((sum, directory) => sum + directory.additions, 0) === value.additions &&
+    value.directories.reduce((sum, directory) => sum + directory.deletions, 0) === value.deletions;
+}
+
+function validChangedFile(value: unknown, objectFormat: string): boolean {
+  const oidLength = objectFormat === "sha256" ? 64 : 40;
+  const similarity = isRecord(value) ? value.similarity : undefined;
+  if (!isRecord(value) || !hasExactKeys(value, ["additions", "binary", "deletions", "gitlink", "newMode", "newOid", "newPath", "oldMode", "oldOid", "oldPath", "similarity", "status"]) ||
+    !["added", "modified", "deleted", "renamed", "copied", "typeChanged"].includes(value.status as string) ||
+    !(value.oldPath === null || validGitPath(value.oldPath)) || !(value.newPath === null || validGitPath(value.newPath)) ||
+    !(value.oldOid === null || typeof value.oldOid === "string" && value.oldOid.length === oidLength && /^[0-9a-f]+$/i.test(value.oldOid)) ||
+    !(value.newOid === null || typeof value.newOid === "string" && value.newOid.length === oidLength && /^[0-9a-f]+$/i.test(value.newOid)) ||
+    typeof value.oldMode !== "string" || !/^[0-7]{6}$/.test(value.oldMode) || typeof value.newMode !== "string" || !/^[0-7]{6}$/.test(value.newMode) ||
+    !(similarity === null || Number.isInteger(similarity) && (similarity as number) >= 0 && (similarity as number) <= 100) ||
+    typeof value.binary !== "boolean" || typeof value.gitlink !== "boolean" ||
+    !(value.additions === null || isNonnegativeSafeInteger(value.additions)) || !(value.deletions === null || isNonnegativeSafeInteger(value.deletions)) ||
+    value.binary && (value.additions !== null || value.deletions !== null)) return false;
+  if (value.status === "added") return value.oldPath === null && value.newPath !== null;
+  if (value.status === "deleted") return value.oldPath !== null && value.newPath === null;
+  if (value.status === "renamed" || value.status === "copied") return value.oldPath !== null && value.newPath !== null && value.similarity !== null;
+  return value.oldPath !== null && value.newPath !== null;
+}
+
+function validMergeCommitsPage(page: MergeCommitsPage, params: ReadMergeCommitsParams, details: CommitDetails, objectFormat: string): boolean {
+  const parents = details.commit.parents;
+  return isRecord(page) && hasExactKeys(page, ["authors", "commits", "firstParentOid", "hasMore", "offset", "oid", "pageSize", "parentIndex", "parentOid", "totalCommits"]) &&
+    page.oid === params.oid && page.parentIndex === params.parentIndex && page.parentOid === parents[params.parentIndex] && page.firstParentOid === parents[0] &&
+    page.offset === params.offset && page.pageSize === params.pageSize && isNonnegativeSafeInteger(page.totalCommits) && page.totalCommits <= 10_000 &&
+    Array.isArray(page.commits) && page.commits.length <= params.pageSize && page.offset <= page.totalCommits &&
+    page.commits.length === Math.min(params.pageSize, page.totalCommits - page.offset) &&
+    typeof page.hasMore === "boolean" && page.hasMore === (page.offset + page.commits.length < page.totalCommits) &&
+    page.commits.every(commit => validCommitSummary(commit, objectFormat === "sha256" ? 64 : 40)) &&
+    new Set(page.commits.map(commit => commit.oid)).size === page.commits.length && Array.isArray(page.authors) && page.authors.length <= 1_000 &&
+    page.authors.every(author => isRecord(author) && hasExactKeys(author, ["count", "email", "name"]) && isNonnegativeSafeInteger(author.count) && author.count > 0 &&
+      typeof author.name === "string" && Buffer.byteLength(author.name, "utf8") <= 4_096 && typeof author.email === "string" && Buffer.byteLength(author.email, "utf8") <= 4_096) &&
+    page.authors.reduce((sum, author) => sum + author.count, 0) === page.totalCommits;
+}
+
+function validFileDiff(diff: FileDiff, params: ReadDiffParams, details: CommitDetails, objectFormat: string): boolean {
+  const parentOid = params.parentIndex === null ? null : details.commit.parents[params.parentIndex] ?? null;
+  if (!isRecord(diff) || !hasExactKeys(diff, ["file", "kind", "newSize", "oid", "oldSize", "parentIndex", "parentOid", "patch", "textLossy", "truncated"]) ||
+    diff.oid !== params.oid || diff.parentIndex !== params.parentIndex || diff.parentOid !== parentOid || !validChangedFile(diff.file, objectFormat) ||
+    (diff.file.oldPath?.rawHex ?? null) !== params.oldPathHex || (diff.file.newPath?.rawHex ?? null) !== params.newPathHex ||
+    !["text", "binary", "gitlink", "lfs", "tooLarge"].includes(diff.kind as string) || typeof diff.patch !== "string" ||
+    Buffer.byteLength(diff.patch, "utf8") > 128 * 1024 || typeof diff.textLossy !== "boolean" || typeof diff.truncated !== "boolean" ||
+    !(diff.oldSize === null || isNonnegativeSafeInteger(diff.oldSize)) || !(diff.newSize === null || isNonnegativeSafeInteger(diff.newSize))) return false;
+  return diff.kind === "text" || diff.patch === "";
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function maskHasLane(mask: number, lane: number): boolean {

@@ -1118,13 +1118,19 @@ mod tests {
 
     fn make_repo(count: usize) -> (TempRepo, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "commitscope-history-{}-{}",
+            "commitscope-history-{}-{}-{}",
             std::process::id(),
-            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_nanos()
         ));
-        fs::create_dir_all(&root).expect("create temporary repository");
+        fs::create_dir(&root).expect("create a unique temporary repository");
         let repo = TempRepo(root.clone());
-        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["init", "-q", "--initial-branch=main"]);
+        run_git(&root, &["config", "gc.auto", "0"]);
+        run_git(&root, &["config", "maintenance.auto", "false"]);
         run_git(&root, &["config", "user.name", "History Test"]);
         run_git(&root, &["config", "user.email", "history@example.test"]);
         for index in 0..count {
@@ -1137,7 +1143,13 @@ mod tests {
     }
 
     fn run_git(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        for (name, _) in
+            std::env::vars_os().filter(|(name, _)| name.to_string_lossy().starts_with("GIT_"))
+        {
+            command.env_remove(name);
+        }
+        let output = command
             .arg("-C")
             .arg(path)
             .args(args)
@@ -1149,13 +1161,42 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "history@example.test")
             .output()
             .expect("run fixture git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed in {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            let head = fs::read_to_string(path.join(".git/HEAD"))
+                .unwrap_or_else(|error| format!("<unreadable: {error}>"))
+                .trim()
+                .to_owned();
+            let refs = fs::read_dir(path.join(".git/refs/heads"))
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            panic!(
+                "git {args:?} failed in {}: {}; HEAD={head:?}; branch refs={refs:?}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn diagnostic_git(path: &Path, args: &[&str]) -> (bool, String, String) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("run diagnostic Git command");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )
     }
 
     fn discover(path: &Path) -> DiscoveredRepository {
@@ -1279,7 +1320,16 @@ mod tests {
         let (_repo, path) = make_repo(450);
         let discovered = discover(&path);
         let state = HistoryState::new();
-        let first = read_page(&state, &discovered, None, 200).expect("first page");
+        let first = read_page(&state, &discovered, None, 200).unwrap_or_else(|error| {
+            let head = fs::read_to_string(path.join(".git/HEAD"))
+                .unwrap_or_else(|read_error| format!("<unreadable: {read_error}>"));
+            let rev_list = diagnostic_git(&path, &["rev-list", "--count", "HEAD"]);
+            let fsck = diagnostic_git(&path, &["fsck", "--full", "--no-reflogs"]);
+            panic!(
+                "first page failed: {error:?}; repo={}; HEAD={head:?}; rev-list={rev_list:?}; fsck={fsck:?}",
+                path.display()
+            );
+        });
         let cursor = first.next_cursor.clone().expect("second page cursor");
         let error = state
             .with_page(

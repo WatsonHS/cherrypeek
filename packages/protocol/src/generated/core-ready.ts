@@ -9,7 +9,8 @@ export type Capability =
   | "repositoryScopes"
   | "metadataIndex"
   | "metadataSearch"
-  | "historyGraph";
+  | "historyGraph"
+  | "commitDetails";
 
 export interface CoreReady {
   capabilities: Capability[];

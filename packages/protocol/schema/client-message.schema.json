@@ -1,6 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "BranchesContainingParams": {
+      "additionalProperties": false,
+      "properties": {
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        }
+      },
+      "required": [
+        "oid"
+      ],
+      "type": "object"
+    },
     "ControlMetadataIndexParams": {
       "additionalProperties": false,
       "properties": {
@@ -15,6 +29,60 @@
     },
     "EmptyParams": {
       "additionalProperties": false,
+      "type": "object"
+    },
+    "GetCommitParams": {
+      "additionalProperties": false,
+      "properties": {
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        }
+      },
+      "required": [
+        "oid"
+      ],
+      "type": "object"
+    },
+    "ListChangedFilesParams": {
+      "additionalProperties": false,
+      "properties": {
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "offset",
+        "pageSize"
+      ],
       "type": "object"
     },
     "MetadataIndexAction": {
@@ -40,6 +108,57 @@
       ],
       "type": "object"
     },
+    "ReadDiffParams": {
+      "additionalProperties": false,
+      "properties": {
+        "newPathHex": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "oldPathHex": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "oldPathHex",
+        "newPathHex"
+      ],
+      "type": "object"
+    },
     "ReadHistoryPageParams": {
       "additionalProperties": false,
       "properties": {
@@ -59,6 +178,40 @@
       },
       "required": [
         "cursor",
+        "pageSize"
+      ],
+      "type": "object"
+    },
+    "ReadMergeCommitsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentIndex": {
+          "format": "uint8",
+          "maximum": 127,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "offset",
         "pageSize"
       ],
       "type": "object"
@@ -191,6 +344,21 @@
         },
         {
           "$ref": "#/definitions/SearchIdentitiesParams"
+        },
+        {
+          "$ref": "#/definitions/GetCommitParams"
+        },
+        {
+          "$ref": "#/definitions/ListChangedFilesParams"
+        },
+        {
+          "$ref": "#/definitions/ReadMergeCommitsParams"
+        },
+        {
+          "$ref": "#/definitions/BranchesContainingParams"
+        },
+        {
+          "$ref": "#/definitions/ReadDiffParams"
         },
         {
           "$ref": "#/definitions/EmptyParams"

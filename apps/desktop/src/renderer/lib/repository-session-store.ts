@@ -680,7 +680,7 @@ export class RepositorySessionStore {
         return undefined;
       }
       const nextPages = direction === "before" ? [result.value, ...this.pages] : [...this.pages, result.value];
-      while (nextPages.reduce((total, item) => total + item.commits.length, 0) > 2_000) {
+      while (nextPages.reduce((total, item) => total + item.commits.length, 0) > 1_800) {
         const protectedIndex = this.viewportAnchorOid
           ? nextPages.findIndex(item => item.commits.some(commit => commit.oid === this.viewportAnchorOid))
           : -1;

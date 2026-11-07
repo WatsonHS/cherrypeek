@@ -98,7 +98,7 @@ try {
       return end > previous || document.querySelector('[role="alert"]') !== null;
     }, previousEnd, { timeout: 10_000 });
     metrics = await readWindowMetrics(page);
-    assert.ok(metrics.count <= 2_000, `graph summaries exceed the bounded renderer window: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.count <= 1_800, `graph summaries exceed the 1800-summary renderer budget: ${JSON.stringify(metrics)}`);
     assert.ok(metrics.domRows <= 60, `graph DOM exceeds virtual viewport plus overscan: ${metrics.domRows}`);
     if (anchorAtBottom) await assertAnchorNear(page, anchorAtBottom, "forward history window append/eviction");
     previousEnd = metrics.offset + metrics.count;
@@ -128,7 +128,7 @@ try {
       return element && Number(element.dataset.loadedOffset) < previous;
     }, reverseOffset, { timeout: 10_000 });
     metrics = await readWindowMetrics(page);
-    assert.ok(metrics.count <= 2_000, `reverse graph window exceeds the renderer budget: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.count <= 1_800, `reverse graph window exceeds the 1800-summary renderer budget: ${JSON.stringify(metrics)}`);
     assert.ok(metrics.domRows <= 60, `reverse graph DOM exceeds virtual viewport plus overscan: ${metrics.domRows}`);
     if (reverseAnchor) await assertAnchorNear(page, reverseAnchor, "reverse history window prepend/eviction");
     reverseOffset = metrics.offset;

@@ -57,7 +57,7 @@ export const DEFAULT_SEARCH_QUERY: SearchQuery = {
 
 const EMPTY_IDENTITIES: SearchIdentityState = { values: [], loading: false, error: null, truncated: false, coverage: null };
 const PAGE_SIZE = 200;
-const MAX_WINDOW = 2_000;
+const MAX_WINDOW = 1_800;
 
 export function hasSearchCriteria(query: SearchQuery): boolean {
   return query.message !== "" || query.authors.length > 0 || query.committers.length > 0 || query.oidPrefix !== "" ||

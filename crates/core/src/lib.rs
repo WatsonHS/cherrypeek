@@ -42,6 +42,28 @@ impl JsonSchema for NullableStringSchema {
     }
 }
 
+struct NullablePathHexSchema;
+
+impl JsonSchema for NullablePathHexSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullablePathHex".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({
+            "anyOf": [
+                {"type": "string", "maxLength": 32768},
+                {"type": "null"}
+            ]
+        }))
+        .expect("valid nullable path hex schema")
+    }
+}
+
 struct NullableOidSchema;
 
 impl JsonSchema for NullableOidSchema {
@@ -116,6 +138,80 @@ impl JsonSchema for NullableBooleanSchema {
     }
 }
 
+struct NullableGitPathSchema;
+
+impl JsonSchema for NullableGitPathSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableGitPath".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let path = generator.subschema_for::<GitPath>();
+        Schema::try_from(serde_json::json!({"anyOf":[path, {"type":"null"}]}))
+            .expect("valid nullable Git path schema")
+    }
+}
+
+struct NullableNonnegativeIntegerSchema;
+
+impl JsonSchema for NullableNonnegativeIntegerSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableNonnegativeInteger".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({
+            "anyOf":[{"type":"integer", "minimum":0}, {"type":"null"}]
+        }))
+        .expect("valid nullable nonnegative integer schema")
+    }
+}
+
+struct NullableParentIndexSchema;
+
+impl JsonSchema for NullableParentIndexSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableParentIndex".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({
+            "anyOf":[{"type":"integer", "minimum":0, "maximum":127}, {"type":"null"}]
+        }))
+        .expect("valid nullable parent index schema")
+    }
+}
+
+struct NullableCommitUpdateReasonSchema;
+
+impl JsonSchema for NullableCommitUpdateReasonSchema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableCommitUpdateReason".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let reason = generator.subschema_for::<CommitUpdateReason>();
+        Schema::try_from(serde_json::json!({"anyOf":[reason, {"type":"null"}]}))
+            .expect("valid nullable commit update reason schema")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(rename = "GitInfo")]
@@ -155,6 +251,7 @@ pub enum Capability {
     MetadataIndex,
     MetadataSearch,
     HistoryGraph,
+    CommitDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -188,6 +285,7 @@ impl CoreReady {
                 Capability::MetadataIndex,
                 Capability::MetadataSearch,
                 Capability::HistoryGraph,
+                Capability::CommitDetails,
             ],
         }
     }
@@ -244,6 +342,11 @@ pub enum RequestParams {
     ControlMetadataIndex(ControlMetadataIndexParams),
     SearchCommits(SearchCommitsParams),
     ListSearchIdentities(SearchIdentitiesParams),
+    GetCommit(GetCommitParams),
+    ListChangedFiles(ListChangedFilesParams),
+    ReadMergeCommits(ReadMergeCommitsParams),
+    BranchesContaining(BranchesContainingParams),
+    ReadDiff(ReadDiffParams),
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
@@ -463,6 +566,341 @@ pub struct SearchIdentitiesParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetCommitParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListChangedFilesParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadMergeCommitsParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[schemars(range(min = 1, max = 127))]
+    pub parent_index: u8,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchesContainingParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadDiffParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullablePathHexSchema")]
+    pub old_path_hex: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullablePathHexSchema")]
+    pub new_path_hex: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Trailer {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CommitUpdateState {
+    Unaffected,
+    Affected,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CommitUpdateReason {
+    ScopeUnavailable,
+    NoLongerReachable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommitUpdate {
+    pub state: CommitUpdateState,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableCommitUpdateReasonSchema")]
+    pub reason: Option<CommitUpdateReason>,
+    pub checked_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommitDetails {
+    pub commit: CommitSummary,
+    #[schemars(length(max = 1_048_576))]
+    pub message: String,
+    #[schemars(length(max = 1_048_576))]
+    pub message_without_trailers: String,
+    #[schemars(length(max = 4096))]
+    pub trailers: Vec<Trailer>,
+    #[schemars(length(max = 2000))]
+    pub refs: Vec<RefInfo>,
+    #[schemars(length(max = 128))]
+    pub worktrees: Vec<WorktreeInfo>,
+    pub observed_at_unix_ms: u64,
+    pub refs_truncated: bool,
+    pub worktrees_truncated: bool,
+    pub update: CommitUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitPath {
+    #[schemars(length(max = 16384))]
+    pub display: String,
+    #[schemars(length(max = 32768))]
+    pub raw_hex: String,
+    pub text_lossy: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangedFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangedFile {
+    pub status: ChangedFileStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub old_path: Option<GitPath>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub new_path: Option<GitPath>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub old_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub new_oid: Option<String>,
+    #[schemars(length(min = 6, max = 6))]
+    pub old_mode: String,
+    #[schemars(length(min = 6, max = 6))]
+    pub new_mode: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableU8Schema")]
+    pub similarity: Option<u8>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub additions: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub deletions: Option<u64>,
+    pub binary: bool,
+    pub gitlink: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FileDiffKind {
+    Text,
+    Binary,
+    Gitlink,
+    Lfs,
+    TooLarge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileDiff {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub parent_oid: Option<String>,
+    pub file: ChangedFile,
+    pub kind: FileDiffKind,
+    #[schemars(length(max = 131072))]
+    pub patch: String,
+    pub truncated: bool,
+    pub text_lossy: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub old_size: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub new_size: Option<u64>,
+}
+
+struct NullableU8Schema;
+
+impl JsonSchema for NullableU8Schema {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "NullableU8".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::try_from(serde_json::json!({
+            "anyOf":[{"type":"integer", "minimum":0, "maximum":100}, {"type":"null"}]
+        }))
+        .expect("valid nullable u8 schema")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeCounts {
+    pub added: u32,
+    pub modified: u32,
+    pub deleted: u32,
+    pub renamed: u32,
+    pub copied: u32,
+    pub type_changed: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DirectoryChangeOverview {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub path: Option<GitPath>,
+    pub total_files: u32,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeOverview {
+    pub total_files: u32,
+    pub counts: ChangeCounts,
+    pub additions: u64,
+    pub deletions: u64,
+    pub binary_files: u32,
+    pub gitlink_files: u32,
+    #[schemars(length(max = 20000))]
+    pub directories: Vec<DirectoryChangeOverview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangedFilesPage {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub parent_oid: Option<String>,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
+    pub total_files: u32,
+    pub has_more: bool,
+    #[schemars(length(max = 200))]
+    pub files: Vec<ChangedFile>,
+    pub overview: ChangeOverview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MergeCommitsPage {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[schemars(range(min = 1, max = 127))]
+    pub parent_index: u8,
+    #[schemars(length(min = 40, max = 64))]
+    pub parent_oid: String,
+    #[schemars(length(min = 40, max = 64))]
+    pub first_parent_oid: String,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
+    pub total_commits: u32,
+    pub has_more: bool,
+    #[schemars(length(max = 200))]
+    pub commits: Vec<CommitSummary>,
+    #[schemars(length(max = 1000))]
+    pub authors: Vec<MergeAuthorCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MergeAuthorCount {
+    #[schemars(length(max = 4096))]
+    pub name: String,
+    #[schemars(length(max = 4096))]
+    pub email: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchesContainingResult {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[schemars(length(max = 2000))]
+    pub branches: Vec<RefInfo>,
+    pub observed_at_unix_ms: u64,
+    pub complete: bool,
+    pub refs_truncated: bool,
+    pub boundary_limited: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchIdentities {
     pub field: SearchTimeField,
     #[schemars(length(max = 100))]
@@ -547,6 +985,16 @@ pub enum ResponseData {
     SearchPage { page: SearchPage },
     #[serde(rename = "searchIdentities")]
     SearchIdentities { result: SearchIdentities },
+    #[serde(rename = "commitDetails")]
+    CommitDetails { details: CommitDetails },
+    #[serde(rename = "changedFiles")]
+    ChangedFiles { page: ChangedFilesPage },
+    #[serde(rename = "mergeCommits")]
+    MergeCommits { page: MergeCommitsPage },
+    #[serde(rename = "branchesContaining")]
+    BranchesContaining { result: BranchesContainingResult },
+    #[serde(rename = "fileDiff")]
+    FileDiff { diff: FileDiff },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]

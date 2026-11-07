@@ -12,7 +12,8 @@
         "repositoryScopes",
         "metadataIndex",
         "metadataSearch",
-        "historyGraph"
+        "historyGraph",
+        "commitDetails"
       ],
       "type": "string"
     },

@@ -10,6 +10,11 @@ import type {
   RefInfo,
   RepositoryInfo,
   RepositorySessionInfo,
+  CommitDetails,
+  ChangedFilesPage,
+  MergeCommitsPage,
+  BranchesContainingResult,
+  FileDiff,
   RepositoryScope,
   RepositoryNavigation,
   RefMergeStatusResult,
@@ -17,14 +22,17 @@ import type {
   StoreStatus,
 } from "./generated/server-message.js";
 import type { MetadataIndexAction } from "./generated/client-message.js";
-import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
+import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField,
+  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
 export type { MetadataIndexAction } from "./generated/client-message.js";
 export type { MetadataIndexStatus } from "./generated/server-message.js";
 export type { SearchPage, SearchIdentities, SearchIdentity } from "./generated/server-message.js";
+export type { CommitDetails, ChangedFilesPage, ChangedFile, ChangeOverview, MergeCommitsPage, BranchesContainingResult, FileDiff, GitPath, Trailer } from "./generated/server-message.js";
 export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField } from "./generated/client-message.js";
+export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -89,4 +97,10 @@ export interface RepositorySessionApi {
   searchCommits(params: SearchCommitsParams): Promise<RepositorySessionResult<SearchPage>>;
   listSearchIdentities(params: SearchIdentitiesParams): Promise<RepositorySessionResult<SearchIdentities>>;
   cancelSearch(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  getCommit(params: GetCommitParams): Promise<RepositorySessionResult<CommitDetails>>;
+  listChangedFiles(params: ListChangedFilesParams): Promise<RepositorySessionResult<ChangedFilesPage>>;
+  readMergeCommits(params: ReadMergeCommitsParams): Promise<RepositorySessionResult<MergeCommitsPage>>;
+  branchesContaining(params: BranchesContainingParams): Promise<RepositorySessionResult<BranchesContainingResult>>;
+  readDiff(params: ReadDiffParams): Promise<RepositorySessionResult<FileDiff>>;
+  cancelCommitDetails(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
 }
