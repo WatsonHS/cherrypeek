@@ -23,6 +23,7 @@ export type RequestParams =
   | OpenRepositoryParams
   | ReadHistoryPageParams
   | LocateCommitParams
+  | LocateHistoryDateParams
   | RefreshRepositoryParams
   | SelectRepositoryScopeParams
   | RefMergeStatusParams
@@ -62,6 +63,10 @@ export interface ReadHistoryPageParams {
 }
 export interface LocateCommitParams {
   oid: string;
+  pageSize: number;
+}
+export interface LocateHistoryDateParams {
+  beforeTimestamp: number;
   pageSize: number;
 }
 export interface RefreshRepositoryParams {

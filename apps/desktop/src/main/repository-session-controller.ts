@@ -324,7 +324,8 @@ export class RepositorySessionController {
     this.ensureCurrent(session);
     const abort = new AbortController();
     const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
-    active.done = this.readHistoryPageRequest(session, null, params.pageSize as number, abort, params.oid.toLowerCase());
+    active.done = this.readHistoryPageRequest(session, null, params.pageSize as number, abort,
+      { kind: "commit", oid: params.oid.toLowerCase() });
     this.activeHistoryRead = active;
     try {
       return await active.done;
@@ -340,6 +341,35 @@ export class RepositorySessionController {
     active.abort.abort(new Error("历史页读取已取消"));
     await active.done.catch(() => undefined);
     return { cancelled: true };
+  }
+
+  async locateHistoryDate(beforeTimestamp: unknown, pageSize = 200): Promise<HistoryPage> {
+    const intent = ++this.pageIntent;
+    const session = this.requireHistoryCapability();
+    if (!Number.isSafeInteger(beforeTimestamp) || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_HISTORY_PAGE) {
+      throw new ProtocolClientError("INVALID_REQUEST", "日期定位参数无效");
+    }
+    if (this.activeSearchRequest) await this.cancelSearch();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
+    if (this.activeMetadataIndexRequest?.kind === "status") await this.cancelMetadataIndexStatus();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
+    if (this.activeCommitDetailRequest) await this.cancelCommitDetails();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
+    await this.cancelAndDrainHistoryRead(new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true));
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
+    await this.cancelPassiveRequestsForTransition();
+    if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
+    active.done = this.readHistoryPageRequest(session, null, pageSize, abort,
+      { kind: "date", beforeTimestamp: beforeTimestamp as number });
+    this.activeHistoryRead = active;
+    try {
+      return await active.done;
+    } finally {
+      if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
+    }
   }
 
   async refreshRepository(pageSize = 200): Promise<RefreshedRepository> {
@@ -1291,7 +1321,7 @@ export class RepositorySessionController {
     cursor: string | null,
     pageSize: number,
     abort: AbortController,
-    locateOid?: string,
+    location?: { kind: "commit"; oid: string } | { kind: "date"; beforeTimestamp: number },
   ): Promise<HistoryPage> {
     let repository: RepositoryInfo | undefined;
     let refs: RefInfo[] = [];
@@ -1301,8 +1331,11 @@ export class RepositorySessionController {
     let metadata = "";
     let sawRepository = false;
     let sawTerminalPage = false;
-    const completion = await this.core.request(locateOid ? "locateCommit" : "readHistoryPage",
-      locateOid ? { oid: locateOid, pageSize } : { cursor, pageSize }, contextOf(session), {
+    const method = location?.kind === "commit" ? "locateCommit" : location?.kind === "date" ? "locateHistoryDate" : "readHistoryPage";
+    const params = location?.kind === "commit" ? { oid: location.oid, pageSize }
+      : location?.kind === "date" ? { beforeTimestamp: location.beforeTimestamp, pageSize }
+        : { cursor, pageSize };
+    const completion = await this.core.request(method, params, contextOf(session), {
       timeoutMs: SESSION_TIMEOUT_MS,
       drainAfterAbort: true,
       fatalOnTimeout: true,
@@ -1339,7 +1372,7 @@ export class RepositorySessionController {
         if (!Array.isArray(data.commits) || !data.commits.every(commit => validHistoryGraphCommit(commit, session.repository.objectFormat))) {
           throw invalidSessionResponse("历史页包含无效或缺失的图布局");
         }
-        if ((!locateOid && cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
+        if ((!location && cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
           (cursor !== null && data.cursor !== cursor)) throw invalidSessionResponse("历史页游标与位置不一致");
         if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
           : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("历史页 envelope 终态无效");
@@ -1360,7 +1393,7 @@ export class RepositorySessionController {
     this.ensureCurrent(session);
     if (!repository || !sawRepository || !page || !sawTerminalPage || !completion.coverage.complete ||
       completion.coverage.processed !== commits.length || completion.nextCursor && !page.hasMore ||
-      !completion.nextCursor && page.hasMore || locateOid && !commits.some(commit => commit.oid === locateOid)) {
+      !completion.nextCursor && page.hasMore || location?.kind === "commit" && !commits.some(commit => commit.oid === location.oid)) {
       throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
     }
     return { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };

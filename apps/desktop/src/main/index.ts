@@ -53,6 +53,7 @@ const IPC_READ_DIFF = "commitscope:details:diff";
 const IPC_COMMIT_DETAILS_CANCEL = "commitscope:details:cancel";
 const IPC_HISTORY_READ = "commitscope:history:read-page";
 const IPC_HISTORY_LOCATE = "commitscope:history:locate-commit";
+const IPC_HISTORY_LOCATE_DATE = "commitscope:history:locate-date";
 const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
 const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
@@ -213,6 +214,13 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_HISTORY_LOCATE, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.locateCommit(params));
+  });
+  ipcMain.handle(IPC_HISTORY_LOCATE_DATE, (event, beforeTimestamp: unknown, pageSize: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.locateHistoryDate(
+      beforeTimestamp,
+      pageSize === undefined ? 200 : pageSize as number,
+    ));
   });
   ipcMain.handle(IPC_HISTORY_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

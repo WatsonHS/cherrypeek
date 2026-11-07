@@ -101,6 +101,7 @@ export interface RepositorySessionApi {
   readSessionPreview(): Promise<RepositorySessionResult<SessionPreview>>;
   readHistoryPage(cursor: string | null, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
   locateCommit(oid: string, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
+  locateHistoryDate(beforeTimestamp: number, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
   cancelHistoryRead(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   refreshRepositorySession(pageSize?: number): Promise<RepositorySessionResult<RefreshedRepository>>;
   recordRepositoryView(expectedGeneration: string): Promise<RepositorySessionResult<RepositoryViewRecorded>>;

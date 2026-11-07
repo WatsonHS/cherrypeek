@@ -20,6 +20,7 @@ import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repos
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
 import { DEFAULT_SEARCH_QUERY } from "./lib/metadata-search-store.js";
+import { inputDateRange } from "./lib/search-date.js";
 import { CommitDetailStore } from "./lib/commit-detail-store.js";
 import { Button } from "./components/ui/button.js";
 import { HandoffDialog } from "./components/handoff-dialog.js";
@@ -490,8 +491,9 @@ export function App(): React.JSX.Element {
   }, [searchStore]);
   const selectCommit = React.useCallback((oid: string) => {
     selectionIntent.invalidate();
+    if (store.getView().pageRequestKind === "dateLocation") void store.cancelPage();
     setSelectedOid(oid);
-  }, [selectionIntent]);
+  }, [selectionIntent, store]);
   const selectDisplayedCommit = React.useCallback((oid: string) => {
     if (searchStore.getView().active) searchStore.setSelectedOid(oid);
     else selectCommit(oid);
@@ -500,6 +502,29 @@ export function App(): React.JSX.Element {
   const selectIfCurrent = React.useCallback((oid: string, token: SelectionIntentToken | null) => {
     applySelectionIfCurrent(selectionIntent, token, store.getView().session, oid, setSelectedOid);
   }, [selectionIntent, store]);
+
+  const locateDateTimestamp = React.useCallback(async (beforeTimestamp: number): Promise<boolean> => {
+    selectionIntent.invalidate();
+    const intent = selectionIntent.capture(store.getView().session);
+    anchorBeforeRefresh.current = undefined;
+    const oid = await store.locateHistoryDate(beforeTimestamp);
+    if (!oid || searchStore.getView().active) return false;
+    return applySelectionIfCurrent(selectionIntent, intent, store.getView().session, oid, setSelectedOid);
+  }, [selectionIntent, store, searchStore]);
+  const locateHistoryDate = React.useCallback(async (day: string): Promise<boolean> => {
+    const beforeTimestamp = inputDateRange(day, day)?.toTimestamp;
+    return beforeTimestamp === null || beforeTimestamp === undefined ? false : locateDateTimestamp(beforeTimestamp);
+  }, [locateDateTimestamp]);
+  const cancelHistoryDate = React.useCallback(async () => {
+    selectionIntent.invalidate();
+    await store.cancelPage();
+  }, [selectionIntent, store]);
+  const retryHistoryDate = React.useCallback(async () => {
+    const beforeTimestamp = store.getView().retryDateTimestamp;
+    if (beforeTimestamp !== null) await locateDateTimestamp(beforeTimestamp);
+  }, [locateDateTimestamp, store]);
+  const historyActivity = activityStats?.key === activityKey && activityStats.value.timeField === "committer"
+    && !hasSearchCriteria(displayedQuery) ? activityStats.value : null;
 
   useViewRecording(store, view);
   useLaunchRepository(ready, store);
@@ -640,8 +665,9 @@ export function App(): React.JSX.Element {
     }),
     cancel: () => run(() => store.cancel()),
     retry: () => run(() => store.retry()),
-    retryPage: () => view.pageErrorKind === "refresh" ? refresh() : run(() => store.retryPage(selectedOid)),
-    cancelPage: () => run(() => store.cancelPage()),
+    retryPage: () => view.pageErrorKind === "refresh" ? refresh() : view.pageErrorKind === "dateLocation"
+      ? run(retryHistoryDate) : run(() => store.retryPage(selectedOid)),
+    cancelPage: () => run(() => store.getView().pageRequestKind === "dateLocation" ? cancelHistoryDate() : store.cancelPage()),
     previousPage: () => store.previousPage(),
     nextPage: () => store.nextPage(),
     refresh,
@@ -802,6 +828,9 @@ export function App(): React.JSX.Element {
             onRetry={actions.retry} onRetryPage={actions.retryPage} onCancelPage={actions.cancelPage}
             onLoadWindowEdge={direction => store.loadWindowEdge(direction)}
             onViewportAnchor={setViewportAnchor}
+            activityDays={historyActivity?.days ?? null}
+            activityDaysPartial={historyActivity ? !historyActivity.coverage.complete || historyActivity.daysTruncated : false}
+            onLocateHistoryDate={locateHistoryDate} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}

@@ -2,11 +2,12 @@ use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
     EmptyParams, ErrorCode, GetActivityStatsParams, GetCommitParams, GetHandoffFactsParams,
-    ListChangedFilesParams, ListSearchPathsParams, LocateCommitParams, MetadataIndexAction,
-    OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams, ReadHistoryPageParams,
-    ReadMergeCommitsParams, ReadRepositoryPreviewParams, RefMergeStatusParams,
-    RefreshRepositoryParams, RepositoryScope, ResponseData, SearchCommitsParams,
-    SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams, ServerMessage,
+    ListChangedFilesParams, ListSearchPathsParams, LocateCommitParams, LocateHistoryDateParams,
+    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams,
+    ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
+    RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope, ResponseData,
+    SearchCommitsParams, SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams,
+    ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -46,6 +47,7 @@ enum RequestOperation {
     ReadSessionPreview,
     ReadHistoryPage(ReadHistoryPageParams),
     LocateCommit(LocateCommitParams),
+    LocateHistoryDate(LocateHistoryDateParams),
     RefreshRepository(RefreshRepositoryParams),
     GetRepositoryNavigation,
     SelectRepositoryScope(SelectRepositoryScopeParams),
@@ -496,6 +498,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ReadSessionPreview
             | RequestOperation::ReadHistoryPage(_)
             | RequestOperation::LocateCommit(_)
+            | RequestOperation::LocateHistoryDate(_)
             | RequestOperation::RefreshRepository(_)
             | RequestOperation::GetRepositoryNavigation
             | RequestOperation::SelectRepositoryScope(_)
@@ -774,6 +777,30 @@ fn dispatch_request(
             let metadata_tasks_worker = Arc::clone(metadata_tasks);
             workers.push(thread::spawn(move || {
                 execute_locate_commit(
+                    &sender,
+                    &stopping,
+                    &request_map,
+                    &request_id,
+                    repo_id,
+                    generation,
+                    git_path.as_deref(),
+                    session,
+                    params,
+                    cancelled_for_worker,
+                    metadata_tasks_worker,
+                )
+            }));
+        }
+        RequestOperation::LocateHistoryDate(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            let request_map = Arc::clone(requests);
+            let sender = sender.clone();
+            let stopping = Arc::clone(shutdown);
+            let cancelled_for_worker = Arc::clone(&cancelled);
+            let git_path = git_path.map(std::path::Path::to_path_buf);
+            let metadata_tasks_worker = Arc::clone(metadata_tasks);
+            workers.push(thread::spawn(move || {
+                execute_locate_history_date(
                     &sender,
                     &stopping,
                     &request_map,
@@ -1895,6 +1922,7 @@ fn validate_request(
         | "readSessionPreview"
         | "readHistoryPage"
         | "locateCommit"
+        | "locateHistoryDate"
         | "refreshRepository"
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
@@ -1938,6 +1966,23 @@ fn validate_request(
                     })
                     .map(RequestOperation::LocateCommit)
                     .map_err(|_| (ErrorCode::InvalidRequest, "locateCommit params 无效".into())),
+                "locateHistoryDate" => {
+                    serde_json::from_value::<LocateHistoryDateParams>(params.clone())
+                        .and_then(|params| {
+                            if (1..=500).contains(&params.page_size) {
+                                Ok(params)
+                            } else {
+                                Err(serde::de::Error::custom("pageSize must be 1..=500"))
+                            }
+                        })
+                        .map(RequestOperation::LocateHistoryDate)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "locateHistoryDate params 无效".into(),
+                            )
+                        })
+                }
                 "refreshRepository" => {
                     serde_json::from_value::<RefreshRepositoryParams>(params.clone())
                         .map(RequestOperation::RefreshRepository)
@@ -2104,6 +2149,7 @@ fn validate_request(
         | "readSessionPreview"
         | "readHistoryPage"
         | "locateCommit"
+        | "locateHistoryDate"
         | "refreshRepository"
         | "getRepositoryNavigation"
         | "selectRepositoryScope"
@@ -2584,6 +2630,7 @@ fn execute_history_page(
         params.page_size,
         params.cursor,
         None,
+        None,
         cancelled,
         metadata_tasks,
     );
@@ -2615,6 +2662,39 @@ fn execute_locate_commit(
         params.page_size,
         None,
         Some(params.oid),
+        None,
+        cancelled,
+        metadata_tasks,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_locate_history_date(
+    sender: &SyncSender<OutFrame>,
+    shutdown: &AtomicBool,
+    requests: &ActiveRequests,
+    request_id: &str,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    git_path: Option<&std::path::Path>,
+    session: Arc<session::RepositorySession>,
+    params: LocateHistoryDateParams,
+    cancelled: Arc<AtomicBool>,
+    metadata_tasks: Arc<crate::metadata_index::TaskManager>,
+) {
+    execute_history_request(
+        sender,
+        shutdown,
+        requests,
+        request_id,
+        repo_id,
+        generation,
+        git_path,
+        session,
+        params.page_size,
+        None,
+        None,
+        Some(params.before_timestamp),
         cancelled,
         metadata_tasks,
     );
@@ -2633,6 +2713,7 @@ fn execute_history_request(
     page_size: u16,
     cursor: Option<String>,
     locate_oid: Option<String>,
+    locate_before_timestamp: Option<i64>,
     cancelled: Arc<AtomicBool>,
     metadata_tasks: Arc<crate::metadata_index::TaskManager>,
 ) {
@@ -2686,6 +2767,28 @@ fn execute_history_request(
             git_path,
             &session.discovered,
             &LocateCommitParams { oid, page_size },
+            &cancelled,
+            deadline,
+            |page| {
+                send_history_page_chunks(
+                    sender,
+                    shutdown,
+                    &cancelled,
+                    request_id,
+                    &repo_id,
+                    &generation,
+                    page,
+                )
+            },
+        )
+    } else if let Some(before_timestamp) = locate_before_timestamp {
+        session.history.with_located_date_page(
+            git_path,
+            &session.discovered,
+            &LocateHistoryDateParams {
+                before_timestamp,
+                page_size,
+            },
             &cancelled,
             deadline,
             |page| {

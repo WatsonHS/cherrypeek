@@ -13,6 +13,8 @@ import { Button } from "./ui/button.js";
 import { Skeleton } from "./ui/skeleton.js";
 import { createVirtualLayout, type VirtualRange } from "../lib/virtual-window.js";
 import type { SelectionIntentToken } from "../lib/selection-intent.js";
+import { HistoryTimeRail, type HistoryTimeRailDay } from "./history-time-rail.js";
+import { localDateInput } from "../lib/search-date.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
@@ -54,7 +56,7 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace }: {
+export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, onLocateHistoryDate, onCancelHistoryDate, onRetryHistoryDate }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
@@ -70,6 +72,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   onViewportAnchor(oid: string | undefined): void;
   restorationAnchor?: { oid: string; offset: number };
   onSetAnchorRestorationSpace(pixels: number): void;
+  activityDays?: HistoryTimeRailDay[] | null;
+  activityDaysPartial?: boolean;
+  onLocateHistoryDate(day: string): Promise<boolean>;
+  onCancelHistoryDate(): Promise<void>;
+  onRetryHistoryDate(): Promise<void>;
 }): React.JSX.Element {
   const listRef = React.useRef<HTMLDivElement>(null);
   const frameRef = React.useRef(0);
@@ -86,8 +93,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
   const [graphExpanded, setGraphExpanded] = React.useState(false);
+  const [viewportDay, setViewportDay] = React.useState<string | null>(null);
+  const viewportSessionKey = preview.session ? `${preview.session.repoId}:${preview.session.generation}` : null;
+  const viewportSessionRef = React.useRef<string | null>(null);
   const lastRestoredPageRevision = React.useRef(0);
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
+  const commitByOid = React.useMemo(() => new Map(preview.commits.map(commit => [commit.oid, commit])), [preview.commits]);
   const maxLaneInWindow = preview.commits.reduce((maxLane, commit) => Math.max(maxLane, maxGraphLane(commit.graph)), -1);
   const visibleLaneCount = graphExpanded ? Math.max(MAX_VISIBLE_LANES, maxLaneInWindow + 1) : MAX_VISIBLE_LANES;
   const graphColumnWidth = graphExpanded
@@ -105,6 +116,29 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     }
     return index;
   }, [preview.navigation]);
+  const loadedDateDays = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const commit of preview.commits) {
+      const date = parseGitTime(commit.committer.timestamp);
+      if (!date) continue;
+      const day = localDateInput(date);
+      counts.set(day, (counts.get(day) ?? 0) + 1);
+    }
+    return [...counts].map(([day, count]) => ({ day, count })).sort((a, b) => b.day.localeCompare(a.day));
+  }, [preview.commits]);
+  const useActivityDays = Boolean(activityDays?.length);
+  const timeRailDays = useActivityDays ? activityDays! : loadedDateDays;
+  const timeRailLoading = preview.pageLoading && preview.pageRequestKind === "dateLocation";
+  const timeRailError = preview.pageErrorKind === "dateLocation"
+    ? preview.pageError?.code === "SCOPE_UNAVAILABLE" ? "该日期及之前没有提交。" : preview.pageError?.message ?? null
+    : null;
+  React.useEffect(() => {
+    const firstDate = preview.commits[0] ? parseGitTime(preview.commits[0].committer.timestamp) : null;
+    if (viewportSessionRef.current !== viewportSessionKey) {
+      viewportSessionRef.current = viewportSessionKey;
+      setViewportDay(firstDate ? localDateInput(firstDate) : null);
+    } else if (viewportDay === null && firstDate) setViewportDay(localDateInput(firstDate));
+  }, [preview.commits, viewportDay, viewportSessionKey]);
   const visibleEntries = entries.slice(range.start, range.end);
   const activeDescendant = selectedOid && visibleEntries.some(entry => entry.kind === "commit" && entry.commit.oid === selectedOid)
     ? rowId(selectedOid) : undefined;
@@ -130,6 +164,10 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       if (anchor) {
         pendingAnchor.current = anchor;
         onViewportAnchor(anchor.oid);
+        const commit = commitByOid.get(anchor.oid);
+        const date = commit ? parseGitTime(commit.committer.timestamp) : null;
+        const day = date ? localDateInput(date) : null;
+        setViewportDay(current => current === day ? current : day);
       }
     }
     if (frameRef.current) return;
@@ -314,16 +352,17 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {preview.session ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetry(); }}>重试</Button> : null}
     </div> : null}
 
-    {preview.pageError ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
+    {preview.pageError ? <div role="alert" data-testid={preview.pageErrorKind === "dateLocation" ? "history-date-location-error" : undefined}
+      className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
-      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{preview.pageErrorKind === "refresh" ? "刷新失败" : preview.pageErrorKind === "location" ? "历史定位失败" : "历史页读取失败"}</span><span className="break-words text-fg2">{preview.pageError.code === "SCOPE_UNAVAILABLE" ? "提交不在当前快照范围内。" : preview.pageError.message} <code className="font-mono text-xs text-fg3">{preview.pageError.code}</code></span></span>
-      {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void onRetryPage(); }}>{preview.pageErrorKind === "location" ? "重试定位" : "重试"}</Button> : null}
+      <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{preview.pageErrorKind === "refresh" ? "刷新失败" : preview.pageErrorKind === "dateLocation" ? "日期定位失败" : preview.pageErrorKind === "location" ? "历史定位失败" : "历史页读取失败"}</span><span className="break-words text-fg2">{preview.pageErrorKind === "dateLocation" && preview.pageError.code === "SCOPE_UNAVAILABLE" ? "该日期及之前没有提交。" : preview.pageErrorKind === "location" && preview.pageError.code === "SCOPE_UNAVAILABLE" ? "提交不在当前快照范围内。" : preview.pageError.message} <code className="font-mono text-xs text-fg3">{preview.pageError.code}</code></span></span>
+      {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void (preview.pageErrorKind === "dateLocation" ? onRetryHistoryDate() : onRetryPage()); }}>{preview.pageErrorKind === "location" || preview.pageErrorKind === "dateLocation" ? "重试定位" : "重试"}</Button> : null}
     </div> : null}
 
     {preview.pageLoading && preview.commits.length > 0 ? <div role="status" className="absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg3 shadow-pop">
       <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-      <span className="flex-1">正在加载更多提交…</span>
-      <Button variant="outline" size="sm" onClick={() => { void onCancelPage(); }}>取消</Button>
+      <span className="flex-1">{timeRailLoading ? "正在定位日期…" : "正在加载更多提交…"}</span>
+      <Button variant="outline" size="sm" onClick={() => { void (timeRailLoading ? onCancelHistoryDate() : onCancelPage()); }}>{timeRailLoading ? "取消定位" : "取消"}</Button>
     </div> : null}
 
     {graphExpanded ? <div data-testid="graph-mode-bar" className="flex h-9 shrink-0 items-center gap-2 border-b border-line pr-2 pl-4 text-xs">
@@ -336,6 +375,10 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     </div> : null}
 
     <div className="relative flex min-h-0 flex-1">
+    <HistoryTimeRail days={timeRailDays} sourceLabel={useActivityDays ? "活动统计日期" : "已载入提交日期"} partial={Boolean(useActivityDays && activityDaysPartial)}
+      sessionKey={viewportSessionKey}
+      viewportDay={viewportDay} loading={timeRailLoading} error={timeRailError} onChooseDate={onLocateHistoryDate}
+      onCancel={onCancelHistoryDate} onRetry={onRetryHistoryDate} />
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
       data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}

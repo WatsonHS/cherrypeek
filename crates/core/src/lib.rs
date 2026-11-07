@@ -382,6 +382,7 @@ pub enum RequestParams {
     ReadSessionPreview(EmptyParams),
     ReadHistoryPage(ReadHistoryPageParams),
     LocateCommit(LocateCommitParams),
+    LocateHistoryDate(LocateHistoryDateParams),
     RefreshRepository(RefreshRepositoryParams),
     GetRepositoryNavigation(EmptyParams),
     SelectRepositoryScope(SelectRepositoryScopeParams),
@@ -440,6 +441,14 @@ pub struct ReadHistoryPageParams {
 pub struct LocateCommitParams {
     #[schemars(length(min = 40, max = 64))]
     pub oid: String,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocateHistoryDateParams {
+    pub before_timestamp: i64,
     #[schemars(range(min = 1, max = 500))]
     pub page_size: u16,
 }

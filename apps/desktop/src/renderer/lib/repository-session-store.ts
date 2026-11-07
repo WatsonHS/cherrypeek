@@ -11,6 +11,7 @@ import type {
 } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { HistoryPage, RepositoryNavigation, RefMergeStatusResult, RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
 import type { MetadataIndexAction } from "../../../../../packages/protocol/src/generated/client-message.js";
+import { parseGitTime } from "./format.js";
 
 export type RepositoryViewState = "idle" | "loading" | "ready" | "error" | "cancelled";
 
@@ -51,11 +52,12 @@ export interface RepositoryView {
   canNavigateNext: boolean;
   pageLoading: boolean;
   pageRequestDirection: "before" | "after" | null;
-  pageRequestKind: "prefetch" | "navigation" | null;
+  pageRequestKind: "prefetch" | "navigation" | "dateLocation" | null;
   refreshing: boolean;
   pageError: ViewError | null;
-  pageErrorKind: "read" | "refresh" | "location" | null;
+  pageErrorKind: "read" | "refresh" | "location" | "dateLocation" | null;
   retryLocationOid: string | null;
+  retryDateTimestamp: number | null;
   retryCursor: string | null;
   retryDirection: "before" | "after";
   oldSelectedCommit: HistoryCommit | null;
@@ -97,7 +99,7 @@ export interface ScopeSwitchResult {
 }
 
 export type SessionApi = Pick<RepositorySessionApi,
-  "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "locateCommit" | "cancelHistoryRead" |
+  "openRepositorySession" | "getRepositorySession" | "readHistoryPage" | "locateCommit" | "locateHistoryDate" | "cancelHistoryRead" |
   "refreshRepositorySession" | "recordRepositoryView" | "closeRepositorySession" |
   "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus" |
   "getMetadataIndexStatus" | "controlMetadataIndex">;
@@ -109,7 +111,7 @@ function emptyView(revision: number, state: RepositoryViewState = "idle"): Repos
     pageOffset: null, pageSize: 200, pageCursor: null, previousCursor: null, nextCursor: null,
     windowPreviousCursor: null, windowNextCursor: null, canNavigatePrevious: false, canNavigateNext: false,
     pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
-    refreshing: false, pageError: null, pageErrorKind: null, retryLocationOid: null, retryCursor: null, retryDirection: "after",
+    refreshing: false, pageError: null, pageErrorKind: null, retryLocationOid: null, retryDateTimestamp: null, retryCursor: null, retryDirection: "after",
     oldSelectedCommit: null, oldSelectedObservedAtUnixMs: null,
     selectionMissingOnPage: false, anchorMissing: false, anchorRestorationSpace: 0, pageRevision: 0,
     windowRevision: 0, windowPageCount: 0,
@@ -457,12 +459,15 @@ export class RepositorySessionStore {
     const active = this.pageRequest;
     const session = this.view.session;
     if (!active || !session) return;
+    const cancellingDateLocation = this.view.pageRequestKind === "dateLocation";
     const token = ++this.pageOperation;
     await settle(this.api.cancelHistoryRead());
     await active.done;
     if (token !== this.pageOperation || !sameSession(this.view.session, session)) return;
     if (this.pageRequest === active) this.pageRequest = undefined;
-    this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null });
+    this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+      pageError: cancellingDateLocation ? { code: "CANCELLED", message: "日期定位已取消。" } : this.view.pageError,
+      pageErrorKind: cancellingDateLocation ? "dateLocation" : this.view.pageErrorKind });
   }
 
   async locateCommit(oid: string): Promise<boolean> {
@@ -499,6 +504,7 @@ export class RepositorySessionStore {
         retryCursor: null,
         pageErrorKind: null,
         retryLocationOid: null,
+        retryDateTimestamp: null,
       });
       return true;
     })();
@@ -509,9 +515,69 @@ export class RepositorySessionStore {
     return located;
   }
 
+  async locateHistoryDate(beforeTimestamp: number): Promise<string | null> {
+    const session = this.view.session;
+    if (!session || this.view.state !== "ready" || this.view.opening !== null || this.view.refreshing || this.view.scopeSwitching) return null;
+    if (this.pageRequest) await this.cancelPage();
+    if (!sameSession(this.view.session, session) || this.view.state !== "ready" || this.view.refreshing || this.view.scopeSwitching) return null;
+    const operation = ++this.pageOperation;
+    const pageSize = this.view.pageSize;
+    this.update({ ...this.view, pageLoading: true, pageRequestDirection: null, pageRequestKind: "dateLocation", pageError: null,
+      pageErrorKind: null, retryLocationOid: null, retryDateTimestamp: beforeTimestamp });
+    const done = (async (): Promise<string | null> => {
+      const result = await settle(this.api.locateHistoryDate(beforeTimestamp, pageSize));
+      if (operation !== this.pageOperation || !sameSession(this.view.session, session)) return null;
+      if (!result.ok) {
+        const error = result.error.code === "SCOPE_UNAVAILABLE"
+          ? { ...result.error, message: "该日期及之前没有提交。" } : result.error;
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+          pageError: error, pageErrorKind: "dateLocation", retryDateTimestamp: beforeTimestamp });
+        return null;
+      }
+      const page = result.value;
+      if (!validHistoryPage(page, pageSize)) {
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+          pageError: { code: "PROTOCOL_ERROR", message: "日期定位结果不完整" }, pageErrorKind: "dateLocation", retryDateTimestamp: beforeTimestamp });
+        return null;
+      }
+      const targetOid = latestCommitBefore(page.commits, beforeTimestamp);
+      if (!targetOid) {
+        const noEarlierCommit = page.commits.length === 0;
+        this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
+          pageError: noEarlierCommit ? { code: "SCOPE_UNAVAILABLE", message: "该日期及之前没有提交。" }
+            : { code: "PROTOCOL_ERROR", message: "日期定位结果没有包含符合日期的提交" },
+          pageErrorKind: "dateLocation", retryDateTimestamp: beforeTimestamp });
+        return null;
+      }
+      this.pages = [page];
+      this.activePageCursor = page.cursor;
+      this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
+      this.selectedOid = targetOid;
+      this.viewportAnchorOid = targetOid;
+      this.applyWindow(session, this.pages, "ready", {
+        pageRevision: this.view.pageRevision + 1,
+        oldSelectedCommit: null,
+        oldSelectedObservedAtUnixMs: null,
+        selectionMissingOnPage: false,
+        anchorMissing: false,
+        retryCursor: null,
+        retryLocationOid: null,
+        retryDateTimestamp: null,
+        pageErrorKind: null,
+      });
+      return targetOid;
+    })();
+    const tracked = done.then(() => undefined);
+    this.pageRequest = { cursor: null, done: tracked };
+    const targetOid = await done;
+    if (this.pageRequest?.done === tracked) this.pageRequest = undefined;
+    return targetOid;
+  }
+
   async retryPage(selectedOid = this.selectedOid): Promise<void> {
     if (this.view.pageErrorKind === "refresh") return this.refresh(selectedOid);
     if (this.view.pageErrorKind === "location" && this.view.retryLocationOid) { await this.locateCommit(this.view.retryLocationOid); return; }
+    if (this.view.pageErrorKind === "dateLocation" && this.view.retryDateTimestamp !== null) { await this.locateHistoryDate(this.view.retryDateTimestamp); return; }
     if (this.view.pageErrorKind === "read") return this.readPageAndReturn(this.view.retryCursor ?? "", "navigation").then(() => undefined);
     if (this.view.state === "error") return this.retry();
   }
@@ -899,6 +965,7 @@ export class RepositorySessionStore {
       anchorRestorationSpace: 0,
       pageError: null,
       retryLocationOid: null,
+      retryDateTimestamp: null,
       error: null,
       ...extra,
     });
@@ -946,6 +1013,22 @@ export class RepositorySessionStore {
 
 function sameSession(left: RepositorySessionInfo | null, right: RepositorySessionInfo): boolean {
   return left?.repoId === right.repoId && left.generation === right.generation;
+}
+
+function latestCommitBefore(commits: HistoryCommit[], beforeTimestamp: number): string | null {
+  const exclusiveLimit = beforeTimestamp * 1_000;
+  let latestOid: string | null = null;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+  for (const commit of commits) {
+    const date = parseGitTime(commit.committer.timestamp);
+    if (!date) continue;
+    const timestamp = date.getTime();
+    if (timestamp < exclusiveLimit && timestamp > latestTimestamp) {
+      latestTimestamp = timestamp;
+      latestOid = commit.oid;
+    }
+  }
+  return latestOid;
 }
 
 function sameScope(left: RepositoryScope, right: RepositoryScope): boolean {

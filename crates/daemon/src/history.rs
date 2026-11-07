@@ -4,8 +4,8 @@ use crate::{
     repository::{self, DiscoveredRepository, PreviewError},
 };
 use commitscope_core::{
-    ErrorCode, HistoryCommit, LastViewedSnapshot, LocateCommitParams, NewSinceLastSeenStatus,
-    StoreStatus,
+    ErrorCode, HistoryCommit, LastViewedSnapshot, LocateCommitParams, LocateHistoryDateParams,
+    NewSinceLastSeenStatus, StoreStatus,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -17,6 +17,7 @@ use std::{
 const CACHE_PAGE_LIMIT: usize = 8;
 const CACHE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const OID_LINE_LIMIT: usize = 80;
+const DATE_LINE_LIMIT: usize = 128;
 const TOPOLOGY_LINE_LIMIT: usize = 9 * 1024;
 
 pub struct HistoryState {
@@ -229,6 +230,38 @@ impl HistoryState {
         *query = Some(fresh);
         Ok(result)
     }
+
+    pub fn with_located_date_page<T>(
+        &self,
+        executable: &Path,
+        discovered: &DiscoveredRepository,
+        params: &LocateHistoryDateParams,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+        emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
+    ) -> Result<T, PreviewError> {
+        if !(1..=500).contains(&params.page_size) {
+            return Err(invalid_request("pageSize must be between 1 and 500"));
+        }
+        let oid = locate_date_oid(
+            executable,
+            discovered,
+            params.before_timestamp,
+            cancelled,
+            deadline,
+        )?;
+        self.with_located_page(
+            executable,
+            discovered,
+            &LocateCommitParams {
+                oid,
+                page_size: params.page_size,
+            },
+            cancelled,
+            deadline,
+            emit,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -419,6 +452,62 @@ fn locate_oid_offset(
         })?;
     }
     Err(scope_unavailable())
+}
+
+fn locate_date_oid(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    before_timestamp: i64,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<String, PreviewError> {
+    if discovered.scope_tips.is_empty() {
+        return Err(no_commits_before_date());
+    }
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+    let mut args = vec![
+        string_arg("-c"),
+        string_arg("core.commitGraph=false"),
+        string_arg("rev-list"),
+        string_arg("--timestamp"),
+        string_arg("--topo-order"),
+    ];
+    args.extend(discovered.scope_tips.iter().map(string_arg));
+    args.push(string_arg("--"));
+    let mut stream = git
+        .stream_lines(Path::new(&discovered.info.path), &args, DATE_LINE_LIMIT)
+        .map_err(map_git_failure)?;
+    let mut best: Option<(i64, String)> = None;
+    while let Some(line) = stream
+        .next_line(cancelled, deadline)
+        .map_err(map_git_failure)?
+    {
+        check_active(cancelled, deadline)?;
+        let text = std::str::from_utf8(&line)
+            .map_err(|_| repository::git_error("Git returned a non-UTF-8 dated history record"))?;
+        let mut fields = text.split_ascii_whitespace();
+        let timestamp = fields
+            .next()
+            .and_then(|field| field.parse::<i64>().ok())
+            .ok_or_else(|| repository::git_error("Git returned an invalid committer timestamp"))?;
+        let oid = fields
+            .next()
+            .ok_or_else(|| repository::git_error("Git returned an invalid dated history record"))?;
+        if fields.next().is_some() {
+            return Err(repository::git_error(
+                "Git returned an invalid dated history record",
+            ));
+        }
+        validate_topology_oid(oid, discovered.oid_length)?;
+        if timestamp < before_timestamp
+            && best
+                .as_ref()
+                .is_none_or(|(best_timestamp, _)| timestamp > *best_timestamp)
+        {
+            best = Some((timestamp, oid.to_ascii_lowercase()));
+        }
+    }
+    best.map(|(_, oid)| oid).ok_or_else(no_commits_before_date)
 }
 
 fn check_page_active(
@@ -1218,6 +1307,14 @@ fn scope_unavailable() -> PreviewError {
     }
 }
 
+fn no_commits_before_date() -> PreviewError {
+    PreviewError {
+        code: ErrorCode::ScopeUnavailable,
+        message: "该日期及之前没有提交".into(),
+        retryable: false,
+    }
+}
+
 fn busy_error() -> PreviewError {
     PreviewError {
         code: ErrorCode::Busy,
@@ -1381,6 +1478,74 @@ mod tests {
         )
     }
 
+    fn locate_date_page(
+        state: &HistoryState,
+        discovered: &DiscoveredRepository,
+        before_timestamp: i64,
+        size: u16,
+    ) -> Result<HistoryPage, PreviewError> {
+        state.with_located_date_page(
+            &git_executable(),
+            discovered,
+            &LocateHistoryDateParams {
+                before_timestamp,
+                page_size: size,
+            },
+            &AtomicBool::new(false),
+            Instant::now() + std::time::Duration::from_secs(5),
+            |page| Ok(page.clone()),
+        )
+    }
+
+    fn commit_at(path: &Path, message: &str, timestamp: i64) {
+        let mut command = Command::new("git");
+        for (name, _) in
+            std::env::vars_os().filter(|(name, _)| name.to_string_lossy().starts_with("GIT_"))
+        {
+            command.env_remove(name);
+        }
+        let date = format!("@{timestamp} +0000");
+        let output = command
+            .arg("-C")
+            .arg(path)
+            .args(["add", "history.txt"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("stage dated fixture commit");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut command = Command::new("git");
+        for (name, _) in
+            std::env::vars_os().filter(|(name, _)| name.to_string_lossy().starts_with("GIT_"))
+        {
+            command.env_remove(name);
+        }
+        let output = command
+            .arg("-C")
+            .arg(path)
+            .args(["commit", "-q", "-m", message])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "History Test")
+            .env("GIT_AUTHOR_EMAIL", "history@example.test")
+            .env("GIT_COMMITTER_NAME", "History Test")
+            .env("GIT_COMMITTER_EMAIL", "history@example.test")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .expect("create dated fixture commit");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn pages_continue_replay_after_eviction_and_reject_unissued_offsets() {
         let (_repo, path) = make_repo(10);
@@ -1464,6 +1629,35 @@ mod tests {
     }
 
     #[test]
+    fn locate_history_date_selects_maximum_eligible_committer_time_in_topology_order() {
+        let (_repo, path) = make_repo(0);
+        let dated_commits = [
+            ("old", 100),
+            ("first-tie", 340),
+            ("second-tie", 340),
+            ("newer-topology-lower-time", 200),
+            ("excluded", 500),
+        ];
+        for (message, timestamp) in dated_commits {
+            fs::write(path.join("history.txt"), format!("{message}\n"))
+                .expect("write dated fixture commit");
+            commit_at(&path, message, timestamp);
+        }
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        let page = locate_date_page(&state, &discovered, 400, 2).expect("locate date");
+        let expected = run_git(&path, &["rev-parse", "HEAD~2"]);
+        assert_eq!(page.offset, 2);
+        assert_eq!(page.commits[0].commit.oid, expected);
+        assert_eq!(page.commits.len(), 2);
+        assert!(
+            page.commits
+                .iter()
+                .any(|commit| commit.commit.oid == expected)
+        );
+    }
+
+    #[test]
     fn locate_scope_miss_and_cancellation_preserve_existing_cursor() {
         let (_repo, path) = make_repo(8);
         let discovered = discover(&path);
@@ -1480,6 +1674,25 @@ mod tests {
             .expect("cursor survives scope miss");
         assert_eq!(second.offset, 2);
 
+        let no_date_match = state
+            .with_located_date_page(
+                &git_executable(),
+                &discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp: i64::MIN,
+                    page_size: 2,
+                },
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(5),
+                |page| Ok(page.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(no_date_match.code, ErrorCode::ScopeUnavailable);
+        assert_eq!(no_date_match.message, "该日期及之前没有提交");
+        let after_date_miss = read_page(&state, &discovered, second.next_cursor.as_deref(), 2)
+            .expect("cursor survives date miss");
+        assert_eq!(after_date_miss.offset, 4);
+
         let cancelled = AtomicBool::new(true);
         let error = state
             .with_located_page(
@@ -1495,6 +1708,20 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
+        let date_cancelled = state
+            .with_located_date_page(
+                &git_executable(),
+                &discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp: i64::MAX,
+                    page_size: 2,
+                },
+                &cancelled,
+                Instant::now() + std::time::Duration::from_secs(5),
+                |page| Ok(page.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(date_cancelled.code, ErrorCode::Cancelled);
         let third = read_page(&state, &discovered, second.next_cursor.as_deref(), 2)
             .expect("cursor survives cancelled locate");
         assert_eq!(third.offset, 4);

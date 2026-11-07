@@ -182,6 +182,26 @@
       ],
       "type": "object"
     },
+    "LocateHistoryDateParams": {
+      "additionalProperties": false,
+      "properties": {
+        "beforeTimestamp": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "beforeTimestamp",
+        "pageSize"
+      ],
+      "type": "object"
+    },
     "MetadataIndexAction": {
       "enum": [
         "pause",
@@ -420,6 +440,9 @@
         },
         {
           "$ref": "#/definitions/LocateCommitParams"
+        },
+        {
+          "$ref": "#/definitions/LocateHistoryDateParams"
         },
         {
           "$ref": "#/definitions/RefreshRepositoryParams"
