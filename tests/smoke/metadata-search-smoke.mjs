@@ -93,6 +93,8 @@ try {
   await input.fill("common searchable marker");
   await waitSearchCount(page, fixture.oids.length);
 
+  // The index popover sits over the list once the status bar no longer shows the core state; close it first.
+  await closeIndexStatus(page);
   // Walk deep pages through user controls and verify that the renderer remains virtualized/bounded.
   const resultList = page.getByTestId("search-results").getByRole("listbox");
   for (let index = 0; index < 10; index += 1) {
@@ -385,6 +387,12 @@ async function waitIndexStatus(target, predicate, timeoutMs = 30_000) {
 async function openIndexStatus(target) {
   if (!(await target.getByTestId("index-status-label").isVisible().catch(() => false))) await target.getByTestId("index-status-trigger").click();
   await target.getByTestId("index-status-label").waitFor({ state: "visible" });
+}
+
+async function closeIndexStatus(target) {
+  if (!(await target.getByTestId("index-status-label").isVisible().catch(() => false))) return;
+  await target.getByTestId("index-status-trigger").click();
+  await target.getByTestId("index-status-label").waitFor({ state: "hidden" });
 }
 
 async function ensureFilterOpen(target) {

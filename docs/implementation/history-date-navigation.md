@@ -36,3 +36,7 @@ locateHistoryDate(beforeTimestamp: number, pageSize?: number): Promise<Repositor
 - `pnpm typecheck` 和 `pnpm build:release` 通过。初次集成发现缺少 `latestCommitBefore` 辅助函数，补齐后类型检查通过；Vite 的主 bundle 超过 500 kB 提示仍在，未扩展到性能优化。
 - `node tests/smoke/history-date-navigation-smoke.mjs` 一次通过：450 条真实 Git 提交跨 3 个本地日历年，独立 Git 对照目标位于拓扑序第 351 条（零基序号 350）。确认默认收起、点击展开日期、点击外部 / Esc 收起、跨页精确定位、跳转后继续滚动，以及浏览前后仓库只读快照一致。
 - 日志：`output/test/history-date-navigation-smoke.log`。截图：`output/playwright/history-date-navigation/{collapsed,expanded,located}.png`；已目视确认收起与展开状态。未运行完整回归、全主题 / 缩放矩阵或大仓定位性能测量。
+
+## 后续调整（2026-11-08）
+
+按用户要求重做了交互，日期定位接口与 Rust 实现不变：左侧可展开的标尺改为列表右缘常显的日期刻度（代替纵向滚动条，按天 / 周 / 月 / 年分段，刻度长短表示提交数，悬停鱼眼放大并显示日期，点击或拖动松开即跳，支持键盘）；日期输入移到列表顶部的固定日期条，按回车或“跳转”才定位；跳转后目标提交位于固定日期下方。规则见 DESIGN「固定日期与日期刻度」，分段与放大计算见 `apps/desktop/src/renderer/lib/time-scale.ts` 及 `tests/renderer/time-scale.test.mjs`，实窗检查并入 `tests/smoke/history-date-navigation-smoke.mjs`。

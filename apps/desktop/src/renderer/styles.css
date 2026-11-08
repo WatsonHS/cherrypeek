@@ -200,11 +200,9 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
 }
 
 @media (max-width: 1250px) {
-  .topbar-repository { width: clamp(100px, 13vw, 156px); flex: 0 1 clamp(100px, 13vw, 156px); }
-  .topbar-repository > span { max-width: calc(100% - 24px); }
-  .topbar-scope-picker { width: clamp(100px, 13vw, 150px); flex: 0 1 clamp(100px, 13vw, 150px); }
-  .topbar-scope-label { max-width: calc(100% - 28px); }
-  .topbar-worktree { width: clamp(92px, 14vw, 166px); flex: 0 1 clamp(92px, 14vw, 166px); }
+  .topbar-repository { width: clamp(100px, 15vw, 180px); flex: 0 1 clamp(100px, 15vw, 180px); }
+  .topbar-repository > span { max-width: 100%; }
+  .topbar-scope-picker { width: clamp(110px, 18vw, 200px); flex: 0 1 clamp(110px, 18vw, 200px); }
   .topbar-worktree-meta,
   .topbar-action-label { display: none; }
   .topbar-search-controls { flex: 1 1 170px; }
@@ -217,9 +215,8 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
 }
 
 @media (max-width: 900px) {
-  .topbar-repository { width: 94px; flex-basis: 94px; padding-inline: 4px; }
-  .topbar-scope-picker { width: 76px; flex-basis: 76px; padding-inline: 4px; }
-  .topbar-worktree { width: 92px; flex-basis: 92px; padding-inline: 4px; }
+  .topbar-repository { width: 100px; flex-basis: 100px; padding-inline: 4px; }
+  .topbar-scope-picker { width: 110px; flex-basis: 110px; padding-inline: 4px; }
   .topbar-search-controls { flex-basis: 112px; }
   .topbar-handoff,
   .topbar-refresh { width: 28px; height: 28px; padding: 0; }

@@ -80,12 +80,14 @@ try {
   const anchorAfter = await readScreenTop(stableTargetRow);
   assert.ok(Math.abs(anchorAfter - anchorBefore) <= 4,
     `expansion keeps the row where it was on screen: before=${anchorBefore}, after=${anchorAfter}`);
-  // The collapse control lives in a bar above the list instead of floating over rows.
+  // The graph status and collapse control share the pinned date strip at the top of the list,
+  // instead of floating over rows.
   const bar = page.getByTestId("graph-mode-bar");
   assert.match(await bar.innerText(), new RegExp(`全部图线 · ${expandedState.lanes} 列`));
-  const [barBox, listBox] = await Promise.all([bar.boundingBox(), list.boundingBox()]);
-  assert.ok(barBox && listBox && barBox.y + barBox.height <= listBox.y + 0.5, `the full-graph bar does not cover the list: ${JSON.stringify({ barBox, listBox })}`);
-  assert.equal(await bar.getByTestId("graph-collapse").count(), 1, "the collapse button sits in the full-graph bar");
+  const [barBox, stripBox, listBox] = await Promise.all([bar.boundingBox(), page.getByTestId("history-day-strip").boundingBox(), list.boundingBox()]);
+  assert.ok(barBox && stripBox && listBox && Math.abs(stripBox.y - listBox.y) < 1 && barBox.y >= stripBox.y - 0.5 && barBox.y + barBox.height <= stripBox.y + stripBox.height + 0.5,
+    `the full-graph status sits inside the pinned date strip: ${JSON.stringify({ barBox, stripBox, listBox })}`);
+  assert.equal(await bar.getByTestId("graph-collapse").count(), 1, "the collapse button sits next to the graph status");
 
   const expandedLanes = await list.locator('[data-testid="commit-graph"][data-graph-expanded="true"]').evaluateAll(graphs => ({
     hiddenThroughDrawn: graphs.some(graph => {

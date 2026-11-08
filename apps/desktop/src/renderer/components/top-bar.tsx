@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cloud, ExternalLink, Folder, GitBranch, Keyboard, LoaderCircle, RefreshCw, Tag } from "lucide-react";
+import { ChevronDown, Cloud, ExternalLink, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Tag } from "lucide-react";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
@@ -57,14 +57,15 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   if (!repository) return null;
   const busy = preview.state === "loading" || preview.opening !== null || preview.scopeSwitching || preview.refreshing;
   return <header className="window-toolbar flex h-[52px] min-h-[52px] max-h-[52px] flex-nowrap items-center gap-1 overflow-hidden border-b border-line py-2">
+    {/* Two labelled blocks: which repository (and worktree) this window shows, and which history it browses. */}
     <RepositorySwitcher repository={repository} session={preview.session} record={preview.record} actions={actions}
-      recent={recent} onRefreshRecent={onRefreshRecent} loading={busy} />
-    <span aria-hidden="true" className="topbar-divider shrink-0 text-line2">/</span>
+      recent={recent} onRefreshRecent={onRefreshRecent} loading={busy}
+      navigation={preview.navigation} navigationLoading={preview.navigationLoading} navigationError={preview.navigationError?.message ?? null}
+      onLoadNavigation={onLoadNavigation} />
+    <span aria-hidden="true" className="topbar-divider h-6 w-px shrink-0 bg-line" />
     <ScopePicker preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
       onOpenHandoff={onOpenHandoff}
       onLoadMergeStatus={onLoadMergeStatus} onCancelMergeStatus={onCancelMergeStatus} onRefresh={actions.refresh} disabled={busy} />
-    <WorktreeChip repository={repository} session={preview.session} navigation={preview.navigation} navigationLoading={preview.navigationLoading}
-      navigationError={preview.navigationError?.message ?? null} onLoadNavigation={onLoadNavigation} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="min-w-0 flex-1 basis-0" />
     <ActivityStatsPopover query={activityQuery} stats={activityStats} loading={activityLoading} error={activityError}
@@ -111,7 +112,18 @@ function ShortcutGuide(): React.JSX.Element {
   </Popover>;
 }
 
-function RepositorySwitcher({ repository, session, record, actions, recent, onRefreshRecent, loading }: {
+/** Caption-over-value toolbar button, so each block says what it is. */
+const BLOCK_BUTTON = "h-10 min-w-0 shrink flex-col items-start justify-center gap-0 px-2.5 py-0.5 text-left";
+function BlockCaption({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <span className="max-w-full truncate text-[10.5px] leading-[13px] font-normal text-fg3">{children}</span>;
+}
+
+function isLinkedWorktree(repository: RepositoryInfo): boolean {
+  return repository.worktreePath !== null
+    && repository.gitDir.replace(/[\\/]+$/, "") !== repository.commonDir.replace(/[\\/]+$/, "");
+}
+
+function RepositorySwitcher({ repository, session, record, actions, recent, onRefreshRecent, loading, navigation, navigationLoading, navigationError, onLoadNavigation }: {
   repository: RepositoryInfo;
   session: RepositorySessionInfo | null;
   record: ViewRecord | null;
@@ -119,24 +131,40 @@ function RepositorySwitcher({ repository, session, record, actions, recent, onRe
   recent: RecentState;
   onRefreshRecent(): void;
   loading: boolean;
+  navigation: RepositoryNavigation | null;
+  navigationLoading: boolean;
+  navigationError: string | null;
+  onLoadNavigation(): void;
 }): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const name = repositoryName(repository.worktreePath ?? repository.path);
+  const caption = repository.isBare ? "仓库 · bare" : isLinkedWorktree(repository) ? "仓库 · 关联 worktree" : "仓库";
   const openPath = (path: string) => { setOpen(false); void actions.open(path); };
-  return <Popover open={open} onOpenChange={next => { setOpen(next); if (next) onRefreshRecent(); }}>
+  return <Popover open={open} onOpenChange={next => {
+    setOpen(next);
+    if (!next) return;
+    onRefreshRecent();
+    if (!navigation && !navigationLoading && !navigationError) onLoadNavigation();
+  }}>
     <PopoverTrigger asChild>
-      <Button variant="ghost" className="topbar-repository h-8 min-w-0 max-w-[220px] shrink px-2.5 font-semibold text-fg" aria-label={`切换仓库：${name}`} title={repository.path} disabled={loading}>
-        <span className="min-w-0 max-w-[220px] truncate">{name}</span>
-        <ChevronDown className="size-3.5 text-fg3" strokeWidth={1.75} />
+      <Button variant="ghost" className={cn("topbar-repository max-w-[240px]", BLOCK_BUTTON)} aria-label={`切换仓库：${name}`} title={repository.path} disabled={loading}>
+        <BlockCaption>{caption}</BlockCaption>
+        <span className="flex min-w-0 max-w-full items-center gap-1 text-[13px] leading-5 font-semibold text-fg">
+          <span className="min-w-0 truncate">{name}</span>
+          <ChevronDown className="size-3.5 text-fg3" strokeWidth={1.75} />
+        </span>
       </Button>
     </PopoverTrigger>
     <PopoverContent className="flex max-h-(--radix-popover-content-available-height) w-[460px] flex-col gap-3.5 overflow-auto p-4">
       <div className="flex flex-col gap-1">
         <span className="text-[11.5px] font-semibold text-fg3">当前仓库</span>
-        <code className="font-mono text-xs break-all text-fg2">{repository.path}</code>
+        {/* A worktree's directory is listed under 当前工作区 below. */}
+        {repository.worktreePath === null ? <code className="font-mono text-xs break-all text-fg2">{repository.path}</code> : null}
         <span className="text-xs text-fg3">对象格式 {repository.objectFormat}{repository.isBare ? " · bare 仓库" : ""}{repository.isShallow ? " · 浅克隆" : ""}</span>
         {session ? <SessionFacts session={session} record={record} /> : <span className="text-xs text-warn">核心已断开，这里显示的是之前读取的内容。</span>}
       </div>
+      <WorktreeFacts repository={repository} navigation={navigation} navigationLoading={navigationLoading}
+        navigationError={navigationError} onLoadNavigation={onLoadNavigation} />
     <RecentList recent={recent} currentWorktreeId={session?.worktreeId ?? null} disabled={loading} onOpen={openPath} />
       <div className="flex flex-col gap-2">
         <span className="text-[11.5px] font-semibold text-fg3">打开其他仓库</span>
@@ -186,6 +214,28 @@ function scopeLabel(scope: RepositoryScope, repository: RepositoryInfo, navigati
   return worktree ? `worktree · ${repositoryName(worktree.path)}` : "worktree";
 }
 
+/** What the scope button shows: the branch, ref or worktree being browsed, with a matching icon. */
+function scopeValue(scope: RepositoryScope, repository: RepositoryInfo, navigation: RepositoryNavigation | null): { text: string; icon: React.ReactNode } {
+  const iconClass = "size-3.5 shrink-0 text-fg3";
+  if (scope === "head") return {
+    text: repository.headReference ? shortRefName(repository.headReference) : repository.headOid ? `HEAD ${shortOid(repository.headOid)}` : "空仓库",
+    icon: <HeadIcon className={cn(iconClass, "text-accent")} />,
+  };
+  if (scope === "allBranches") return { text: "全部分支", icon: <Layers className={iconClass} strokeWidth={1.75} /> };
+  if ("ref" in scope) {
+    const Icon = scope.ref.startsWith("refs/tags/") ? Tag : scope.ref.startsWith("refs/remotes/") ? Cloud : GitBranch;
+    return { text: shortRefName(scope.ref), icon: <Icon className={iconClass} strokeWidth={1.75} /> };
+  }
+  const worktree = navigation?.worktrees.find(item => item.id === scope.worktree);
+  return { text: worktree ? `worktree · ${repositoryName(worktree.path)}` : "worktree", icon: <Folder className={iconClass} strokeWidth={1.75} /> };
+}
+
+/** The HEAD icon from docs/DESIGN.md section 8, also used by the HEAD label in the history list. */
+function HeadIcon({ className }: { className?: string }): React.JSX.Element {
+  return <svg viewBox="0 0 16 16" aria-hidden="true" className={className}
+    style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5 }}><circle cx={8} cy={8} r={5} /><circle cx={8} cy={8} r={1.5} style={{ fill: "currentColor" }} /></svg>;
+}
+
 function sameScope(left: RepositoryScope | undefined, right: RepositoryScope): boolean {
   if (!left) return false;
   if (typeof left === "string" || typeof right === "string") return left === right;
@@ -211,6 +261,8 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   const navigation = preview.navigation;
   const scope = preview.session?.scope;
   const label = scopeLabel(scope ?? "head", repository, navigation);
+  const value = scopeValue(scope ?? "head", repository, navigation);
+  const caption = scope === "head" || !scope ? "浏览范围 · HEAD" : "浏览范围";
   const visibleBranches = React.useCallback((force = false) => {
     if (!open || !navigation?.defaultBase || preview.mergeStatusLoading || (!force && preview.mergeStatusError) || !optionsRef.current) return;
     const box = optionsRef.current.getBoundingClientRect();
@@ -243,10 +295,14 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
     else void onCancelMergeStatus();
   }}>
     <PopoverTrigger asChild>
-      <Button variant="ghost" className="topbar-scope-picker h-8 min-w-0 max-w-[190px] shrink px-2 text-fg2" aria-label={`浏览范围：${label}`} title={label} data-testid="scope-picker" disabled={disabled}>
-        <GitBranch className="size-3.5" strokeWidth={1.75} />
-        <span className="topbar-scope-label min-w-0 max-w-[240px] truncate">{label}</span>
-        <ChevronDown className="size-3.5 text-fg3" strokeWidth={1.75} />
+      <Button variant="ghost" className={cn("topbar-scope-picker max-w-[220px]", BLOCK_BUTTON)} aria-label={`浏览范围：${label}`}
+        title={`浏览范围：${label}。只切换历史，不会 checkout`} data-testid="scope-picker" disabled={disabled}>
+        <BlockCaption>{caption}</BlockCaption>
+        <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[13px] leading-5 font-medium text-fg">
+          {value.icon}
+          <span className="topbar-scope-label min-w-0 truncate">{value.text}</span>
+          <ChevronDown className="size-3.5 text-fg3" strokeWidth={1.75} />
+        </span>
       </Button>
     </PopoverTrigger>
     <PopoverContent className="flex max-h-(--radix-popover-content-available-height) w-[440px] flex-col p-0" data-testid="scope-popover">
@@ -323,52 +379,33 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   </Popover>;
 }
 
-function WorktreeChip({ repository, session, navigation, navigationLoading, navigationError, onLoadNavigation, disabled }: {
+/** The current directory's worktree facts, independent of the browsing scope. */
+function WorktreeFacts({ repository, navigation, navigationLoading, navigationError, onLoadNavigation }: {
   repository: RepositoryInfo;
-  session: RepositorySessionInfo | null;
   navigation: RepositoryNavigation | null;
   navigationLoading: boolean;
   navigationError: string | null;
   onLoadNavigation(): void;
-  disabled: boolean;
 }): React.JSX.Element {
-  const [open, setOpen] = React.useState(false);
   const path = repository.worktreePath ?? repository.path;
-  const linked = repository.worktreePath !== null
-    && repository.gitDir.replace(/[\\/]+$/, "") !== repository.commonDir.replace(/[\\/]+$/, "");
-  const worktreeName = repository.isBare ? "bare 仓库" : repositoryName(path);
+  const linked = isLinkedWorktree(repository);
   const headDescription = repository.headReference
     ? `分支 ${repository.headReference}`
     : repository.headOid ? "detached HEAD" : "空仓库（尚无 HEAD 提交）";
   const worktreeCount = navigation
     ? `${navigation.worktreesTruncated ? "至少 " : ""}${navigation.worktrees.length} 个 worktree`
     : navigationLoading ? "正在读取 worktree 清单…" : navigationError ? "worktree 清单读取失败" : "尚未读取 worktree 清单";
-
-  return <Popover open={open} onOpenChange={next => {
-    setOpen(next);
-    if (next && !navigation && !navigationLoading && !navigationError) onLoadNavigation();
-  }}>
-    <PopoverTrigger asChild>
-      <Button variant="ghost" size="sm" className="topbar-worktree max-w-[280px] min-w-0 shrink justify-start border border-line text-xs text-fg2"
-        disabled={disabled} data-testid="worktree-info-trigger" aria-label={`工作区信息：${worktreeName}`} title={`${path} · ${worktreeCount}`}>
-        <Folder className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
-        <span className="min-w-0 truncate">工作区 · {worktreeName}</span>
-      </Button>
-    </PopoverTrigger>
-    <PopoverContent align="start" className="w-[360px] max-w-[calc(100vw-24px)] p-3" data-testid="worktree-info">
-      <h2 className="m-0 text-[13px] font-semibold">当前工作区</h2>
-      <p className="mb-3 mt-1 text-xs text-fg3">这里显示当前窗口对应的目录事实；它与左侧浏览范围独立，切换浏览范围不会 checkout 或改变工作区。</p>
+  return <section className="flex flex-col gap-1.5" data-testid="worktree-info" aria-label="当前工作区">
+    <span className="text-[11.5px] font-semibold text-fg3">当前工作区</span>
       <dl className="m-0 grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
         <dt className="text-fg3">目录</dt><dd className="m-0 break-all font-mono" title={path}>{path}</dd>
         <dt className="text-fg3">类型</dt><dd className="m-0">{repository.isBare ? "bare 仓库（没有工作区目录）" : linked ? "关联 worktree" : "主 worktree"}</dd>
         <dt className="text-fg3">实际 HEAD</dt><dd className="m-0 break-all">{repository.isBare ? "bare 仓库没有工作区 HEAD" : headDescription}</dd>
         <dt className="text-fg3">HEAD 完整 OID</dt><dd className="m-0 break-all font-mono">{repository.headOid ?? "无提交"}</dd>
-        <dt className="text-fg3">快照时间</dt><dd className="m-0">{session ? momentLabel(session.observedAtUnixMs) : "未知"}</dd>
         <dt className="text-fg3">关联 worktree</dt><dd className="m-0">{worktreeCount}</dd>
       </dl>
       {navigationLoading ? <p role="status" className="mb-0 mt-3 text-xs text-fg3">正在读取导航快照…</p> : null}
       {navigationError ? <div role="alert" className="mt-3 text-xs text-bad">{navigationError}<button type="button" className="ml-2 underline" onClick={onLoadNavigation}>重试</button></div> : null}
       {navigation?.worktreesTruncated ? <p role="status" className="mb-0 mt-2 text-xs text-warn">worktree 清单已达到显示上限，数量为下限。</p> : null}
-    </PopoverContent>
-  </Popover>;
+  </section>;
 }

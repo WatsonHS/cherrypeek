@@ -5,6 +5,7 @@ import type { MetadataIndexAction } from "../../../../../packages/protocol/src/g
 import type { MetadataIndexStatus } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { isMetadataIndexRequestIdle, type RepositoryView } from "../lib/repository-session-store.js";
 import { errorTitle } from "../lib/errors.js";
+import { momentLabel } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
@@ -41,14 +42,20 @@ export function StatusBar({ status, preview, onIndexAction, previewStatus, searc
 }): React.JSX.Element {
   const indexSupported = status.state === "ready" && status.core.capabilities.includes("metadataIndex");
   const previewText = previewStatus ?? previewLabel(preview);
-  return <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-[18px] border-t border-line px-4 text-xs text-fg3">
-    <span className="flex items-center gap-1.5" title={status.state === "ready" ? `${status.core.coreVersion} · PID ${status.core.pid}` : undefined}>
+  const session = preview.session;
+  return <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-[18px] border-t border-line px-4 text-xs text-fg3">
+    {/* The core only needs attention when it is not ready; screen readers still hear the ready state. */}
+    <span data-testid="core-status" data-state={status.state} className={cn("flex items-center gap-1.5", status.state === "ready" && "sr-only")}
+      title={status.state === "ready" ? `${status.core.coreVersion} · PID ${status.core.pid}` : undefined}>
       <span aria-hidden="true" className={cn("size-[7px] rounded-full", status.state === "ready" ? "bg-ok" : status.state === "error" ? "bg-bad" : "bg-line2")} />
-      <span>{coreLabel(status)}</span>
+      <span className={status.state === "error" ? "text-bad" : undefined}>{coreLabel(status)}</span>
     </span>
-    <span>只读</span>
-      <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite" className={previewText ? undefined : "hidden"}>{previewText}</span>
-    {preview.session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} interactionBusy={Boolean(searchBusy)} /> : null}
+    {session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} interactionBusy={Boolean(searchBusy)} /> : null}
+    <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite" className={previewText ? undefined : "hidden"}>{previewText}</span>
+    {session ? <span data-testid="snapshot-time" className="ml-auto whitespace-nowrap"
+      title={`本窗口 HEAD 读取于 ${momentLabel(session.observedAtUnixMs)}。之后的新提交要刷新才会显示；CommitScope 只读，不会修改仓库。`}>
+      只读快照 · {momentLabel(session.observedAtUnixMs)}
+    </span> : null}
   </footer>;
 }
 
@@ -62,7 +69,7 @@ function metadataIndexLabel(status: MetadataIndexStatus | null, loading: boolean
     case "running": return `索引中 · 已处理 ${processed} 条`;
     case "paused": return `索引已暂停 · 已处理 ${processed} 条`;
     case "cancelled": return `索引已取消 · 已处理 ${processed} 条`;
-    case "complete": return `当前范围已完成 · ${processed} 条`;
+    case "complete": return `索引已完成 · ${processed.toLocaleString("zh-CN")} 个提交`;
     case "quotaLimited": return `已到缓存上限 · 已处理 ${processed} 条`;
     case "unavailable": return "索引不可用 · 历史仍可浏览";
     case "failed": return "索引失败 · 历史仍可浏览";
@@ -79,6 +86,8 @@ function MetadataIndexStatusControl({ view, supported, onAction, interactionBusy
   const actionLoading = view.metadataIndexAction !== null;
   const busy = interactionBusy || !isMetadataIndexRequestIdle(view) || view.metadataIndexLoading || actionLoading;
   const label = metadataIndexLabel(status, view.metadataIndexLoading, supported);
+  // Once indexing is done, the useful fact is how many commits this scope has.
+  const triggerText = status?.state === "complete" ? `共 ${status.coverage.processed.toLocaleString("zh-CN")} 个提交` : label;
   const button = (action: MetadataIndexAction, text: string) => <Button key={action} type="button" variant="ghost" size="sm"
     className="h-7 justify-start px-2 text-xs" data-testid={`index-action-${action}`} disabled={!supported || busy}
     onClick={() => onAction(action)}>{text}</Button>;
@@ -88,7 +97,7 @@ function MetadataIndexStatusControl({ view, supported, onAction, interactionBusy
       <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-fg3" data-testid="index-status-trigger"
         aria-label={`元数据索引：${label}`} title={status ? `磁盘 ${status.diskBytes} 字节 · 配额 ${status.quotaBytes} 字节` : undefined}>
         {busy ? <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
-        <span>{label}</span>
+        <span>{triggerText}</span>
       </Button>
     </PopoverTrigger>
     <PopoverContent align="start" className="w-64 p-3">

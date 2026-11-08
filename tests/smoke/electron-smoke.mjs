@@ -35,7 +35,7 @@ let daemonPid;
 let normalClosed = false;
 try {
   const page = await normal.firstWindow();
-  await waitForText(page, "核心已就绪");
+  await page.locator('[data-testid="core-status"][data-state="ready"]').waitFor({ state: "attached", timeout: 10000 });
   const readyStatus = await page.evaluate(() => window.commitScope.getCoreStatus());
   daemonPid = readyStatus.state === "ready" ? readyStatus.core.pid : NaN;
   const coreVersion = readyStatus.state === "ready" ? readyStatus.core.coreVersion : "";
@@ -128,7 +128,7 @@ const graceful = await launch();
 let gracefulClosed = false;
 try {
   const page = await graceful.firstWindow();
-  await waitForText(page, "核心已就绪");
+  await page.locator('[data-testid="core-status"][data-state="ready"]').waitFor({ state: "attached", timeout: 10000 });
   const gracefulStatus = await page.evaluate(() => window.commitScope.getCoreStatus());
   const gracefulPid = gracefulStatus.state === "ready" ? gracefulStatus.core.pid : NaN;
   const gracefulElectronPid = graceful.process().pid;

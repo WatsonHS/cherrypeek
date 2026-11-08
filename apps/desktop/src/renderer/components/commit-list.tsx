@@ -1,10 +1,10 @@
 import * as React from "react";
 import type { CommitSummary, HistoryCommit, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
-import { FoldHorizontal, LoaderCircle, TriangleAlert } from "lucide-react";
+import { LoaderCircle, TriangleAlert } from "lucide-react";
 import { clock, dayKey, dayLabel, parseGitTime, refTarget } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
-import { graphAboveLanes, graphPaths, graphWidth as measureGraphWidth, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
+import { graphAboveLanes, graphPaths, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
 import { refLabels, type OtherWorktreeHead } from "../lib/ref-labels.js";
 import { cn } from "../lib/utils.js";
 import { IdentityAvatar } from "./identity-avatar.js";
@@ -14,12 +14,15 @@ import { Skeleton } from "./ui/skeleton.js";
 import { createVirtualLayout, type VirtualRange } from "../lib/virtual-window.js";
 import type { SelectionIntentToken } from "../lib/selection-intent.js";
 import { HistoryTimeRail, type HistoryTimeRailDay } from "./history-time-rail.js";
+import { HistoryDayStrip, type DayMarker } from "./history-day-strip.js";
 import { localDateInput } from "../lib/search-date.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
-/** Height of the full-graph bar (h-9). */
-const GRAPH_BAR_HEIGHT = 36;
+/** Room after the six compact lanes for the hidden-node marker and the "+N" control. */
+const HIDDEN_LANES_GUTTER = 32;
+/** Inner left padding of a commit's text card; day labels use the same so the text lines up. */
+const TEXT_INSET = 10;
 
 type ListEntry =
   | { kind: "day"; key: string; dayKey: string; label: string; graph: HistoryCommit["graph"]; height: number }
@@ -89,6 +92,10 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     preview.newSinceLastSeenStatus === "ready" ? preview.lastSeenDividerOid : null),
   [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus]);
   const virtual = React.useMemo(() => createVirtualLayout(entries), [entries]);
+  const dayMarkers = React.useMemo<DayMarker[]>(() => entries.flatMap(entry =>
+    entry.kind === "day" ? [{ offset: virtual.offset(entry.key) ?? 0, label: entry.label, day: entry.dayKey }] : []), [entries, virtual]);
+  const latestSelectedOid = React.useRef(selectedOid);
+  latestSelectedOid.current = selectedOid;
   const latestScrollModel = React.useRef({ preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor });
   latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
@@ -101,9 +108,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const commitByOid = React.useMemo(() => new Map(preview.commits.map(commit => [commit.oid, commit])), [preview.commits]);
   const maxLaneInWindow = preview.commits.reduce((maxLane, commit) => Math.max(maxLane, maxGraphLane(commit.graph)), -1);
   const visibleLaneCount = graphExpanded ? Math.max(MAX_VISIBLE_LANES, maxLaneInWindow + 1) : MAX_VISIBLE_LANES;
+  // Compact mode is only as wide as the lanes this window uses (up to six), plus room for
+  // the "+N" control when some lanes are hidden.
+  const hasHiddenLanes = maxLaneInWindow >= MAX_VISIBLE_LANES || preview.commits.some(commit => commit.graph.hiddenLaneCount > 0);
   const graphColumnWidth = graphExpanded
     ? graphWidthForMaxLane(ROW, visibleLaneCount - 1)
-    : measureGraphWidth(ROW);
+    : hasHiddenLanes ? graphColumnX() + HIDDEN_LANES_GUTTER : graphWidthForMaxLane(ROW, Math.max(0, maxLaneInWindow));
   const expandedContentMinWidth = graphExpanded ? graphColumnWidth + 280 : undefined;
   const headReference = preview.repository?.headReference ?? null;
   const headOid = preview.repository?.headOid ?? null;
@@ -129,9 +139,6 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const useActivityDays = Boolean(activityDays?.length);
   const timeRailDays = useActivityDays ? activityDays! : loadedDateDays;
   const timeRailLoading = preview.pageLoading && preview.pageRequestKind === "dateLocation";
-  const timeRailError = preview.pageErrorKind === "dateLocation"
-    ? preview.pageError?.code === "SCOPE_UNAVAILABLE" ? "该日期及之前没有提交。" : preview.pageError?.message ?? null
-    : null;
   React.useEffect(() => {
     const firstDate = preview.commits[0] ? parseGitTime(preview.commits[0].committer.timestamp) : null;
     if (viewportSessionRef.current !== viewportSessionKey) {
@@ -316,6 +323,33 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     requestAnimationFrame(() => listRef.current?.focus());
   };
 
+  // A date jump puts the selected commit at the top of the list, right under the pinned date.
+  // It runs once the new selection has rendered (or on the next frames if the selection did not change).
+  const pendingDateJump = React.useRef(false);
+  const placeDateJump = React.useCallback(() => {
+    if (!pendingDateJump.current) return;
+    const element = listRef.current;
+    const oid = latestSelectedOid.current;
+    const offset = oid ? latestScrollModel.current.virtual.offset(oid) : undefined;
+    if (!element || offset === undefined) return;
+    pendingDateJump.current = false;
+    element.scrollTop = Math.max(0, offset - DAY_ROW_HEIGHT);
+    programmaticScrollTop.current = element.scrollTop;
+    lastScrollTop.current = element.scrollTop;
+    setRange(latestScrollModel.current.virtual.range(element.scrollTop, element.clientHeight, 12));
+  }, []);
+  const jumpToDate = React.useCallback(async (day: string): Promise<boolean> => {
+    pendingDateJump.current = false;
+    const found = await onLocateHistoryDate(day);
+    if (found) {
+      pendingDateJump.current = true;
+      requestAnimationFrame(() => requestAnimationFrame(placeDateJump));
+    }
+    return found;
+  }, [onLocateHistoryDate, placeDateJump]);
+  // Declared after the keep-selected-visible effect so the jump placement wins.
+  React.useLayoutEffect(() => { placeDateJump(); }, [selectedOid, virtual, placeDateJump]);
+
   const collapseGraph = () => {
     if (listRef.current) {
       listRef.current.scrollLeft = 0;
@@ -324,19 +358,6 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     setGraphExpanded(false);
   };
 
-  // The full-graph bar sits above the list. Scroll by its height when it appears or goes,
-  // so the rows stay where they were on screen.
-  const graphBarShown = React.useRef(false);
-  React.useLayoutEffect(() => {
-    if (graphBarShown.current === graphExpanded) return;
-    graphBarShown.current = graphExpanded;
-    const element = listRef.current;
-    if (!element) return;
-    element.scrollTop = Math.max(0, element.scrollTop + (graphExpanded ? GRAPH_BAR_HEIGHT : -GRAPH_BAR_HEIGHT));
-    programmaticScrollTop.current = element.scrollTop;
-    lastScrollTop.current = element.scrollTop;
-    setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, [graphExpanded, virtual]);
 
   const loadingEmpty = preview.state === "loading" && preview.commits.length === 0;
   const finishedEmpty = preview.state === "ready" && preview.commits.length === 0;
@@ -365,25 +386,19 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       <Button variant="outline" size="sm" onClick={() => { void (timeRailLoading ? onCancelHistoryDate() : onCancelPage()); }}>{timeRailLoading ? "取消定位" : "取消"}</Button>
     </div> : null}
 
-    {graphExpanded ? <div data-testid="graph-mode-bar" className="flex h-9 shrink-0 items-center gap-2 border-b border-line pr-2 pl-4 text-xs">
-      <span className="min-w-0 flex-1 truncate"><span className="font-semibold text-fg2">全部图线</span><span className="text-fg3"> · {visibleLaneCount} 列</span></span>
-      <Button data-testid="graph-collapse" variant="ghost" size="sm" className="shrink-0 gap-1 px-2"
-        aria-label="收起完整提交图" title="收起完整提交图，回到前 6 列（Esc）" onClick={event => {
-          event.stopPropagation();
-          collapseGraph();
-        }}><FoldHorizontal className="size-3.5" strokeWidth={1.75} aria-hidden="true" />收起</Button>
-    </div> : null}
 
     <div className="relative flex min-h-0 flex-1">
-    <HistoryTimeRail days={timeRailDays} sourceLabel={useActivityDays ? "活动统计日期" : "已载入提交日期"} partial={Boolean(useActivityDays && activityDaysPartial)}
-      sessionKey={viewportSessionKey}
-      viewportDay={viewportDay} loading={timeRailLoading} error={timeRailError} onChooseDate={onLocateHistoryDate}
-      onCancel={onCancelHistoryDate} onRetry={onRetryHistoryDate} />
+    <div className="relative flex min-h-0 min-w-0 flex-1">
+    <HistoryDayStrip listRef={listRef} markers={dayMarkers} rowHeight={DAY_ROW_HEIGHT} textLeft={graphColumnWidth + 24 + TEXT_INSET}
+      graphLaneCount={graphExpanded ? visibleLaneCount : null} onCollapseGraph={collapseGraph} onChooseDate={jumpToDate} />
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
       data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}
       data-loaded-count={preview.commits.length} data-window-pages={preview.windowPageCount}
-      className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none" style={{ overflowAnchor: "none" }} onScroll={handleScroll}
+      className={cn("min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none",
+        // The date rail stands in for the vertical scrollbar; keep the horizontal one for the expanded graph.
+        "[&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-0 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-line2")}
+      style={{ overflowAnchor: "none" }} onScroll={handleScroll}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
         if (event.key === "Escape" && graphExpanded) {
@@ -418,6 +433,9 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {preview.anchorRestorationSpace > 0 ? <div aria-hidden="true" style={{ height: preview.anchorRestorationSpace }} /> : null}
       </div>
     </div>
+    </div>
+    {preview.commits.length ? <HistoryTimeRail days={timeRailDays} partial={!useActivityDays || Boolean(activityDaysPartial)}
+      sessionKey={viewportSessionKey} viewportDay={viewportDay} loading={timeRailLoading} onChooseDate={jumpToDate} /> : null}
     </div>
   </nav>;
 }
@@ -470,7 +488,7 @@ function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, o
   const belowMask = graph?.below ?? 0;
   const aboveLanes = lanes ?? (graph ? (expanded ? graphAboveLanes(graph) : lanesInMask(graph.above)) : []);
   const hiddenRanges = graph?.hiddenThroughRanges ?? [];
-  const drawnWidth = expanded ? width : overflowX;
+  const drawnWidth = expanded ? width : Math.min(overflowX, width);
   const signature = graph
     ? `${graph.lane}/${graph.color}/${graph.above}/${graph.below}/${graph.hiddenLaneCount}/${graph.boundary ? 1 : 0}/${graph.segments.map(segment => `${segment.kind}:${segment.fromLane}-${segment.toLane}:${segment.color}`).join(",")}/${hiddenRanges.map(range => `${range.startLane}-${range.endLane}`).join(",")}`
     : `above:${aboveMask}`;
@@ -513,7 +531,7 @@ function DayRow({ entry, width, expanded, visibleLaneCount, contentMinWidth }: {
   const lanes = expanded ? graphAboveLanes(entry.graph) : lanesInMask(entry.graph.above);
   return <div role="presentation" className="flex items-stretch gap-2 pr-3 pl-2" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
     <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-day-bridge" />
-    <span className="flex flex-1 items-end justify-between pb-1.5 text-xs">
+    <span className="flex flex-1 items-end justify-between pb-1.5 text-xs" style={{ paddingLeft: TEXT_INSET }}>
       <span className="font-semibold text-fg2">{entry.label}</span>
     </span>
   </div>;
@@ -549,7 +567,7 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
   const isHead = headOid === commit.oid;
   const labels = refLabels({ refs, headReference, isHeadCommit: isHead, otherWorktrees, foldRemotes: true });
   return <div id={rowId(commit.oid)} role="option" aria-selected={selected} tabIndex={-1}
-    data-testid="commit-row" data-oid={commit.oid}
+    data-testid="commit-row" data-oid={commit.oid} data-commit-day={date ? dayKey(date) : undefined}
     title={[
       commit.graph.boundary ? "历史边界（浅克隆或父关系调整）" : undefined,
       !expanded && commit.graph.lane >= MAX_VISIBLE_LANES ? "此提交位于未显示的图线中" : undefined,
@@ -558,12 +576,13 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
     onClick={onSelect}
     style={{ minWidth: contentMinWidth }}
     className={cn(
-      "flex h-[60px] cursor-default items-stretch gap-2 rounded-[10px] pr-3 pl-2 outline-none",
-      "hover:bg-hover focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]",
-      selected && "bg-panel shadow-selected hover:bg-panel",
+      // Hover and selection colour only the text card, so graph lines run on uninterrupted.
+      "group flex h-[60px] cursor-default items-stretch gap-2 pr-1 pl-2 outline-none",
     )}>
     <GraphLanes graph={commit.graph} width={graphWidth} height={ROW.rowHeight} expanded={expanded} visibleLaneCount={visibleLaneCount} onExpand={onExpandGraph} isHead={isHead} />
-    <span className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+    <span className={cn("flex min-w-0 flex-1 flex-col justify-center gap-1 rounded-[10px] pr-2.5",
+      "group-hover:bg-hover group-focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]",
+      selected && "bg-panel shadow-selected group-hover:bg-panel")} style={{ paddingLeft: TEXT_INSET }}>
       <span className="flex min-w-0 items-center gap-1.5">
         {commit.isNewSinceLastSeen ? <span aria-label="上次查看后新增" data-testid="history-marker" data-marker-kind="new"
           title="上次查看后新增" className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
