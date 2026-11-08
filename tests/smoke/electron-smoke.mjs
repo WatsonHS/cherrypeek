@@ -76,9 +76,11 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository",
-    "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "locateCommit", "locateHistoryDate", "observeRepository", "onCoreStatusChanged", "onRepositoryObservationChanged", "openRepositorySession",
-    "readDiff", "readHistoryPage", "readMergeCommits", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
+    "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelFiles", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "cancelWorkspace", "chooseRepository",
+    "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository", "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation",
+    "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onRepositoryObservationChanged",
+    "onWorkspaceChanged", "openRepositorySession", "readBlame", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
+    "readWorkspaceStatus", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");

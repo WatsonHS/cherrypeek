@@ -141,8 +141,12 @@ test("blame accumulates chunks of the current stream only; a line from before a 
   assert.equal(view.tab, "history");
   assert.equal(view.selection.path.display, "src/old.ts");
   assert.deepEqual([view.focus.line, view.focus.originalLine, view.selectedCommit], [2, 11, oid("1")]);
+  const history = await api.answer("history", ok({ commit: version.commit, path: path("src/old.ts"), entries: [historyEntry(oid("1"), { parents: [] })], nextCursor: null }));
+  assert.equal(history.params.pathHex, hex("src/old.ts"));
+  await flush();
   const change = api.pending.find(item => item.kind === "change");
   assert.equal(change.params.pathHex, hex("src/old.ts"));
+  assert.equal(change.params.parentIndex, null, "a root commit found through blame compares with the empty tree");
   assert.equal(store.returnToLine(), 2);
   assert.equal(store.getView().selection.path.display, "src/new.ts");
   assert.equal(store.getView().tab, "content");

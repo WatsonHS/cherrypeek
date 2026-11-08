@@ -110,7 +110,7 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
             {last ? null : <span aria-hidden="true" className="text-line2">/</span>}
           </React.Fragment>;
         }) : <span className="px-1 text-[13px] text-fg3">选择左侧的文件或目录</span>}
-        {selection?.kind === "file" && view.content?.value ? <span className="pl-1 text-xs whitespace-nowrap text-fg3">
+        {selection?.kind === "file" && view.content?.value && view.content.value.path.rawHex === selection.path.rawHex ? <span className="pl-1 text-xs whitespace-nowrap text-fg3">
           {view.content.value.totalLines !== null ? `${view.content.value.totalLines.toLocaleString()} 行` : ""}
           {view.content.value.size !== null ? `${view.content.value.totalLines !== null ? " · " : ""}${formatBytes(view.content.value.size)}` : ""}
         </span> : null}

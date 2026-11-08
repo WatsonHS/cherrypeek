@@ -258,6 +258,13 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .topbar-activity { gap: 0; padding-inline: 4px; }
 }
 
+/* A narrow diff keeps its arrows and the display menu, without their text; the merge parent choice stays. */
+.diff-view { container-type: inline-size; }
+@container (max-width: 560px) {
+  .diff-hunk-count,
+  .diff-display-label { display: none; }
+}
+
 @media (max-width: 900px) {
   .topbar-repository { width: 100px; flex-basis: 100px; padding-inline: 4px; }
   .topbar-scope-picker { width: 110px; flex-basis: 110px; padding-inline: 4px; }

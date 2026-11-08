@@ -150,7 +150,7 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, leading, foc
     rootRef.current?.querySelector(`[data-hunk-start="${target}"]`)?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
   };
   const mark = focus && focusHunk !== null ? focus : null;
-  return <div ref={rootRef} data-testid="diff-view" data-layout={display.layout} data-wrap={display.wrap ? "true" : "false"}>
+  return <div ref={rootRef} data-testid="diff-view" className="diff-view" data-layout={display.layout} data-wrap={display.wrap ? "true" : "false"}>
     <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-line px-3 py-1">
       {leading}
       <div className="flex-1" />

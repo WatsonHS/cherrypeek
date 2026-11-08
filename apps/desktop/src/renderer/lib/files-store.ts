@@ -245,8 +245,8 @@ export class FilesStore {
     const samePath = target.path.rawHex === from.path.rawHex;
     this.update({ ...this.view, selection: target, tab: "history", focus, selectedCommit: block.oid, parentIndex: 0,
       history: samePath ? this.view.history : null, change: null });
-    void this.loadHistory(false);
-    void this.loadChange();
+    // The change is read once the history says whether the commit has a parent (a root compares with the empty tree).
+    void this.loadHistory(false).then(() => { if (this.view.change === null) void this.loadChange(); });
   }
 
   /** Back from a located commit to the content tab, at the line that was clicked. */

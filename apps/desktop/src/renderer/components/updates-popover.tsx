@@ -1,4 +1,5 @@
 import * as React from "react";
+import { ChevronDown } from "lucide-react";
 import type { RefSnapshotDiff, RepositoryObservation } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
@@ -34,9 +35,12 @@ export function UpdatesPopover({ observation, diff, loading, error, onLoad, onOb
   return <Popover open={open} onOpenChange={next => { setOpen(next); if (next) observation ? onLoad() : onObserve(); else onCancel(); }}>
     <PopoverTrigger asChild><button type="button" title={error ? `检查更新失败：${error}` : observation ? count ? `仓库有 ${count} 处更新` : incomplete ? "更新检查不完整" : "最近检查：没有发现引用变化" : "检查更新"}
       data-testid="updates-trigger" aria-label={triggerLabel}
-      className="topbar-updates flex h-8 shrink-0 items-center gap-1 rounded-xl px-1.5 text-xs text-fg2 hover:bg-hover">
-      <span aria-hidden="true" className={`size-1.5 rounded-full ${count || incomplete ? "bg-warn" : error ? "bg-bad" : "bg-line2"}`} />
+      className={count || incomplete
+        ? "topbar-updates flex h-[30px] shrink-0 items-center gap-1.5 rounded-[15px] bg-warn-bg px-2.5 text-[12.5px] whitespace-nowrap text-warn hover:bg-warn-bg/80"
+        : "topbar-updates flex h-8 shrink-0 items-center gap-1 rounded-xl px-1.5 text-xs text-fg2 hover:bg-hover"}>
+      <span aria-hidden="true" className={`shrink-0 rounded-full ${count || incomplete ? "size-[7px] bg-warn" : error ? "size-1.5 bg-bad" : "size-1.5 bg-line2"}`} />
       <span className="topbar-updates-label">{triggerLabel}</span>
+      {count || incomplete ? <ChevronDown className="size-3 shrink-0" strokeWidth={1.75} aria-hidden="true" /> : null}
     </button></PopoverTrigger>
     <PopoverContent align="end" className="flex w-[440px] flex-col p-0" data-testid="updates-popover">
       <div className="flex flex-col gap-1 border-b border-line px-4 py-3">

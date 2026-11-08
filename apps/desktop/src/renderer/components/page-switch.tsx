@@ -51,8 +51,8 @@ export function PageSwitch({ page, onChange, workspace, workspaceBranch, filesAv
       {icon}<span className="page-switch-label">{label}</span>{extra}
     </button>;
   return <nav aria-label="页面" data-testid="page-switch" className="page-switch mr-1.5 ml-0.5 flex shrink-0 gap-0.5 rounded-[10px] bg-sunken p-[3px]">
-    {item("commits", "提交", <CommitsIcon />, null, { title: `提交（${PAGE_SHORTCUTS.commits}）` })}
-    {item("files", "文件", <FilesIcon />, null, { title: filesAvailable ? `文件（${PAGE_SHORTCUTS.files}）` : "这个仓库还没有提交，没有可浏览的文件", disabled: !filesAvailable })}
+    {item("commits", "提交", <CommitsIcon />, null, { title: `提交（${PAGE_SHORTCUTS.commits}）`, ariaLabel: "提交页" })}
+    {item("files", "文件", <FilesIcon />, null, { title: filesAvailable ? `文件（${PAGE_SHORTCUTS.files}）` : "这个仓库还没有提交，没有可浏览的文件", ariaLabel: "文件页", disabled: !filesAvailable })}
     {item("workspace", "工作区", <WorkspaceIcon />, <>
       {workspaceBranch ? <span className="page-switch-branch max-w-[120px] truncate font-medium text-fg3">· {workspaceBranch}</span> : null}
       <Badge badge={workspace} />

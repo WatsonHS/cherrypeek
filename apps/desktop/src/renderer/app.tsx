@@ -576,8 +576,13 @@ export function App(): React.JSX.Element {
   }), [store, workspaceStore]);
   React.useEffect(() => {
     const onFocus = () => { if (document.visibilityState === "visible") void workspaceStore.readStatus(); };
+    const onVisibility = () => { if (document.visibilityState === "visible" && workspaceStore.getView().stale) void workspaceStore.readStatus(); };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [workspaceStore]);
   React.useEffect(() => { if (page === "workspace") void workspaceStore.readStatus(); }, [page, workspaceStore]);
   React.useEffect(() => () => workspaceStore.dispose(), [workspaceStore]);

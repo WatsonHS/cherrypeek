@@ -138,3 +138,44 @@ test("a bare repository never reads the working tree", () => {
   assert.equal(api.calls.length, 0);
   assert.equal(workspaceIndicatorFor(store.getView()).state, "bare");
 });
+
+test("slow reads stretch the gap and hint reads that find nothing new back off further", async () => {
+  const api = fakeApi();
+  let now = 10_000;
+  const store = new WorkspaceStore(api, () => now);
+  store.bind("repo", true, false);
+  now += 2_000; // the read takes two seconds
+  await api.resolveNext("status", ok(status([entry("a.rs", { unstaged: change() })])));
+  await api.resolveNext("diff", ok({ side: "unstaged", path: path("a.rs"), oldPath: null, kind: "text", patch: "", truncated: false, textLossy: false, oldSize: 1, newSize: 1 }));
+  assert.equal(store.readGap, 20_000, "ten times a two-second read");
+  const same = status([entry("a.rs", { unstaged: change() })]);
+  const gaps = [];
+  for (let round = 0; round < 6; round += 1) {
+    const reading = store.readStatus(true, "hint");
+    await api.resolveNext("status", ok(same));
+    await reading;
+    gaps.push(store.readGap);
+  }
+  assert.deepEqual(gaps, [6_000, 9_000, 15_000, 27_000, 51_000, 60_000], "quiet hint reads double the gap up to sixty seconds");
+  const explicit = store.readStatus(true);
+  await api.resolveNext("status", ok(same));
+  await explicit;
+  assert.equal(store.readGap, 3_000, "an explicit read drops the backoff");
+  store.dispose();
+});
+
+test("a hidden window only marks the status stale on change hints", async () => {
+  const api = fakeApi();
+  let visible = true;
+  const store = new WorkspaceStore(api, () => 10_000, () => false, () => visible);
+  store.bind("repo", true, false);
+  await api.resolveNext("status", ok(status([])));
+  visible = false;
+  store.markChanged();
+  assert.equal(store.getView().stale, true);
+  assert.equal(store.hasScheduledRead, false);
+  visible = true;
+  store.markChanged();
+  assert.equal(store.hasScheduledRead, true);
+  store.dispose();
+});

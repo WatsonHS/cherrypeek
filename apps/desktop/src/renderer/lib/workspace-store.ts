@@ -5,8 +5,10 @@ import type { WorkspaceIndicator } from "./workspace-indicator.js";
 /*
  * State of the workspace page and the top-bar badge (P4-09). The status is re-read when the
  * repository opens, the window gains focus, the main process hints that files changed, the page
- * is shown or the user refreshes. Reads are at least MIN_INTERVAL apart; a change hint keeps the
- * previous numbers but marks them stale until the next read lands.
+ * is shown or the user refreshes. A change hint keeps the previous numbers but marks them stale
+ * until the next read lands. Hints only lead to reads while the window is visible, and their reads
+ * keep a gap of at least 3 s or ten times the last read's duration (up to 60 s); hint reads that
+ * find nothing new double that gap, e.g. while a build writes to ignored directories.
  */
 
 export type WorkspaceApi = Pick<RepositorySessionApi, "readWorkspaceStatus" | "readWorkspaceDiff" | "readWorkspaceFile" | "cancelWorkspace">;
@@ -53,6 +55,7 @@ export const MAX_ENTRIES = 2000;
 export const PREVIEW_LINES = 200;
 export const PREVIEW_STEP = 500;
 const MIN_INTERVAL_MS = 3_000;
+const MAX_INTERVAL_MS = 60_000;
 const CHANGE_DEBOUNCE_MS = 1_000;
 const BUSY_RETRY_MS = 1_500;
 
@@ -100,8 +103,19 @@ export class WorkspaceStore {
   private contentIntent = 0;
   private lastReadAt = Number.NEGATIVE_INFINITY;
   private timer?: ReturnType<typeof setTimeout>;
+  /** Minimum gap between reads, from how long the last read took. */
+  private interval = MIN_INTERVAL_MS;
+  /** Extra gap after hint reads that found the same status. */
+  private hintBackoff = 0;
+  private lastSignature: string | null = null;
 
-  constructor(private readonly api: WorkspaceApi, private readonly now: () => number = () => Date.now(), private readonly fullFile: () => boolean = () => false) {}
+  constructor(private readonly api: WorkspaceApi, private readonly now: () => number = () => Date.now(), private readonly fullFile: () => boolean = () => false,
+    private readonly visible: () => boolean = () => typeof document === "undefined" || document.visibilityState === "visible") {}
+
+  /** The current gap before a hint may trigger another read; exposed for tests and diagnostics. */
+  get readGap(): number { return this.interval + this.hintBackoff; }
+
+  get hasScheduledRead(): boolean { return this.timer !== undefined; }
 
   getView = (): WorkspaceView => this.view;
   subscribe = (listener: () => void): (() => void) => {
@@ -117,6 +131,9 @@ export class WorkspaceStore {
     this.contentIntent += 1;
     this.clearTimer();
     this.lastReadAt = Number.NEGATIVE_INFINITY;
+    this.interval = MIN_INTERVAL_MS;
+    this.hintBackoff = 0;
+    this.lastSignature = null;
     this.update(sameRepository ? { ...this.view, supported, bare } : { ...initialView(), repoKey, supported, bare });
     if (repoKey && supported && !bare) void this.readStatus(true);
   }
@@ -125,28 +142,35 @@ export class WorkspaceStore {
   markChanged(): void {
     if (!this.canRead()) return;
     if (!this.view.stale) this.update({ ...this.view, stale: true });
-    this.schedule(Math.max(CHANGE_DEBOUNCE_MS, this.lastReadAt + MIN_INTERVAL_MS - this.now()));
+    // A hidden window reads again when it is shown or focused.
+    if (!this.visible()) return;
+    if (this.timer) return;
+    this.schedule(Math.max(CHANGE_DEBOUNCE_MS, this.lastReadAt + this.readGap - this.now()), "hint");
   }
 
   /** Re-reads unless the last read is recent; `force` is for explicit refreshes and repository changes. */
-  async readStatus(force = false): Promise<void> {
+  async readStatus(force = false, reason: "hint" | "request" = "request"): Promise<void> {
     if (!this.canRead()) return;
-    const wait = this.lastReadAt + MIN_INTERVAL_MS - this.now();
+    // Explicit reads (open, focus, page, refresh) drop the backoff that quiet hint reads built up.
+    if (reason === "request") this.hintBackoff = 0;
+    const wait = this.lastReadAt + this.interval - this.now();
     if (!force && wait > 0) {
-      if (this.view.stale) this.schedule(wait);
+      if (this.view.stale) this.schedule(wait, "request");
       return;
     }
     this.clearTimer();
     const intent = ++this.statusIntent;
     const repoKey = this.view.repoKey;
-    this.lastReadAt = this.now();
+    const started = this.now();
+    this.lastReadAt = started;
     this.update({ ...this.view, loading: true });
     const result = await settle(this.api.readWorkspaceStatus({ maxEntries: MAX_ENTRIES }));
     if (intent !== this.statusIntent || repoKey !== this.view.repoKey) return;
+    this.interval = Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, (this.now() - started) * 10));
     if (!result.ok) {
       if (result.error.code === "BUSY" || result.error.code === "CANCELLED" || result.error.code === "STALE_CONTEXT") {
         this.update({ ...this.view, loading: false });
-        this.schedule(BUSY_RETRY_MS);
+        this.schedule(BUSY_RETRY_MS, reason);
         return;
       }
       if (result.error.code === "UNKNOWN_METHOD") {
@@ -157,6 +181,9 @@ export class WorkspaceStore {
       return;
     }
     const status = result.value;
+    const signature = statusSignature(status);
+    this.hintBackoff = reason === "hint" && signature === this.lastSignature ? Math.min(MAX_INTERVAL_MS - this.interval, Math.max(this.hintBackoff * 2, this.interval)) : 0;
+    this.lastSignature = signature;
     const items = workspaceItems(status);
     const kept = this.view.selection && items.some(item => item.group === this.view.selection!.group && item.entry.path.rawHex === this.view.selection!.pathHex);
     const first = items[0];
@@ -228,11 +255,11 @@ export class WorkspaceStore {
     return Boolean(this.view.repoKey && this.view.supported && !this.view.bare);
   }
 
-  private schedule(delay: number): void {
+  private schedule(delay: number, reason: "hint" | "request"): void {
     this.clearTimer();
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.readStatus(true);
+      void this.readStatus(true, reason);
     }, Math.max(0, delay));
   }
 
@@ -245,6 +272,13 @@ export class WorkspaceStore {
     this.view = next;
     for (const listener of this.listeners) listener();
   }
+}
+
+/** What the badge and list show, so a re-read that finds the same can be told apart cheaply. */
+function statusSignature(status: WorkspaceStatus): string {
+  const change = (value: WorkspaceChange | null) => value ? `${value.status}:${value.additions ?? "-"}:${value.deletions ?? "-"}` : "";
+  return [status.headOid, status.operation, status.complete, status.totalPaths,
+    ...status.entries.map(entry => `${entry.path.rawHex}|${change(entry.staged)}|${change(entry.unstaged)}|${entry.untracked ? entry.untrackedSize : ""}|${entry.conflict ?? ""}`)].join("\n");
 }
 
 async function settle<T>(promise: Promise<RepositorySessionResult<T>>): Promise<RepositorySessionResult<T>> {

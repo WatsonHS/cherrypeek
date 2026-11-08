@@ -6,6 +6,9 @@ import { cn } from "../lib/utils.js";
 import { workspaceHeadText } from "../lib/workspace-indicator.js";
 import { workspaceItems, type WorkspaceGroup, type WorkspaceItem, type WorkspaceView } from "../lib/workspace-store.js";
 import { DiffView } from "./diff-view.js";
+import { SyntaxLine } from "./syntax-text.js";
+import { languageForPath } from "../lib/syntax/languages.js";
+import { useSyntaxLines } from "../lib/syntax/highlight.js";
 import { PlaceholderBox } from "./placeholder.js";
 import { Button } from "./ui/button.js";
 
@@ -205,9 +208,14 @@ function WorkspaceFileBody({ file, conflict, canLoadMore, onLoadMore, loading }:
     notFile: "这个路径不是普通文件。",
     text: "",
   }[file.kind];
+  const lines = React.useMemo(() => {
+    const split = file.text.split("\n");
+    if (split.at(-1) === "") split.pop();
+    return split;
+  }, [file.text]);
+  const language = React.useMemo(() => conflict ? null : languageForPath(file.path.display), [conflict, file.path.display]);
+  const tokens = useSyntaxLines(file.kind === "text" ? lines : null, language);
   if (note) return <p className="m-0 px-4 py-3 text-xs text-fg3" data-testid="workspace-file-note">{note}</p>;
-  const lines = file.text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
   let region: "ours" | "theirs" | null = null;
   return <div data-testid="workspace-file-text">
     {file.textLossy ? <p className="m-0 px-4 py-2 text-xs text-warn">内容含有无法按 UTF-8 无损解码的数据。</p> : null}
@@ -223,7 +231,7 @@ function WorkspaceFileBody({ file, conflict, canLoadMore, onLoadMore, loading }:
         }
         return <div key={index} className={cn("flex min-h-[21px] min-w-max whitespace-pre", tone)}>
           <span className="w-12 shrink-0 pr-2 text-right text-fg3 select-none">{index + 1}</span>
-          <span className="pr-5 pl-3">{text}</span>
+          <span className="pr-5 pl-3">{conflict ? text : <SyntaxLine tokens={tokens?.[index] ?? null} fallback={text} />}</span>
         </div>;
       })}
     </div>
