@@ -59,20 +59,27 @@ try {
   const oldSummary = await oldSelected.locator("span.truncate").first().innerText();
   assert.ok(oldOid);
   assert.equal(oldSummary, "Commit 6");
-  const commit10Oid = git(repository, "log", "--format=%H%x09%s", "HEAD").split("\n")
-    .find(line => line.endsWith("\tCommit 10"))?.split("\t", 1)[0];
-  assert.ok(commit10Oid, "fixture should have an independently identifiable Commit 10 OID");
+  // The anchor needs enough commits below it to be scrolled to the very top of a tall list,
+  // and must stay inside the refreshed first page.
+  const anchorCommitOid = git(repository, "log", "--format=%H%x09%s", "HEAD").split("\n")
+    .find(line => line.endsWith("\tCommit 30"))?.split("\t", 1)[0];
+  assert.ok(anchorCommitOid, "fixture should have an independently identifiable Commit 30 OID");
+  // The list is virtualized: walk up from the end until the anchor row is rendered.
   await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
-  const commit10Row = page.locator(`[data-testid="commit-row"][data-oid="${commit10Oid}"]`);
-  await commit10Row.scrollIntoViewIfNeeded();
+  const anchorCommitRow = page.locator(`[data-testid="commit-row"][data-oid="${anchorCommitOid}"]`);
+  for (let step = 0; step < 20 && !(await anchorCommitRow.count()); step += 1) {
+    await list.evaluate(element => { element.scrollTop -= element.clientHeight / 2; });
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+  }
+  await anchorCommitRow.scrollIntoViewIfNeeded();
   await list.evaluate((element, oid) => {
     const row = element.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`);
     if (row) element.scrollTop += row.getBoundingClientRect().top - element.getBoundingClientRect().top;
-  }, commit10Oid);
+  }, anchorCommitOid);
   await page.evaluate(() => new Promise(requestAnimationFrame));
   const anchorBeforeRefresh = await visibleAnchor(page);
-  assert.equal(anchorBeforeRefresh?.oid, commit10Oid, "the refresh should capture Commit 10 as its visible top anchor");
-  assert.ok(Math.abs(anchorBeforeRefresh.offset) <= 8, `Commit 10 should be aligned near the viewport top: ${JSON.stringify(anchorBeforeRefresh)}`);
+  assert.equal(anchorBeforeRefresh?.oid, anchorCommitOid, "the refresh should capture Commit 30 as its visible top anchor");
+  assert.ok(Math.abs(anchorBeforeRefresh.offset) <= 8, `Commit 30 should be aligned near the viewport top: ${JSON.stringify(anchorBeforeRefresh)}`);
   const newHead = await createCommit(repository, 206);
   const repositoryAfterExternalCommit = await snapshotTree(repository);
   assert.equal(newHead, git(repository, "rev-parse", "HEAD"));
@@ -83,7 +90,7 @@ try {
   await page.getByText(/来自 .+ 的观察/).waitFor({ state: "visible" });
   await page.getByText(/这条提交不在当前已加载窗口.*不推断整个范围的可达性/).waitFor({ state: "visible" });
   const firstPageOids = git(repository, "rev-list", newHead).split("\n").slice(0, 200);
-  assert.ok(firstPageOids.includes(anchorBeforeRefresh.oid), "Commit 10 must remain inside the refreshed first page");
+  assert.ok(firstPageOids.includes(anchorBeforeRefresh.oid), "Commit 30 must remain inside the refreshed first page");
   await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`),
     anchorBeforeRefresh.oid, { timeout: 5000 });
   await page.waitForFunction(({ oid, offset }) => {
