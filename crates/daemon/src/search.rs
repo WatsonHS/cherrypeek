@@ -310,10 +310,21 @@ pub(crate) fn activity_stats(
             let mut authors_truncated = false;
             let mut path_batch = Vec::<ActivityCandidate>::with_capacity(PATH_DIFF_BATCH_SIZE);
             if let Some(connection) = connection {
-                let mut statement = connection.prepare(SEARCH_SCAN_SQL).map_err(map_sql_error)?;
-                let mut rows = statement
-                    .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+                let mut statement = connection
+                    .prepare(scan_sql(&compiled.query.oid_prefix))
                     .map_err(map_sql_error)?;
+                let mut rows = if compiled.query.oid_prefix.is_empty() {
+                    statement.query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+                } else {
+                    let upper = oid_prefix_upper_bound(&compiled.query.oid_prefix);
+                    statement.query(params![
+                        snapshot.snapshot_key,
+                        to_i64(snapshot.watermark)?,
+                        &compiled.query.oid_prefix,
+                        upper
+                    ])
+                }
+                .map_err(map_sql_error)?;
                 while let Some(row) = rows.next().map_err(map_sql_error)? {
                     check_active(cancelled, deadline)?;
                     let Some(key) = matching_row_key(row, &compiled, cancelled, deadline)? else {
@@ -675,10 +686,21 @@ fn collect_page(
         anchor_found = Some(true);
     }
     if let Some(connection) = connection {
-        let mut statement = connection.prepare(SEARCH_SCAN_SQL).map_err(map_sql_error)?;
-        let mut rows = statement
-            .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+        let mut statement = connection
+            .prepare(scan_sql(&compiled.query.oid_prefix))
             .map_err(map_sql_error)?;
+        let mut rows = if compiled.query.oid_prefix.is_empty() {
+            statement.query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+        } else {
+            let upper = oid_prefix_upper_bound(&compiled.query.oid_prefix);
+            statement.query(params![
+                snapshot.snapshot_key,
+                to_i64(snapshot.watermark)?,
+                &compiled.query.oid_prefix,
+                upper
+            ])
+        }
+        .map_err(map_sql_error)?;
         let mut batch = Vec::with_capacity(PATH_DIFF_BATCH_SIZE);
         while let Some(row) = rows.next().map_err(map_sql_error)? {
             check_active(cancelled, deadline)?;
@@ -956,25 +978,26 @@ fn matching_row_key(
     let _ordinal = u64::try_from(row.get::<_, i64>(0).map_err(map_sql_error)?)
         .map_err(|_| corrupt_index("Metadata member ordinal is invalid"))?;
     let oid: String = row.get(1).map_err(map_sql_error)?;
-    let author_timestamp: String = row.get(2).map_err(map_sql_error)?;
-    let committer_timestamp: String = row.get(3).map_err(map_sql_error)?;
-    let author_name: String = row.get(4).map_err(map_sql_error)?;
-    let author_email: String = row.get(5).map_err(map_sql_error)?;
-    let committer_name: String = row.get(6).map_err(map_sql_error)?;
-    let committer_email: String = row.get(7).map_err(map_sql_error)?;
-    if !identity_field_matches(&compiled.query.authors, &author_name, &author_email)
-        || !identity_field_matches(
-            &compiled.query.committers,
-            &committer_name,
-            &committer_email,
-        )
-        || !oid.starts_with(&compiled.query.oid_prefix)
-    {
+    if !compiled.query.oid_prefix.is_empty() && !oid.starts_with(&compiled.query.oid_prefix) {
         return Ok(None);
     }
-    let timestamp_text = match compiled.query.time_field {
-        SearchTimeField::Author => &author_timestamp,
-        SearchTimeField::Committer => &committer_timestamp,
+    if !compiled.query.authors.is_empty() {
+        let name: String = row.get(4).map_err(map_sql_error)?;
+        let email: String = row.get(5).map_err(map_sql_error)?;
+        if !identity_field_matches(&compiled.query.authors, &name, &email) {
+            return Ok(None);
+        }
+    }
+    if !compiled.query.committers.is_empty() {
+        let name: String = row.get(6).map_err(map_sql_error)?;
+        let email: String = row.get(7).map_err(map_sql_error)?;
+        if !identity_field_matches(&compiled.query.committers, &name, &email) {
+            return Ok(None);
+        }
+    }
+    let timestamp_text: String = match compiled.query.time_field {
+        SearchTimeField::Author => row.get(2).map_err(map_sql_error)?,
+        SearchTimeField::Committer => row.get(3).map_err(map_sql_error)?,
     };
     let timestamp = timestamp_text
         .parse::<i64>()
@@ -1004,6 +1027,10 @@ fn message_matches(row: &rusqlite::Row<'_>, compiled: &CompiledQuery) -> Result<
     let message: String = row.get(8).map_err(map_sql_error)?;
     Ok(if compiled.query.case_sensitive {
         message.contains(&compiled.message_needle)
+    } else if message.is_ascii() && compiled.message_needle.is_ascii() {
+        message
+            .to_ascii_lowercase()
+            .contains(&compiled.message_needle)
     } else {
         default_case_fold_str(&message).contains(&compiled.message_needle)
     })
@@ -1661,7 +1688,20 @@ fn snapshot_changed() -> IndexError {
 }
 
 const SEARCH_SCAN_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 ORDER BY s.ordinal";
+const SEARCH_SCAN_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s INDEXED BY snapshot_commits_oid JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND s.oid>=?3 AND s.oid<?4 ORDER BY s.ordinal";
 const SEARCH_ONE_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.oid=?3 LIMIT 1";
+
+fn scan_sql(oid_prefix: &str) -> &'static str {
+    if oid_prefix.is_empty() {
+        SEARCH_SCAN_SQL
+    } else {
+        SEARCH_SCAN_OID_SQL
+    }
+}
+
+fn oid_prefix_upper_bound(prefix: &str) -> String {
+    format!("{prefix}g")
+}
 
 #[cfg(test)]
 mod tests {
@@ -1773,6 +1813,7 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE snapshots(snapshot_key TEXT PRIMARY KEY);
                  CREATE TABLE snapshot_commits(snapshot_key TEXT, ordinal INTEGER, oid TEXT);
+                 CREATE INDEX snapshot_commits_oid ON snapshot_commits(snapshot_key, oid);
                  CREATE TABLE commits(
                     oid TEXT PRIMARY KEY, author_timestamp TEXT, committer_timestamp TEXT,
                     author_name TEXT, author_email TEXT, committer_name TEXT, committer_email TEXT,
@@ -1852,6 +1893,102 @@ mod tests {
         assert_eq!(page.commits.len(), 1);
         assert_eq!(page.commits[0].oid, "c".repeat(40));
         assert_eq!(page.anchor_found, Some(true));
+    }
+
+    #[test]
+    fn oid_prefix_range_keeps_snapshot_watermark_and_combined_filters() {
+        let connection = search_connection();
+        let candidates = [
+            (
+                3,
+                "abcd000000000000000000000000000000000000",
+                "Needle",
+                "400",
+                "Keep this",
+            ),
+            (
+                4,
+                "abcd100000000000000000000000000000000000",
+                "Other",
+                "400",
+                "Keep this",
+            ),
+            (
+                5,
+                "abcd200000000000000000000000000000000000",
+                "Needle",
+                "400",
+                "Keep this",
+            ),
+        ];
+        for (ordinal, oid, author, timestamp, message) in candidates {
+            connection
+                .execute(
+                    "INSERT INTO commits VALUES(?1,?2,?2,?3,'a@example.test','Committer','c@example.test',?4,'[]','summary',0,'+0000','+0000',0)",
+                    params![oid, timestamp, author, message],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_commits VALUES('snapshot',?1,?2)",
+                    params![ordinal, oid],
+                )
+                .unwrap();
+        }
+
+        let mut compiled = query();
+        compiled.query.oid_prefix = "abcd".into();
+        compiled.query.authors = vec![commitscope_core::SearchIdentity {
+            name: "Needle".into(),
+            email: "a@example.test".into(),
+        }];
+        compiled.query.from_timestamp = Some(350);
+        compiled.query.to_timestamp = Some(450);
+        compiled.message_needle = "keep".into();
+        let mut snapshot = snapshot();
+        snapshot.watermark = 5;
+
+        let page = collect_page(
+            None,
+            None,
+            Some(&connection),
+            &snapshot,
+            &compiled,
+            10,
+            None,
+            None,
+            false,
+            &AtomicBool::new(false),
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(page.matched_count, 1);
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].oid, candidates[0].1);
+    }
+
+    #[test]
+    fn message_matching_keeps_ascii_fast_path_and_unicode_casefold() {
+        fn matches(message: &str, needle: &str) -> bool {
+            let connection = Connection::open_in_memory().unwrap();
+            let compiled = CompiledQuery {
+                message_needle: default_case_fold_str(needle),
+                ..query()
+            };
+            let mut statement = connection
+                .prepare(
+                    "SELECT 0,'oid','1','1','a','a','c','c',?1,'[]','summary',0,'+0000','+0000',0",
+                )
+                .unwrap();
+            let mut rows = statement.query([message]).unwrap();
+            message_matches(rows.next().unwrap().unwrap(), &compiled).unwrap()
+        }
+
+        assert!(matches("A FAST ASCII Message", "fast ascii"));
+        assert!(matches("Straße ος", "STRASSE"));
+        assert!(matches("Straße ος", "ΟΣ"));
+        assert!(!matches("A FAST ASCII Message", "slow"));
     }
 
     #[test]

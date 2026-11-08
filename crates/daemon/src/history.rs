@@ -81,6 +81,11 @@ struct TopologyEntry {
     parents: Vec<String>,
 }
 
+struct LocatedCommit {
+    oid: String,
+    page_offset: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct HistoryPage {
     pub commits: Vec<HistoryCommit>,
@@ -183,10 +188,35 @@ impl HistoryState {
         deadline: Instant,
         emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<T, PreviewError> {
-        if !(1..=500).contains(&params.page_size) {
+        self.with_located_target(
+            executable,
+            discovered,
+            LocatedCommit {
+                oid: params.oid.clone(),
+                page_offset: None,
+            },
+            params.page_size,
+            cancelled,
+            deadline,
+            emit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_located_target<T>(
+        &self,
+        executable: &Path,
+        discovered: &DiscoveredRepository,
+        target: LocatedCommit,
+        page_size: u16,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+        emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
+    ) -> Result<T, PreviewError> {
+        if !(1..=500).contains(&page_size) {
             return Err(invalid_request("pageSize must be between 1 and 500"));
         }
-        validate_topology_oid(&params.oid, discovered.oid_length)?;
+        validate_topology_oid(&target.oid, discovered.oid_length)?;
         let mut query = match self.query.try_lock() {
             Ok(query) => query,
             Err(TryLockError::WouldBlock) => return Err(busy_error()),
@@ -196,15 +226,15 @@ impl HistoryState {
         };
         let same_query = query
             .as_ref()
-            .is_some_and(|query| query.page_size == params.page_size);
+            .is_some_and(|query| query.page_size == page_size);
         if same_query {
             return with_page_in_query(
                 query.as_mut().expect("matching query exists"),
                 executable,
                 discovered,
                 None,
-                Some(&params.oid),
-                params.page_size,
+                Some(target),
+                page_size,
                 cancelled,
                 deadline,
                 emit,
@@ -215,14 +245,14 @@ impl HistoryState {
             .lock()
             .map_err(|_| repository::internal_error("History baseline is unavailable"))?
             .clone();
-        let mut fresh = Query::new(params.page_size, baseline)?;
+        let mut fresh = Query::new(page_size, baseline)?;
         let result = with_page_in_query(
             &mut fresh,
             executable,
             discovered,
             None,
-            Some(&params.oid),
-            params.page_size,
+            Some(target),
+            page_size,
             cancelled,
             deadline,
             emit,
@@ -243,20 +273,24 @@ impl HistoryState {
         if !(1..=500).contains(&params.page_size) {
             return Err(invalid_request("pageSize must be between 1 and 500"));
         }
-        let oid = locate_date_oid(
+        if discovered.scope_tips.is_empty() {
+            return Err(no_commits_before_date());
+        }
+        verify_graph_fingerprint(discovered, cancelled, deadline)?;
+        let target = locate_date_target(
             executable,
             discovered,
+            params.page_size,
             params.before_timestamp,
             cancelled,
             deadline,
         )?;
-        self.with_located_page(
+        verify_graph_fingerprint(discovered, cancelled, deadline)?;
+        self.with_located_target(
             executable,
             discovered,
-            &LocateCommitParams {
-                oid,
-                page_size: params.page_size,
-            },
+            target,
+            params.page_size,
             cancelled,
             deadline,
             emit,
@@ -270,7 +304,7 @@ fn with_page_in_query<T>(
     executable: &Path,
     discovered: &DiscoveredRepository,
     cursor: Option<&str>,
-    locate_oid: Option<&str>,
+    locate: Option<LocatedCommit>,
     page_size: u16,
     cancelled: &AtomicBool,
     deadline: Instant,
@@ -280,25 +314,33 @@ fn with_page_in_query<T>(
     if query.page_size != page_size {
         return Err(invalid_cursor());
     }
-    let located = locate_oid.is_some();
-    let offset = if let Some(oid) = locate_oid {
+    let located = locate.is_some();
+    let offset = if let Some(target) = locate {
         if discovered.scope_tips.is_empty() {
             return Err(scope_unavailable());
         }
-        if let Some(page) = query
-            .cached_pages
-            .iter()
-            .find(|page| page.commits.iter().any(|commit| commit.commit.oid == oid))
-        {
+        if let Some(page) = query.cached_pages.iter().find(|page| {
+            page.commits
+                .iter()
+                .any(|commit| commit.commit.oid == target.oid)
+        }) {
             page.offset
+        } else if let Some(offset) = target.page_offset {
+            offset
         } else {
             if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
                 query.reset_walk();
                 return Err(error);
             }
             query.reset_stream();
-            let offset =
-                locate_oid_offset(executable, discovered, oid, page_size, cancelled, deadline)?;
+            let offset = locate_oid_offset(
+                executable,
+                discovered,
+                &target.oid,
+                page_size,
+                cancelled,
+                deadline,
+            )?;
             if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
                 query.reset_walk();
                 return Err(error);
@@ -454,13 +496,14 @@ fn locate_oid_offset(
     Err(scope_unavailable())
 }
 
-fn locate_date_oid(
+fn locate_date_target(
     executable: &Path,
     discovered: &DiscoveredRepository,
+    page_size: u16,
     before_timestamp: i64,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<String, PreviewError> {
+) -> Result<LocatedCommit, PreviewError> {
     if discovered.scope_tips.is_empty() {
         return Err(no_commits_before_date());
     }
@@ -477,7 +520,8 @@ fn locate_date_oid(
     let mut stream = git
         .stream_lines(Path::new(&discovered.info.path), &args, DATE_LINE_LIMIT)
         .map_err(map_git_failure)?;
-    let mut best: Option<(i64, String)> = None;
+    let mut best: Option<(i64, u32, String)> = None;
+    let mut ordinal = 0_u32;
     while let Some(line) = stream
         .next_line(cancelled, deadline)
         .map_err(map_git_failure)?
@@ -502,12 +546,20 @@ fn locate_date_oid(
         if timestamp < before_timestamp
             && best
                 .as_ref()
-                .is_none_or(|(best_timestamp, _)| timestamp > *best_timestamp)
+                .is_none_or(|(best_timestamp, _, _)| timestamp > *best_timestamp)
         {
-            best = Some((timestamp, oid.to_ascii_lowercase()));
+            best = Some((timestamp, ordinal, oid.to_ascii_lowercase()));
         }
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            repository::resource_limit("History position exceeds the supported cursor range")
+        })?;
     }
-    best.map(|(_, oid)| oid).ok_or_else(no_commits_before_date)
+    let page_size = u32::from(page_size);
+    best.map(|(_, ordinal, oid)| LocatedCommit {
+        oid,
+        page_offset: Some(ordinal / page_size * page_size),
+    })
+    .ok_or_else(no_commits_before_date)
 }
 
 fn check_page_active(
