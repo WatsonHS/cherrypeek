@@ -196,6 +196,7 @@ export function App(): React.JSX.Element {
   const [handoffOpen, setHandoffOpen] = React.useState(false);
   const [handoffTarget, setHandoffTarget] = React.useState<HandoffTarget | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
+  const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
   const pathEdited = React.useRef(false);
@@ -513,6 +514,13 @@ export function App(): React.JSX.Element {
     if (!oid || searchStore.getView().active) return false;
     return applySelectionIfCurrent(selectionIntent, intent, store.getView().session, oid, setSelectedOid);
   }, [selectionIntent, store, searchStore]);
+  /** Brings back the newest page when the window has moved past it; the selection then falls on the newest commit. */
+  const jumpToNewest = React.useCallback(async (): Promise<boolean> => {
+    if (store.getView().windowPreviousCursor === null) return true;
+    selectionIntent.invalidate();
+    anchorBeforeRefresh.current = undefined;
+    return store.restoreHistoryWindow({ cursor: null, selectedOid: undefined, selectedCommit: null, anchor: null });
+  }, [selectionIntent, store]);
   const locateHistoryDate = React.useCallback(async (day: string): Promise<boolean> => {
     const beforeTimestamp = inputDateRange(day, day)?.toTimestamp;
     return beforeTimestamp === null || beforeTimestamp === undefined ? false : locateDateTimestamp(beforeTimestamp);
@@ -757,7 +765,10 @@ export function App(): React.JSX.Element {
   const detailSelectionIsLoaded = searchView.active
     ? Boolean(displayedOid && searchView.window?.commits.some(commit => commit.oid === displayedOid))
     : Boolean(displayedOid && view.commits.some(commit => commit.oid === displayedOid));
-  React.useEffect(() => detailStore.bind(detailSessionKey, displayedOid, detailSelectionIsLoaded), [detailStore, detailSessionKey, displayedOid, detailSelectionIsLoaded]);
+  // While the time slider is dragged the selection changes several times a second; details load once it settles.
+  React.useEffect(() => {
+    if (!historyScrubbing) detailStore.bind(detailSessionKey, displayedOid, detailSelectionIsLoaded);
+  }, [detailStore, detailSessionKey, displayedOid, detailSelectionIsLoaded, historyScrubbing]);
   React.useEffect(() => {
     const refreshDetailHint = () => { void detailStore.refreshUpdate(); };
     window.addEventListener("focus", refreshDetailHint);
@@ -847,8 +858,9 @@ export function App(): React.JSX.Element {
             onLoadWindowEdge={direction => store.loadWindowEdge(direction)}
             onViewportAnchor={setViewportAnchor}
             activityDays={historyActivity?.days ?? null}
-            activityDaysPartial={historyActivity ? !historyActivity.coverage.complete || historyActivity.daysTruncated : false}
-            onLocateHistoryDate={locateHistoryDate} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
+            activityDaysPartial={historyActivity ? !historyActivity.coverage.complete : false}
+            activityDaysTruncated={historyActivity?.daysTruncated ?? false}
+            onLocateHistoryDate={locateHistoryDate} onLocateHistoryTime={locateDateTimestamp} onScrubbingChange={setHistoryScrubbing} onJumpToNewest={jumpToNewest} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}

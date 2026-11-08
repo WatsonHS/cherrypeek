@@ -458,6 +458,8 @@ export class RepositorySessionStore {
     this.invalidateMetadataIndexStatus();
     const direction = cursor === this.view.windowPreviousCursor ? "before" : "after";
     if ((direction === "before" ? this.pages[0]?.previousCursor : this.pages.at(-1)?.nextCursor) !== cursor) return undefined;
+    // A prefetch waits for a date jump instead of cancelling it; the list prefetches again once it lands.
+    if (kind === "prefetch" && this.pageRequest && this.view.pageRequestKind === "dateLocation") return undefined;
     const token = ++this.pageOperation;
     const previous = this.pageRequest;
     if (previous) {

@@ -18,7 +18,7 @@ try {
       "virtual-window": resolve(root, "apps/desktop/src/renderer/lib/virtual-window.ts"),
       "graph": resolve(root, "apps/desktop/src/renderer/lib/graph.ts"),
       "ref-labels": resolve(root, "apps/desktop/src/renderer/lib/ref-labels.ts"),
-      "time-scale": resolve(root, "apps/desktop/src/renderer/lib/time-scale.ts"),
+      "time-track": resolve(root, "apps/desktop/src/renderer/lib/time-track.ts"),
       "handoff-prompt": resolve(root, "apps/desktop/src/renderer/lib/handoff-prompt.ts"),
     },
     outdir: buildDir,

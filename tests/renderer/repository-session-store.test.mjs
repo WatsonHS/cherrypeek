@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const { RepositorySessionStore } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "repository-session-store.mjs")));
 
-const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "locateCommit", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"];
+const METHODS = ["openRepositorySession", "getRepositorySession", "readHistoryPage", "locateCommit", "locateHistoryDate", "recordRepositoryView", "closeRepositorySession", "refreshRepositorySession", "getRepositoryNavigation", "selectRepositoryScope", "getRefMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex"];
 
 /** Session API whose every call waits until the test answers it. */
 function fakeApi() {
@@ -914,4 +914,21 @@ test("cancel closes and drains a pending scope transaction", async () => {
   await switching;
   assert.equal(store.getView().state, "cancelled");
   assert.equal(store.getView().session, null);
+});
+
+test("a prefetch waits for a running date jump instead of cancelling it", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a", { nextCursor: "cursor-200" });
+  const base = makePreview(session).commits[0];
+  const target = { ...base, oid: "ab".repeat(20), summary: "target", committer: { ...base.committer, timestamp: "100" } };
+  const locating = store.locateHistoryDate(150);
+  await settled();
+  assert.equal(store.getView().pageRequestKind, "dateLocation");
+  // Scrolling right after a jump asks for the next page; it must not cancel the jump.
+  await store.readPage("cursor-200");
+  assert.equal(fake.pending.readHistoryPage.length, 0, "no page read starts while the date jump runs");
+  await fake.answer("locateHistoryDate", ok(makeHistoryPage(session, { offset: 300, cursor: "cursor-300", commits: [target] })));
+  assert.equal(await locating, target.oid);
+  assert.equal(store.getView().commits[0].oid, target.oid);
 });

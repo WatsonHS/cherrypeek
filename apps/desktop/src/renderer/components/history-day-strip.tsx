@@ -1,7 +1,8 @@
 import * as React from "react";
-import { CalendarDays, FoldHorizontal } from "lucide-react";
+import { ArrowUp, CalendarDays, FoldHorizontal } from "lucide-react";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
+import { HistoryDateCalendar, type CalendarDay } from "./history-date-calendar.js";
 
 export interface DayMarker {
   /** Top of the day row inside the scrolled list. */
@@ -20,9 +21,14 @@ export interface DayMarker {
  * of the list it covers the first day row exactly. Only the text column gets a background, so
  * graph lines stay continuous.
  */
-export function HistoryDayStrip({ listRef, markers, rowHeight, textLeft, graphLaneCount, onCollapseGraph, onChooseDate }: {
+export function HistoryDayStrip({ listRef, markers, days, atNewest, onJumpToNewest, rowHeight, textLeft, graphLaneCount, onCollapseGraph, onChooseDate }: {
   listRef: React.RefObject<HTMLDivElement | null>;
   markers: DayMarker[];
+  /** Commits per day for shading the calendar. */
+  days: CalendarDay[];
+  /** The loaded window starts at the newest commit. */
+  atNewest: boolean;
+  onJumpToNewest(): void;
   rowHeight: number;
   /** Left edge of day-row labels inside the list content, before horizontal scrolling. */
   textLeft: number;
@@ -33,7 +39,6 @@ export function HistoryDayStrip({ listRef, markers, rowHeight, textLeft, graphLa
 }): React.JSX.Element | null {
   const [scroll, setScroll] = React.useState({ top: 0, left: 0, width: 0 });
   const [dateOpen, setDateOpen] = React.useState(false);
-  const [dateValue, setDateValue] = React.useState("");
 
   React.useEffect(() => {
     const element = listRef.current;
@@ -66,34 +71,28 @@ export function HistoryDayStrip({ listRef, markers, rowHeight, textLeft, graphLa
 
   return <div data-testid="history-day-strip" className="pointer-events-none absolute inset-x-0 top-0 z-10" style={{ height: rowHeight }}>
     <div className="absolute inset-y-0 right-0 bg-bg" style={{ left: labelLeft - 8, transform: push ? `translateY(${push}px)` : undefined }}>
-      <Popover open={dateOpen} onOpenChange={open => {
-        setDateOpen(open);
-        if (open) setDateValue(marker.day);
-      }}>
-        <PopoverTrigger asChild>
-          <button type="button" data-testid="history-date-trigger" data-day={marker.day}
-            aria-label={`正在看 ${marker.label}。按日期跳转`} title="按日期跳转"
-            className="pointer-events-auto absolute bottom-0.5 left-1 flex h-6 items-center gap-1.5 rounded-md border-0 bg-transparent px-1 text-xs font-semibold text-fg2 outline-none hover:bg-hover hover:text-fg focus-visible:shadow-[inset_0_0_0_2px_var(--accent)] data-[state=open]:bg-accent-soft data-[state=open]:text-accent-fg">
-            <span>{marker.label}</span>
-            <CalendarDays className="size-3 text-fg3" strokeWidth={1.75} aria-hidden="true" />
-          </button>
-        </PopoverTrigger>
-        <PopoverContent data-testid="history-date-popover" className="w-[240px] p-3">
-          {/* Jump on Enter or the button only: typing a year passes through dates like 0002-09-26. */}
-          <form className="flex flex-col gap-1.5 text-xs text-fg3" onSubmit={event => {
-            event.preventDefault();
-            if (!dateValue) return;
-            void onChooseDate(dateValue).then(found => { if (found) setDateOpen(false); });
-          }}>
-            <label htmlFor="history-date-input" className="font-semibold text-fg2">跳转到日期</label>
-            <span className="flex gap-1.5">
-              <input id="history-date-input" data-testid="history-time-rail-date" type="date" value={dateValue}
-                className="min-w-0 flex-1 rounded-md border border-line2 bg-bg px-2 py-1 text-[13px] text-fg"
-                onChange={event => setDateValue(event.target.value)} />
-              <Button type="submit" size="sm" variant="soft" data-testid="history-date-submit" disabled={!dateValue}>跳转</Button>
-            </span>
-            <span className="text-[11.5px] leading-4">当天没有提交时，跳到这之前最近的一次提交。也可以在右侧刻度上点选。</span>
-          </form>
+      <Popover open={dateOpen} onOpenChange={setDateOpen}>
+        <div className="pointer-events-auto absolute bottom-0.5 left-1 flex items-center gap-1">
+          <PopoverTrigger asChild>
+            <button type="button" data-testid="history-date-trigger" data-day={marker.day}
+              aria-label={`正在看 ${marker.label}。按日期跳转`} title="按日期跳转"
+              className="flex h-6 items-center gap-1.5 rounded-md border-0 bg-transparent px-1 text-xs font-semibold text-fg2 outline-none hover:bg-hover hover:text-fg focus-visible:shadow-[inset_0_0_0_2px_var(--accent)] data-[state=open]:bg-accent-soft data-[state=open]:text-accent-fg">
+              <span>{marker.label}</span>
+              <CalendarDays className="size-3 text-fg3" strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </PopoverTrigger>
+          {!atNewest || scroll.top > rowHeight * 3 ? <button type="button" data-testid="history-newest" title="回到最新的提交（Home 或 ⌘↑）"
+            className="flex h-6 items-center gap-1 rounded-md border-0 bg-transparent px-1.5 text-[11.5px] text-fg3 outline-none hover:bg-hover hover:text-fg focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]"
+            onClick={onJumpToNewest}>
+            <ArrowUp className="size-3" strokeWidth={1.75} aria-hidden="true" />回到最新
+          </button> : null}
+        </div>
+        <PopoverContent data-testid="history-date-popover" className="w-[264px] p-3">
+          <HistoryDateCalendar days={days} selectedDay={marker.day}
+            onChoose={day => onChooseDate(day).then(found => {
+              if (found) setDateOpen(false);
+              return found;
+            })} />
         </PopoverContent>
       </Popover>
       {scrolled && push === 0 ? <span aria-hidden="true" className="absolute inset-x-0 top-full h-1.5 bg-gradient-to-b from-bg to-transparent" /> : null}

@@ -13,7 +13,7 @@ import { Button } from "./ui/button.js";
 import { Skeleton } from "./ui/skeleton.js";
 import { createVirtualLayout, type VirtualRange } from "../lib/virtual-window.js";
 import type { SelectionIntentToken } from "../lib/selection-intent.js";
-import { HistoryTimeRail, type HistoryTimeRailDay } from "./history-time-rail.js";
+import { HistoryTimeSlider, type HistoryTimeSliderDay } from "./history-time-slider.js";
 import { HistoryDayStrip, type DayMarker } from "./history-day-strip.js";
 import { localDateInput } from "../lib/search-date.js";
 
@@ -59,7 +59,7 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, onLocateHistoryDate, onCancelHistoryDate, onRetryHistoryDate }: {
+export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onCancelHistoryDate, onRetryHistoryDate }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
@@ -75,9 +75,17 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   onViewportAnchor(oid: string | undefined): void;
   restorationAnchor?: { oid: string; offset: number };
   onSetAnchorRestorationSpace(pixels: number): void;
-  activityDays?: HistoryTimeRailDay[] | null;
+  activityDays?: HistoryTimeSliderDay[] | null;
   activityDaysPartial?: boolean;
+  /** Statistics kept only the newest days; older history is outside the rail. */
+  activityDaysTruncated?: boolean;
   onLocateHistoryDate(day: string): Promise<boolean>;
+  /** Jumps to the latest commit before `beforeSeconds` (Unix seconds, exclusive). */
+  onLocateHistoryTime(beforeSeconds: number): Promise<boolean>;
+  /** The time slider is being dragged; selections change rapidly until it reports false. */
+  onScrubbingChange?(scrubbing: boolean): void;
+  /** Loads the newest page when it is no longer in the window; resolves true once it is. */
+  onJumpToNewest(): Promise<boolean>;
   onCancelHistoryDate(): Promise<void>;
   onRetryHistoryDate(): Promise<void>;
 }): React.JSX.Element {
@@ -101,6 +109,9 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
   const [graphExpanded, setGraphExpanded] = React.useState(false);
   const [viewportDay, setViewportDay] = React.useState<string | null>(null);
+  const [viewportSeconds, setViewportSeconds] = React.useState<number | null>(null);
+  /** The time slider is being dragged; the list follows it without the locating notice. */
+  const [scrubbing, setScrubbing] = React.useState(false);
   const viewportSessionKey = preview.session ? `${preview.session.repoId}:${preview.session.generation}` : null;
   const viewportSessionRef = React.useRef<string | null>(null);
   const lastRestoredPageRevision = React.useRef(0);
@@ -144,7 +155,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     if (viewportSessionRef.current !== viewportSessionKey) {
       viewportSessionRef.current = viewportSessionKey;
       setViewportDay(firstDate ? localDateInput(firstDate) : null);
-    } else if (viewportDay === null && firstDate) setViewportDay(localDateInput(firstDate));
+      setViewportSeconds(firstDate ? Math.floor(firstDate.getTime() / 1000) : null);
+    } else if (viewportDay === null && firstDate) {
+      setViewportDay(localDateInput(firstDate));
+      setViewportSeconds(Math.floor(firstDate.getTime() / 1000));
+    }
   }, [preview.commits, viewportDay, viewportSessionKey]);
   const visibleEntries = entries.slice(range.start, range.end);
   const activeDescendant = selectedOid && visibleEntries.some(entry => entry.kind === "commit" && entry.commit.oid === selectedOid)
@@ -175,6 +190,8 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
         const date = commit ? parseGitTime(commit.committer.timestamp) : null;
         const day = date ? localDateInput(date) : null;
         setViewportDay(current => current === day ? current : day);
+        const seconds = date ? Math.floor(date.getTime() / 1000) : null;
+        setViewportSeconds(current => current === seconds ? current : seconds);
       }
     }
     if (frameRef.current) return;
@@ -347,6 +364,35 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     }
     return found;
   }, [onLocateHistoryDate, placeDateJump]);
+  const jumpToTime = React.useCallback(async (beforeSeconds: number): Promise<boolean> => {
+    pendingDateJump.current = false;
+    const found = await onLocateHistoryTime(beforeSeconds);
+    if (found) {
+      pendingDateJump.current = true;
+      requestAnimationFrame(() => requestAnimationFrame(placeDateJump));
+    }
+    return found;
+  }, [onLocateHistoryTime, placeDateJump]);
+  // Back to the newest commit: scroll up when it is still loaded, otherwise load its page first.
+  const atNewest = preview.windowPreviousCursor === null;
+  const goNewest = React.useCallback(async () => {
+    const element = listRef.current;
+    if (!element) return;
+    if (atNewest) {
+      element.scrollTo({ top: 0, behavior: element.scrollTop > element.clientHeight * 6 ? "auto" : "smooth" });
+      return;
+    }
+    pendingDateJump.current = false;
+    if (!await onJumpToNewest()) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const list = listRef.current;
+      if (!list) return;
+      list.scrollTop = 0;
+      programmaticScrollTop.current = 0;
+      lastScrollTop.current = 0;
+      setRange(latestScrollModel.current.virtual.range(0, list.clientHeight, 12));
+    }));
+  }, [atNewest, onJumpToNewest]);
   // Declared after the keep-selected-visible effect so the jump placement wins.
   React.useLayoutEffect(() => { placeDateJump(); }, [selectedOid, virtual, placeDateJump]);
 
@@ -380,7 +426,7 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       {!preview.refreshing ? <Button variant="outline" size="sm" className="shrink-0" onClick={() => { void (preview.pageErrorKind === "dateLocation" ? onRetryHistoryDate() : onRetryPage()); }}>{preview.pageErrorKind === "location" || preview.pageErrorKind === "dateLocation" ? "重试定位" : "重试"}</Button> : null}
     </div> : null}
 
-    {preview.pageLoading && preview.commits.length > 0 ? <div role="status" className="absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg3 shadow-pop">
+    {preview.pageLoading && preview.commits.length > 0 && !(timeRailLoading && scrubbing) ? <div role="status" className="absolute inset-x-2 bottom-2 z-10 flex items-center gap-2 rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg3 shadow-pop">
       <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
       <span className="flex-1">{timeRailLoading ? "正在定位日期…" : "正在加载更多提交…"}</span>
       <Button variant="outline" size="sm" onClick={() => { void (timeRailLoading ? onCancelHistoryDate() : onCancelPage()); }}>{timeRailLoading ? "取消定位" : "取消"}</Button>
@@ -389,14 +435,14 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
 
     <div className="relative flex min-h-0 flex-1">
     <div className="relative flex min-h-0 min-w-0 flex-1">
-    <HistoryDayStrip listRef={listRef} markers={dayMarkers} rowHeight={DAY_ROW_HEIGHT} textLeft={graphColumnWidth + 24 + TEXT_INSET}
+    <HistoryDayStrip listRef={listRef} markers={dayMarkers} days={timeRailDays} atNewest={atNewest} onJumpToNewest={() => void goNewest()} rowHeight={DAY_ROW_HEIGHT} textLeft={graphColumnWidth + 24 + TEXT_INSET}
       graphLaneCount={graphExpanded ? visibleLaneCount : null} onCollapseGraph={collapseGraph} onChooseDate={jumpToDate} />
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
       data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}
       data-loaded-count={preview.commits.length} data-window-pages={preview.windowPageCount}
       className={cn("min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none",
-        // The date rail stands in for the vertical scrollbar; keep the horizontal one for the expanded graph.
+        // The time slider marks the position; keep only the horizontal scrollbar for the expanded graph.
         "[&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-0 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-line2")}
       style={{ overflowAnchor: "none" }} onScroll={handleScroll}
       onKeyDown={event => {
@@ -404,6 +450,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
         if (event.key === "Escape" && graphExpanded) {
           event.preventDefault();
           collapseGraph();
+          return;
+        }
+        // Home and ⌘↑ go to the newest commit even when its page is no longer loaded.
+        if ((event.key === "Home" && !atNewest) || (event.metaKey && event.key === "ArrowUp")) {
+          event.preventDefault();
+          void goNewest();
           return;
         }
         const keys: Record<string, number | "first" | "last"> = { ArrowDown: 1, ArrowUp: -1, PageDown: 8, PageUp: -8, Home: "first", End: "last" };
@@ -434,8 +486,10 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       </div>
     </div>
     </div>
-    {preview.commits.length ? <HistoryTimeRail days={timeRailDays} partial={!useActivityDays || Boolean(activityDaysPartial)}
-      sessionKey={viewportSessionKey} viewportDay={viewportDay} loading={timeRailLoading} onChooseDate={jumpToDate} /> : null}
+    {preview.commits.length ? <HistoryTimeSlider days={timeRailDays}
+      partial={!useActivityDays || activityDaysPartial ? "counting" : activityDaysTruncated ? "truncated" : false}
+      sessionKey={viewportSessionKey} viewportSeconds={viewportSeconds} loading={timeRailLoading} onChooseTime={jumpToTime}
+      onScrubbingChange={value => { setScrubbing(value); onScrubbingChange?.(value); }} /> : null}
     </div>
   </nav>;
 }

@@ -44,28 +44,38 @@ try {
   assert.equal(initial.offset, 0);
   assert.equal(initial.count, 200);
 
-  // The pinned date at the top of the list opens an exact-date field; Esc and outside clicks close it.
-  const rail = page.getByTestId("history-time-rail-slider");
-  await rail.waitFor({ state: "visible" });
-  assert.ok(await page.getByTestId("history-time-tick").count() > 0, "the date rail draws ticks for days with commits");
+  // The pinned date opens a calendar; Esc and outside clicks close it.
+  const slider = page.getByTestId("history-time-slider-track");
+  await slider.waitFor({ state: "visible" });
   const trigger = page.getByTestId("history-date-trigger");
   const popover = page.getByTestId("history-date-popover");
   assert.equal(await trigger.getAttribute("data-day"), localDay(fixture.rows[0].timestamp), "the pinned date names the newest day");
+  assert.equal(await page.getByTestId("history-newest").count(), 0, "at the newest commit there is nothing to go back to");
   await page.screenshot({ path: join(screenshotDirectory, "collapsed.png") });
   await trigger.click();
   await popover.waitFor({ state: "visible" });
-  await page.screenshot({ path: join(screenshotDirectory, "expanded.png") });
+  await page.getByTestId("history-calendar").waitFor({ state: "visible" });
+  await page.screenshot({ path: join(screenshotDirectory, "calendar.png") });
   await page.locator('[aria-label="提交详情"]').click({ position: { x: 12, y: 12 } });
   await popover.waitFor({ state: "hidden" });
   await trigger.click();
   await popover.waitFor({ state: "visible" });
   await page.keyboard.press("Escape");
   await popover.waitFor({ state: "hidden" });
+
+  // Pick the month in the month view, then the day.
   await trigger.click();
   await popover.waitFor({ state: "visible" });
-  const dateInput = page.getByTestId("history-time-rail-date");
-  await dateInput.fill(fixture.selectedDate);
-  await page.getByTestId("history-date-submit").click();
+  const [targetYear, targetMonth] = fixture.selectedDate.split("-").map(Number);
+  await page.getByTestId("history-calendar-title").click();
+  for (let guard = 0; guard < 5 && !(await page.getByTestId("history-calendar-title").innerText()).startsWith(`${targetYear} 年`); guard += 1) {
+    await page.getByTestId("history-calendar-prev").click();
+  }
+  const monthCell = page.locator(`[data-testid="history-calendar-month"][data-month="${fixture.selectedDate.slice(0, 7)}"]`);
+  assert.match(await monthCell.innerText(), /\d/, "the month view counts the month's commits");
+  await monthCell.click();
+  assert.equal(await page.getByTestId("history-calendar-title").innerText(), `${targetYear} 年 ${targetMonth} 月`);
+  await page.locator(`[data-testid="history-calendar-day"][data-day="${fixture.selectedDate}"]`).click();
   const targetSelector = `[data-testid="commit-row"][data-oid="${fixture.expectedOid}"]`;
   await page.waitForFunction(oid => {
     const row = document.querySelector(`[data-testid="commit-row"][data-oid="${CSS.escape(oid)}"]`);
@@ -80,9 +90,8 @@ try {
   assert.equal(await page.locator(`${targetSelector}[aria-selected="true"]`).getAttribute("data-oid"), fixture.expectedOid,
     "the selected date jumps to the max matching Committer timestamp in Git topo order");
   await page.screenshot({ path: join(screenshotDirectory, "located.png") });
-  assert.equal(await trigger.getAttribute("data-day"), localDay(fixture.rows[fixture.expectedRank].timestamp),
-    "after a jump the chosen day sits at the top of the list, under the pinned date");
-
+  await page.waitForFunction(day => document.querySelector('[data-testid="history-date-trigger"]')?.dataset.day === day,
+    localDay(fixture.rows[fixture.expectedRank].timestamp), { timeout: 5_000 });
 
   const previousEnd = located.offset + located.count;
   await list.evaluate(element => { element.scrollTop = element.scrollHeight; });
@@ -93,33 +102,52 @@ try {
   const continued = await readWindow(list);
   assert.ok(continued.offset + continued.count > previousEnd, "scrolling continues through the adjacent frozen history page");
 
-  // Hovering the rail magnifies it and names the period under the pointer; a click jumps there.
-  const railBox = await rail.boundingBox();
-  await page.mouse.move(railBox.x + railBox.width / 2, railBox.y + railBox.height * 0.3);
-  const hovered = page.getByTestId("history-time-target");
-  await hovered.waitFor({ state: "visible" });
-  assert.match(await hovered.innerText(), /个提交/);
-  assert.ok(await page.getByTestId("history-time-label").count() > 0, "neighbouring periods are named while magnified");
-  await page.screenshot({ path: join(screenshotDirectory, "rail-hover.png") });
-  const railDay = await hovered.getAttribute("data-day");
-  await page.mouse.down();
-  await page.mouse.up();
-  await page.waitForFunction(day => {
-    const selected = document.querySelector('[data-testid="commit-row"][aria-selected="true"]');
-    return selected && selected.getAttribute("data-commit-day") <= day && document.querySelector('[aria-label="提交"]')?.dataset.pageLoading === "false";
-  }, railDay, { timeout: 20_000 });
-  const railSelectedDay = await page.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-commit-day");
-  assert.equal(railSelectedDay, latestDayAtOrBefore(fixture.rows, railDay), "a rail click selects the newest commit on or before the period's last day");
-  await page.mouse.move(railBox.x - 200, railBox.y + 40);
+  // Back to the newest commit: its page was dropped, so it is read again.
+  await page.getByTestId("history-newest").click();
+  await page.waitForFunction(oid => {
+    const element = document.querySelector('[aria-label="提交"]');
+    return element && element.dataset.pageLoading === "false" && Number(element.dataset.loadedOffset) === 0
+      && element.querySelector('[data-testid="commit-row"]')?.getAttribute("data-oid") === oid;
+  }, fixture.rows[0].oid, { timeout: 20_000 });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="history-newest"]'), null, { timeout: 5_000 });
+  assert.equal(await trigger.getAttribute("data-day"), localDay(fixture.rows[0].timestamp));
 
-  // Keyboard: End picks the oldest period, Enter jumps.
-  await rail.focus();
-  await page.keyboard.press("End");
-  const oldestDay = await page.getByTestId("history-time-target").getAttribute("data-day");
+  // The slider: hovering names a moment; dragging and releasing jumps to the latest commit before it.
+  const sliderBox = await slider.boundingBox();
+  const x = sliderBox.x + sliderBox.width / 2;
+  await page.mouse.move(x, sliderBox.y + sliderBox.height * 0.5);
+  const bubble = page.getByTestId("history-time-bubble");
+  await bubble.waitFor({ state: "visible" });
+  assert.match(await bubble.innerText(), /前后/);
+  await page.screenshot({ path: join(screenshotDirectory, "slider-hover.png") });
+  await page.mouse.down();
+  await page.mouse.move(x, sliderBox.y + sliderBox.height * 0.62, { steps: 8 });
+  await page.mouse.up();
+  const released = Number(await bubble.getAttribute("data-seconds"));
+  const expectedSlider = latestBefore(fixture.rows, Math.floor(released) + 1);
+  await page.waitForFunction(oid => document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === oid
+    && document.querySelector('[aria-label="提交"]')?.dataset.pageLoading === "false", expectedSlider.oid, { timeout: 20_000 });
+  await page.screenshot({ path: join(screenshotDirectory, "slider-dragged.png") });
+  await page.mouse.move(sliderBox.x - 300, sliderBox.y + 40);
+
+  // Keyboard on the slider: two days older, Enter jumps.
+  await slider.focus();
+  await page.keyboard.press("PageDown");
+  await page.keyboard.press("PageDown");
   await page.keyboard.press("Enter");
-  await page.waitForFunction(day => document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-commit-day") === day,
-    latestDayAtOrBefore(fixture.rows, oldestDay), { timeout: 20_000 });
-  assert.deepEqual(await snapshotTree(repository), before, "date navigation and continued scrolling are read-only");
+  const keyboardTarget = latestBefore(fixture.rows, expectedSlider.timestamp - 2 * 86_400 + 1);
+  await page.waitForFunction(oid => document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === oid,
+    keyboardTarget.oid, { timeout: 20_000 });
+
+  // Home in the list goes back to the newest commit.
+  await list.focus();
+  await page.keyboard.press("Home");
+  await page.waitForFunction(oid => {
+    const element = document.querySelector('[aria-label="提交"]');
+    return element && Number(element.dataset.loadedOffset) === 0
+      && document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === oid;
+  }, fixture.rows[0].oid, { timeout: 20_000 });
+  assert.deepEqual(await snapshotTree(repository), before, "date navigation, the slider and continued scrolling are read-only");
 
   await app.close();
   app = undefined;
@@ -188,13 +216,11 @@ function localDay(timestamp) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-/** Day of the commit a jump to `day` should select: the max committer time before the next local midnight. */
-function latestDayAtOrBefore(rows, day) {
-  const [year, month, date] = day.split("-").map(Number);
-  const before = Math.floor(new Date(year, month - 1, date + 1).getTime() / 1000);
+/** The commit a jump before `beforeSeconds` should select: the max committer time before it. */
+function latestBefore(rows, beforeSeconds) {
   let best = null;
-  for (const row of rows) if (row.timestamp < before && (!best || row.timestamp > best.timestamp)) best = row;
-  return best ? localDay(best.timestamp) : null;
+  for (const row of rows) if (row.timestamp < beforeSeconds && (!best || row.timestamp > best.timestamp)) best = row;
+  return best;
 }
 
 function git(repository, ...args) {
