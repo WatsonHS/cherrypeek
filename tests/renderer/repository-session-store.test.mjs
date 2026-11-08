@@ -114,6 +114,26 @@ function makeHistoryPage(session, { offset = 0, cursor = `cursor-${offset}`, pre
   };
 }
 
+function makeDateLocation(page, oid, includePage = true) {
+  const { repository, refs, refsTruncated, ...content } = page;
+  return {
+    oid,
+    cursor: page.cursor,
+    offset: page.offset,
+    pageSize: page.pageSize,
+    page: includePage ? content : null,
+  };
+}
+
+function makePageCommits(session, start, count) {
+  const base = makePreview(session).commits[0];
+  return Array.from({ length: count }, (_, index) => ({
+    ...base,
+    oid: (start + index + 1).toString(16).padStart(40, "0"),
+    summary: `summary ${start + index + 1}`,
+  }));
+}
+
 /** Opens `id` and answers every call so the store ends ready. */
 async function openReady(fake, store, id, pageOptions = {}) {
   const session = makeSession(id);
@@ -153,25 +173,26 @@ test("open shows the session once its first page arrives", async () => {
   assert.ok(notifications >= 3);
 });
 
-test("cancelling a history location ignores its late page and keeps the current window", async () => {
+test("cancelling a date location ignores its late page and keeps the current window", async () => {
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);
   const session = await openReady(fake, store, "locate-cancel");
-  const originalOid = store.getView().commits[0].oid;
-  const targetOid = "ab".repeat(20);
-  const locating = store.locateCommit(targetOid);
+  const originalCommits = store.getView().commits;
+  const target = { ...originalCommits[0], oid: "ab".repeat(20) };
+  const locating = store.locateHistoryDate(150);
   await settled();
-  assert.equal(fake.pending.locateCommit.length, 1);
+  assert.equal(fake.pending.locateHistoryDate.length, 1);
 
   const cancelling = store.cancelPage();
-  await fake.answer("locateCommit", ok(makeHistoryPage(session, {
+  const page = makeHistoryPage(session, {
     offset: 400, cursor: "cursor-400", previousCursor: "cursor-200", nextCursor: "cursor-600",
-    commits: [{ ...makePreview(session).commits[0], oid: targetOid }],
-  })));
+    commits: [target],
+  });
+  await fake.answer("locateHistoryDate", ok(makeDateLocation(page, target.oid)));
   await cancelling;
-  assert.equal(await locating, false);
+  assert.equal(await locating, null);
   assert.equal(store.getView().pageLoading, false);
-  assert.equal(store.getView().commits[0].oid, originalOid);
+  assert.strictEqual(store.getView().commits, originalCommits);
 });
 
 test("a newer open wins; late results from the older open are dropped", async () => {
@@ -920,15 +941,64 @@ test("a prefetch waits for a running date jump instead of cancelling it", async 
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);
   const session = await openReady(fake, store, "a", { nextCursor: "cursor-200" });
+  const prior = store.getView();
   const base = makePreview(session).commits[0];
   const target = { ...base, oid: "ab".repeat(20), summary: "target", committer: { ...base.committer, timestamp: "100" } };
   const locating = store.locateHistoryDate(150);
   await settled();
   assert.equal(store.getView().pageRequestKind, "dateLocation");
+  assert.deepEqual(fake.pending.locateHistoryDate[0].args, [150, 200, ["cursor-0"]]);
   // Scrolling right after a jump asks for the next page; it must not cancel the jump.
   await store.readPage("cursor-200");
   assert.equal(fake.pending.readHistoryPage.length, 0, "no page read starts while the date jump runs");
-  await fake.answer("locateHistoryDate", ok(makeHistoryPage(session, { offset: 300, cursor: "cursor-300", commits: [target] })));
+  const page = makeHistoryPage(session, { offset: 200, cursor: "cursor-200", previousCursor: "cursor-0", nextCursor: "cursor-400", commits: [target] });
+  await fake.answer("locateHistoryDate", ok(makeDateLocation(page, target.oid)));
   assert.equal(await locating, target.oid);
   assert.equal(store.getView().commits[0].oid, target.oid);
+  assert.strictEqual(store.getView().repository, prior.repository);
+  assert.strictEqual(store.getView().refs, prior.refs);
+  assert.equal(store.getView().pageOffset, 200);
+  assert.equal(store.getView().windowPreviousCursor, "cursor-0");
+});
+
+test("date location reuses a known page and keeps the bounded window objects", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = makeSession("date-same-page");
+  const opening = store.open(session.repository.path);
+  await fake.answer("openRepositorySession", ok(session));
+  await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
+    nextCursor: "cursor-200", count: 200, commits: makePageCommits(session, 0, 200),
+  })));
+  await opening;
+  const reading = store.readPage("cursor-200");
+  await settled();
+  const secondPage = makeHistoryPage(session, {
+    offset: 200, cursor: "cursor-200", previousCursor: "cursor-0", nextCursor: "cursor-400",
+    count: 200, commits: makePageCommits(session, 200, 200),
+  });
+  await fake.answer("readHistoryPage", ok(secondPage));
+  await reading;
+  const before = store.getView();
+  const targetOid = secondPage.commits[0].oid;
+  const locating = store.locateHistoryDate(150);
+  await settled();
+  assert.deepEqual(fake.pending.locateHistoryDate[0].args, [150, 200, ["cursor-0", "cursor-200"]]);
+  await fake.answer("locateHistoryDate", ok(makeDateLocation(secondPage, targetOid, false)));
+
+  assert.equal(await locating, targetOid);
+  const after = store.getView();
+  assert.strictEqual(after.commits, before.commits);
+  assert.strictEqual(after.refs, before.refs);
+  assert.strictEqual(after.repository, before.repository);
+  assert.equal(after.pageCursor, "cursor-200");
+  assert.equal(after.previousCursor, "cursor-0");
+  assert.equal(after.nextCursor, "cursor-400");
+  assert.equal(after.windowPreviousCursor, null);
+  assert.equal(after.windowNextCursor, "cursor-400");
+  assert.equal(after.pageOffset, 0);
+  assert.equal(after.canNavigatePrevious, true);
+  assert.equal(after.canNavigateNext, true);
+  assert.equal(after.windowPageCount, 2);
+  assert.equal(after.windowRevision, before.windowRevision);
 });

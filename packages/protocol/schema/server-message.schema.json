@@ -1206,6 +1206,39 @@
       ],
       "type": "object"
     },
+    "HistoryDateLocation": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "oid",
+        "cursor",
+        "offset",
+        "pageSize"
+      ],
+      "type": "object"
+    },
     "HistoryGraph": {
       "additionalProperties": false,
       "properties": {
@@ -2577,6 +2610,23 @@
             "hasMore",
             "newSinceLastSeenStatus",
             "lastSeenDividerOid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "location": {
+              "$ref": "#/definitions/HistoryDateLocation"
+            },
+            "section": {
+              "const": "historyDateLocation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "location"
           ],
           "type": "object"
         },

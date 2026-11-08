@@ -156,7 +156,9 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     }
     return index;
   }, [preview.navigation]);
+  const useActivityDays = Boolean(activityDays?.length);
   const loadedDateDays = React.useMemo(() => {
+    if (useActivityDays) return [];
     const counts = new Map<string, number>();
     for (const commit of preview.commits) {
       const date = parseGitTime(commit.committer.timestamp);
@@ -165,8 +167,7 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       counts.set(day, (counts.get(day) ?? 0) + 1);
     }
     return [...counts].map(([day, count]) => ({ day, count })).sort((a, b) => b.day.localeCompare(a.day));
-  }, [preview.commits]);
-  const useActivityDays = Boolean(activityDays?.length);
+  }, [preview.commits, useActivityDays]);
   const timeRailDays = useActivityDays ? activityDays! : loadedDateDays;
   const timeRailLoading = preview.pageLoading && preview.pageRequestKind === "dateLocation";
   React.useEffect(() => {

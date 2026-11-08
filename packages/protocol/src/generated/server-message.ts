@@ -145,6 +145,10 @@ export type ResponseData =
       section: "historyPage";
     }
   | {
+      location: HistoryDateLocation;
+      section: "historyDateLocation";
+    }
+  | {
       navigation: RepositoryNavigation;
       section: "repositoryNavigation";
     }
@@ -1035,6 +1039,12 @@ export interface HistoryGraphSegment {
   fromLane: number;
   kind: HistoryGraphSegmentKind;
   toLane: number;
+}
+export interface HistoryDateLocation {
+  cursor: string;
+  offset: number;
+  oid: string;
+  pageSize: number;
 }
 export interface RepositoryNavigation {
   defaultBase: DefaultBase | null;

@@ -2631,6 +2631,7 @@ fn execute_history_page(
         params.cursor,
         None,
         None,
+        None,
         cancelled,
         metadata_tasks,
     );
@@ -2662,6 +2663,7 @@ fn execute_locate_commit(
         params.page_size,
         None,
         Some(params.oid),
+        None,
         None,
         cancelled,
         metadata_tasks,
@@ -2695,6 +2697,7 @@ fn execute_locate_history_date(
         None,
         None,
         Some(params.before_timestamp),
+        params.known_cursors,
         cancelled,
         metadata_tasks,
     );
@@ -2714,6 +2717,7 @@ fn execute_history_request(
     cursor: Option<String>,
     locate_oid: Option<String>,
     locate_before_timestamp: Option<i64>,
+    date_known_cursors: Option<Vec<String>>,
     cancelled: Arc<AtomicBool>,
     metadata_tasks: Arc<crate::metadata_index::TaskManager>,
 ) {
@@ -2732,35 +2736,38 @@ fn execute_history_request(
         return;
     };
     let deadline = std::time::Instant::now() + PREVIEW_TIMEOUT;
-    let repository = match bounded_repository_response(
-        request_id,
-        repo_id.as_deref(),
-        generation.as_deref(),
-        0,
-        session.info.repository.clone(),
-        session.discovered.refs.clone(),
-        session.discovered.refs_truncated,
-    ) {
-        Ok(message) => message,
-        Err(error) => {
-            send_terminal_error(
-                sender,
-                shutdown,
-                Some(request_id.to_owned()),
-                repo_id,
-                generation,
-                error.code,
-                error.message,
-                error.retryable,
-            );
+    let compact_date = locate_before_timestamp.is_some() && date_known_cursors.is_some();
+    if !compact_date {
+        let repository = match bounded_repository_response(
+            request_id,
+            repo_id.as_deref(),
+            generation.as_deref(),
+            0,
+            session.info.repository.clone(),
+            session.discovered.refs.clone(),
+            session.discovered.refs_truncated,
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                send_terminal_error(
+                    sender,
+                    shutdown,
+                    Some(request_id.to_owned()),
+                    repo_id,
+                    generation,
+                    error.code,
+                    error.message,
+                    error.retryable,
+                );
+                remove_request(requests, request_id, &cancelled);
+                return;
+            }
+        };
+        if !send_task_message(sender, shutdown, &cancelled, &repository) {
+            finish_cancelled(sender, shutdown, request_id, repo_id, generation);
             remove_request(requests, request_id, &cancelled);
             return;
         }
-    };
-    if !send_task_message(sender, shutdown, &cancelled, &repository) {
-        finish_cancelled(sender, shutdown, request_id, repo_id, generation);
-        remove_request(requests, request_id, &cancelled);
-        return;
     }
     let result = if let Some(oid) = locate_oid {
         session.history.with_located_page(
@@ -2782,27 +2789,53 @@ fn execute_history_request(
             },
         )
     } else if let Some(before_timestamp) = locate_before_timestamp {
-        session.history.with_located_date_page(
-            git_path,
-            &session.discovered,
-            &LocateHistoryDateParams {
-                before_timestamp,
-                page_size,
-            },
-            &cancelled,
-            deadline,
-            |page| {
-                send_history_page_chunks(
-                    sender,
-                    shutdown,
-                    &cancelled,
-                    request_id,
-                    &repo_id,
-                    &generation,
-                    page,
-                )
-            },
-        )
+        session
+            .history
+            .with_located_date_page_and_location(
+                git_path,
+                &session.discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp,
+                    page_size,
+                    known_cursors: date_known_cursors.clone(),
+                },
+                &cancelled,
+                deadline,
+                |location, reused| {
+                    let message = ServerMessage::Response {
+                        request_id: request_id.to_owned(),
+                        repo_id: repo_id.clone(),
+                        generation: generation.clone(),
+                        sequence: 0,
+                        done: reused,
+                        coverage: Coverage {
+                            complete: reused,
+                            processed: 0,
+                        },
+                        next_cursor: None,
+                        data: ResponseData::HistoryDateLocation {
+                            location: location.clone(),
+                        },
+                    };
+                    if send_task_message(sender, shutdown, &cancelled, &message) {
+                        Ok(())
+                    } else {
+                        Err(repository::cancelled_error())
+                    }
+                },
+                |page| {
+                    send_history_page_chunks(
+                        sender,
+                        shutdown,
+                        &cancelled,
+                        request_id,
+                        &repo_id,
+                        &generation,
+                        page,
+                    )
+                },
+            )
+            .map(|page| page.unwrap_or(()))
     } else {
         session.history.with_page(
             git_path,

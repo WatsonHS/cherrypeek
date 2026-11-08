@@ -67,6 +67,21 @@ export interface LocateCommitParams {
 }
 export interface LocateHistoryDateParams {
   beforeTimestamp: number;
+  /**
+   * @maxItems 9
+   */
+  knownCursors?:
+    | []
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | null;
   pageSize: number;
 }
 export interface RefreshRepositoryParams {

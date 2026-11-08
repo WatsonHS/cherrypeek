@@ -4,8 +4,8 @@ use crate::{
     repository::{self, DiscoveredRepository, PreviewError},
 };
 use commitscope_core::{
-    ErrorCode, HistoryCommit, LastViewedSnapshot, LocateCommitParams, LocateHistoryDateParams,
-    NewSinceLastSeenStatus, StoreStatus,
+    ErrorCode, HistoryCommit, HistoryDateLocation, LastViewedSnapshot, LocateCommitParams,
+    LocateHistoryDateParams, NewSinceLastSeenStatus, StoreStatus,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -422,6 +422,7 @@ impl HistoryState {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub fn with_located_date_page<T>(
         &self,
         executable: &Path,
@@ -431,8 +432,40 @@ impl HistoryState {
         deadline: Instant,
         emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<T, PreviewError> {
+        self.with_located_date_page_and_location(
+            executable,
+            discovered,
+            params,
+            cancelled,
+            deadline,
+            |_, _| Ok(()),
+            emit,
+        )?
+        .ok_or_else(|| {
+            repository::internal_error("Date location unexpectedly omitted its history page")
+        })
+    }
+
+    pub fn with_located_date_page_and_location<T>(
+        &self,
+        executable: &Path,
+        discovered: &DiscoveredRepository,
+        params: &LocateHistoryDateParams,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+        mut emit_location: impl FnMut(&HistoryDateLocation, bool) -> Result<(), PreviewError>,
+        emit_page: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
+    ) -> Result<Option<T>, PreviewError> {
         if !(1..=500).contains(&params.page_size) {
             return Err(invalid_request("pageSize must be between 1 and 500"));
+        }
+        let known_cursors = params.known_cursors.as_deref();
+        if known_cursors.is_some_and(|cursors| {
+            cursors.len() > 9 || cursors.iter().any(|cursor| cursor.len() > 512)
+        }) {
+            return Err(invalid_request(
+                "knownCursors must contain at most 9 cursors of at most 512 characters",
+            ));
         }
         if discovered.scope_tips.is_empty() {
             return Err(no_commits_before_date());
@@ -497,6 +530,26 @@ impl HistoryState {
             target
         };
         let target = target.ok_or_else(no_commits_before_date)?;
+        let target_offset = target.page_offset.ok_or_else(|| {
+            repository::internal_error("Date location did not include a page offset")
+        })?;
+        let location = HistoryDateLocation {
+            oid: target.oid.clone(),
+            cursor: format!("v1:{}:{}", query.id, target_offset),
+            offset: target_offset,
+            page_size: params.page_size,
+        };
+        if let Some(known_cursors) = known_cursors {
+            check_active(cancelled, deadline)?;
+            verify_query_snapshot(query, discovered, cancelled, deadline)?;
+            let reused = known_cursors
+                .iter()
+                .any(|cursor| cursor == &location.cursor);
+            emit_location(&location, reused)?;
+            if reused {
+                return Ok(None);
+            }
+        }
         let result = with_page_in_query(
             query,
             executable,
@@ -506,12 +559,12 @@ impl HistoryState {
             params.page_size,
             cancelled,
             deadline,
-            emit,
+            emit_page,
         )?;
         if let Some(fresh) = fresh {
             *query_guard = Some(fresh);
         }
-        Ok(result)
+        Ok(Some(result))
     }
 }
 
@@ -1886,6 +1939,7 @@ mod tests {
             &LocateHistoryDateParams {
                 before_timestamp,
                 page_size: size,
+                known_cursors: None,
             },
             &AtomicBool::new(false),
             Instant::now() + std::time::Duration::from_secs(5),
@@ -2071,6 +2125,62 @@ mod tests {
             run_git(&path, &["rev-parse", "HEAD~1"])
         );
 
+        let known_cursors = vec![page.cursor.clone()];
+        let mut reused_location = None;
+        let mut reused_page_emitted = false;
+        let reuse = state
+            .with_located_date_page_and_location(
+                &git_executable(),
+                &discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp: 400,
+                    page_size: 2,
+                    known_cursors: Some(known_cursors),
+                },
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(5),
+                |location, reused| {
+                    assert!(reused);
+                    reused_location = Some(location.clone());
+                    Ok(())
+                },
+                |_| {
+                    reused_page_emitted = true;
+                    Ok(())
+                },
+            )
+            .expect("reuse loaded page");
+        assert!(reuse.is_none());
+        assert!(!reused_page_emitted);
+        let reused_location = reused_location.expect("date location sent");
+        assert_eq!(reused_location.oid, expected);
+        assert_eq!(reused_location.cursor, page.cursor);
+        assert_eq!(reused_location.offset, page.offset);
+
+        let mut missed_location = None;
+        let fallback = state
+            .with_located_date_page_and_location(
+                &git_executable(),
+                &discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp: 400,
+                    page_size: 2,
+                    known_cursors: Some(vec!["v1:stale-query:0".into()]),
+                },
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(5),
+                |location, reused| {
+                    assert!(!reused);
+                    missed_location = Some(location.clone());
+                    Ok(())
+                },
+                |page| Ok(page.clone()),
+            )
+            .expect("stale cursor falls back to a full page");
+        let fallback = fallback.expect("page sent after cursor miss");
+        assert_eq!(fallback.cursor, missed_location.unwrap().cursor);
+        assert_eq!(fallback.offset, page.offset);
+
         let baseline = HistoryState::new();
         let first = read_page(&baseline, &discovered, None, 2).expect("baseline first page");
         let second = read_page(&baseline, &discovered, first.next_cursor.as_deref(), 2)
@@ -2175,6 +2285,7 @@ mod tests {
                 &LocateHistoryDateParams {
                     before_timestamp: i64::MIN,
                     page_size: 2,
+                    known_cursors: None,
                 },
                 &AtomicBool::new(false),
                 Instant::now() + std::time::Duration::from_secs(5),
@@ -2209,6 +2320,7 @@ mod tests {
                 &LocateHistoryDateParams {
                     before_timestamp: i64::MAX,
                     page_size: 2,
+                    known_cursors: None,
                 },
                 &cancelled,
                 Instant::now() + std::time::Duration::from_secs(5),
@@ -2230,6 +2342,7 @@ mod tests {
                 &LocateHistoryDateParams {
                     before_timestamp: i64::MAX,
                     page_size: 2,
+                    known_cursors: None,
                 },
                 &AtomicBool::new(true),
                 Instant::now() + std::time::Duration::from_secs(5),

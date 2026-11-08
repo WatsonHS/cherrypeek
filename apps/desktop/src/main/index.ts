@@ -221,11 +221,12 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.locateCommit(params));
   });
-  ipcMain.handle(IPC_HISTORY_LOCATE_DATE, (event, beforeTimestamp: unknown, pageSize: unknown) => {
+  ipcMain.handle(IPC_HISTORY_LOCATE_DATE, (event, beforeTimestamp: unknown, pageSize: unknown, knownCursors: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.locateHistoryDate(
       beforeTimestamp,
       pageSize === undefined ? 200 : pageSize as number,
+      knownCursors === undefined ? [] : knownCursors,
     ));
   });
   ipcMain.handle(IPC_HISTORY_CANCEL, event => {

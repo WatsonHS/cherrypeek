@@ -32,7 +32,11 @@ try {
   const dates = quantiles.map(q => uniqueTimes[Math.min(uniqueTimes.length - 1, Math.floor(q * uniqueTimes.length))]);
   if (new Set(dates).size !== dates.length) throw new Error("Could not choose six distinct timestamp quantiles from the fixture");
   output.input = { repository: args.repository, headOid: head.trim(), commitCount: Number((await git(args.repository, ["rev-list", "--count", "HEAD"])).trim()), profile: args.profile, profileState: await inspectProfile(args.profile), sourceHead: sourceHead.trim(), sourceDirty: Boolean(sourceDirty.trim()), sourceDirtySummary: sourceDirty.trim().split("\n").filter(Boolean).slice(0, 30), sampleTimestamps: dates };
-  output.build = { appEntrySha256: await hashFile(appEntry), bundledDaemonSha256: await hashFile(daemonPath) };
+  const assetDirectory = join(root, "apps/desktop/dist/renderer/assets");
+  output.build = { appEntrySha256: await hashFile(appEntry), bundledDaemonSha256: await hashFile(daemonPath),
+    rendererAssets: await Promise.all((await fsReaddir(assetDirectory)).filter(name => name.endsWith(".js")).sort()
+      .map(async name => ({ name, sha256: await hashFile(join(assetDirectory, name)) }))),
+  };
   output.measurements.dateContract = "All direct calls use locateHistoryDate(beforeTimestamp=selectedUniqueTimestamp+1,pageSize=200). Timings include preload IPC request/response and exclude render/paint. Each result records HistoryPage offset and SHA256 of the full returned commit rows.";
 
   app = await electron.launch({
@@ -62,7 +66,23 @@ try {
     const beforeTimestamp = timestamp + 1;
     const sample = await dateIpc(page, beforeTimestamp);
     output.measurements.directDateQueries.push({ phase: index === 0 ? "cold-first-call" : "subsequent-distinct-timestamp", sourceTimestamp: timestamp, ...sample });
-    if (!sample.success) output.failures.push({ stage: "locateHistoryDate", ...sample });
+    if (!sample.success) {
+      output.failures.push({ stage: "locateHistoryDate", ...sample });
+      throw new Error("Date lookup failed; stopping before drag and memory measurements");
+    }
+  }
+
+  const samePageSeed = await dateIpc(page, dates[3] + 1);
+  output.measurements.samePageSeed = samePageSeed;
+  if (!samePageSeed.success) throw new Error("Cannot seed the same-page lookup");
+  output.measurements.samePageQueries = [];
+  for (let index = 0; index < 3; index += 1) {
+    const sample = await dateIpc(page, dates[3] + 1, [samePageSeed.cursor]);
+    output.measurements.samePageQueries.push(sample);
+    if (!sample.success) {
+      output.failures.push({ stage: "same-page-location", ...sample });
+      throw new Error("Same-page lookup failed; stopping before drag and memory measurements");
+    }
   }
 
   output.measurements.timeSliderDrag = { cacheCondition: "after the six date IPC samples; this is the actual pointer drag, with date-query caches already warm", ...(await dragSliderAndMeasure(page, dates[3])) };
@@ -112,17 +132,20 @@ function parseArgs(argv) {
   for (const name of ["repository", "profile", "output"]) if (!values[name]) throw new Error("Usage: node scripts/benchmark-history-navigation.mjs --repository=/abs/wide-history --profile=/abs/app-data --output=/abs/new.json");
   return values;
 }
-async function dateIpc(target, beforeTimestamp) {
-  const measured = await target.evaluate(async before => {
+async function dateIpc(target, beforeTimestamp, knownCursors = []) {
+  const measured = await target.evaluate(async ({ before, known }) => {
     const started = performance.now();
-    try { const response = await window.commitScope.locateHistoryDate(before, 200); return { elapsedMs: performance.now() - started, response }; }
+    try { const response = await window.commitScope.locateHistoryDate(before, 200, known); return { elapsedMs: performance.now() - started, response }; }
     catch (error) { return { elapsedMs: performance.now() - started, thrown: String(error?.message ?? error) }; }
-  }, beforeTimestamp);
+  }, { before: beforeTimestamp, known: knownCursors });
   const response = measured.response;
   if (response?.ok !== true) return { success: false, beforeTimestamp, pageSize: 200, ipcMs: measured.elapsedMs, error: response?.error ?? measured.thrown ?? { message: "Malformed locateHistoryDate response" } };
-  const page = response.value;
-  const rows = page.commits ?? [];
-  return { success: true, beforeTimestamp, pageSize: 200, ipcMs: measured.elapsedMs, offset: page.offset, rowCount: rows.length, rowsSha256: sha256(JSON.stringify(rows)), firstOids: rows.slice(0, 5).map(row => row.oid), lastOid: rows.at(-1)?.oid ?? null };
+  const location = response.value;
+  const page = "page" in location ? location.page : location;
+  const rows = page?.commits ?? [];
+  return { success: true, beforeTimestamp, pageSize: 200, ipcMs: measured.elapsedMs, cursor: location.cursor, offset: location.offset,
+    reusedPage: page === null, targetOid: location.oid ?? null, responseBytes: Buffer.byteLength(JSON.stringify(response.value)),
+    rowCount: rows.length, rowsSha256: page === null ? null : sha256(JSON.stringify(rows)), firstOids: rows.slice(0, 5).map(row => row.oid), lastOid: rows.at(-1)?.oid ?? null };
 }
 async function dragSliderAndMeasure(target, centerTimestamp) {
   const slider = target.getByTestId("history-time-slider-track");

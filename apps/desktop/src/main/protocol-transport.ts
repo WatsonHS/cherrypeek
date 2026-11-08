@@ -558,7 +558,10 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "locateCommit" && isRecord(params) && hasExactKeys(params, ["oid", "pageSize"]) &&
     typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
-  if (method === "locateHistoryDate" && isRecord(params) && hasExactKeys(params, ["beforeTimestamp", "pageSize"]) &&
+  if (method === "locateHistoryDate" && isRecord(params) &&
+    hasExactKeys(params, params.knownCursors === undefined ? ["beforeTimestamp", "pageSize"] : ["beforeTimestamp", "pageSize", "knownCursors"]) &&
+    (params.knownCursors === undefined || Array.isArray(params.knownCursors) && params.knownCursors.length <= 9 &&
+      params.knownCursors.every(cursor => typeof cursor === "string" && cursor.length > 0 && Buffer.byteLength(cursor, "utf8") <= 512)) &&
     Number.isSafeInteger(params.beforeTimestamp) &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (method === "refreshRepository" && isRecord(params) &&

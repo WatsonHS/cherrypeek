@@ -31,8 +31,9 @@ try {
     packages: "bundle",
     sourcemap: false,
   });
+  const selectedFiles = process.env.COMMITSCOPE_PROTOCOL_TEST_FILES?.split(",");
   const testFiles = (await readdir(resolve(root, "tests/protocol")))
-    .filter(file => file.endsWith(".test.mjs"))
+    .filter(file => file.endsWith(".test.mjs") && (!selectedFiles || selectedFiles.includes(file)))
     .map(file => resolve(root, "tests/protocol", file));
   const env = {
     ...process.env,

@@ -189,6 +189,16 @@
           "format": "int64",
           "type": "integer"
         },
+        "knownCursors": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 9,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "pageSize": {
           "format": "uint16",
           "maximum": 500,

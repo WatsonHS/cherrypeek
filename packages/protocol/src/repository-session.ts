@@ -84,6 +84,16 @@ export interface HistoryPage {
   lastSeenDividerOid: HistoryPageData["lastSeenDividerOid"];
 }
 
+export type HistoryPageContent = Omit<HistoryPage, "repository" | "refs" | "refsTruncated">;
+
+export interface HistoryDateLocation {
+  oid: string;
+  cursor: string;
+  offset: number;
+  pageSize: number;
+  page: HistoryPageContent | null;
+}
+
 export interface RefreshedRepository {
   session: RepositorySessionInfo;
   page: HistoryPage;
@@ -101,7 +111,7 @@ export interface RepositorySessionApi {
   readSessionPreview(): Promise<RepositorySessionResult<SessionPreview>>;
   readHistoryPage(cursor: string | null, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
   locateCommit(oid: string, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
-  locateHistoryDate(beforeTimestamp: number, pageSize?: number): Promise<RepositorySessionResult<HistoryPage>>;
+  locateHistoryDate(beforeTimestamp: number, pageSize?: number, knownCursors?: string[]): Promise<RepositorySessionResult<HistoryDateLocation>>;
   cancelHistoryRead(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   refreshRepositorySession(pageSize?: number): Promise<RepositorySessionResult<RefreshedRepository>>;
   recordRepositoryView(expectedGeneration: string): Promise<RepositorySessionResult<RepositoryViewRecorded>>;

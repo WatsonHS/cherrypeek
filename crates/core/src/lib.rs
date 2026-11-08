@@ -451,6 +451,9 @@ pub struct LocateHistoryDateParams {
     pub before_timestamp: i64,
     #[schemars(range(min = 1, max = 500))]
     pub page_size: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 9))]
+    pub known_cursors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1393,10 +1396,24 @@ pub enum ResponseData {
         #[schemars(with = "NullableOidSchema")]
         last_seen_divider_oid: Option<String>,
     },
+    #[serde(rename = "historyDateLocation")]
+    HistoryDateLocation { location: HistoryDateLocation },
     #[serde(rename = "repositoryNavigation")]
     RepositoryNavigation { navigation: RepositoryNavigation },
     #[serde(rename = "refMergeStatus")]
     RefMergeStatus { result: RefMergeStatusResult },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryDateLocation {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[schemars(length(min = 1, max = 512))]
+    pub cursor: String,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 500))]
+    pub page_size: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

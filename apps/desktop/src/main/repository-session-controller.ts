@@ -22,6 +22,8 @@ import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, S
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
+  HistoryDateLocation,
+  HistoryPageContent,
   RefreshedRepository,
   RepositoryNavigation,
   RefMergeStatusResult,
@@ -53,7 +55,15 @@ type RefSnapshotDiffResponse = Extract<ServerResponseMessage["data"], { section:
 type HandoffFactsResponse = Extract<ServerResponseMessage["data"], { section: "handoffFacts" }>;
 type RepositoryResponse = Extract<ServerResponseMessage["data"], { section: "repository" }>;
 type CommitsResponse = Extract<ServerResponseMessage["data"], { section: "commits" }>;
-type HistoryPageResponse = Extract<ServerResponseMessage["data"], { section: "historyPage" }>;
+type HistoryDateLocationResponse = Extract<ServerResponseMessage["data"], { section: "historyDateLocation" }>;
+type HistoryPageChunk = Omit<HistoryPageContent, "nextCursor">;
+
+interface HistoryPageAccumulator {
+  commits: HistoryCommit[];
+  metadata: string;
+  page?: HistoryPageChunk;
+  sawTerminalPage: boolean;
+}
 
 interface ActiveOpen {
   abort: AbortController;
@@ -62,7 +72,7 @@ interface ActiveOpen {
 
 interface ActiveHistoryRead {
   abort: AbortController;
-  done: Promise<HistoryPage>;
+  done: Promise<HistoryPage | HistoryDateLocation>;
 }
 
 interface ActiveRefresh {
@@ -293,11 +303,11 @@ export class RepositorySessionController {
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史页请求已被更新请求取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
-    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
-    active.done = this.readHistoryPageRequest(session, cursor, pageSize, abort);
+    const done: Promise<HistoryPage> = this.readHistoryPageRequest(session, cursor, pageSize, abort);
+    const active: ActiveHistoryRead = { abort, done };
     this.activeHistoryRead = active;
     try {
-      return await active.done;
+      return await done;
     } finally {
       if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
     }
@@ -324,12 +334,12 @@ export class RepositorySessionController {
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史定位已被更新请求取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
-    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
-    active.done = this.readHistoryPageRequest(session, null, params.pageSize as number, abort,
+    const done: Promise<HistoryPage> = this.readHistoryPageRequest(session, null, params.pageSize as number, abort,
       { kind: "commit", oid: params.oid.toLowerCase() });
+    const active: ActiveHistoryRead = { abort, done };
     this.activeHistoryRead = active;
     try {
-      return await active.done;
+      return await done;
     } finally {
       if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
     }
@@ -344,10 +354,11 @@ export class RepositorySessionController {
     return { cancelled: true };
   }
 
-  async locateHistoryDate(beforeTimestamp: unknown, pageSize = 200): Promise<HistoryPage> {
+  async locateHistoryDate(beforeTimestamp: unknown, pageSize = 200, knownCursors: unknown = []): Promise<HistoryDateLocation> {
     const intent = ++this.pageIntent;
     const session = this.requireHistoryCapability();
-    if (!Number.isSafeInteger(beforeTimestamp) || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_HISTORY_PAGE) {
+    if (!Number.isSafeInteger(beforeTimestamp) || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_HISTORY_PAGE ||
+      !Array.isArray(knownCursors) || knownCursors.length > 9 || !knownCursors.every(cursor => typeof cursor === "string" && cursor.length > 0 && cursor.length <= 512)) {
       throw new ProtocolClientError("INVALID_REQUEST", "日期定位参数无效");
     }
     if (this.activeSearchRequest) await this.cancelSearch();
@@ -362,12 +373,11 @@ export class RepositorySessionController {
     if (intent !== this.pageIntent) throw new ProtocolClientError("CANCELLED", "历史日期定位已被更新请求取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
-    const active: ActiveHistoryRead = { abort, done: Promise.resolve(undefined as never) };
-    active.done = this.readHistoryPageRequest(session, null, pageSize, abort,
-      { kind: "date", beforeTimestamp: beforeTimestamp as number });
+    const done: Promise<HistoryDateLocation> = this.readHistoryDateRequest(session, beforeTimestamp as number, pageSize, knownCursors as string[], abort);
+    const active: ActiveHistoryRead = { abort, done };
     this.activeHistoryRead = active;
     try {
-      return await active.done;
+      return await done;
     } finally {
       if (this.activeHistoryRead === active) this.activeHistoryRead = undefined;
     }
@@ -1340,25 +1350,74 @@ export class RepositorySessionController {
     this.core.switchCurrentContext(contextOf(sessionData.session));
   }
 
+  private async readHistoryDateRequest(
+    session: RepositorySessionInfo,
+    beforeTimestamp: number,
+    pageSize: number,
+    knownCursors: string[],
+    abort: AbortController,
+  ): Promise<HistoryDateLocation> {
+    const responseState: { location?: HistoryDateLocationResponse["location"]; knownCursorHit: boolean } = { knownCursorHit: false };
+    const pageState: HistoryPageAccumulator = { commits: [], metadata: "", sawTerminalPage: false };
+    const completion = await this.core.request("locateHistoryDate", { beforeTimestamp, pageSize, knownCursors }, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      drainAfterAbort: true,
+      fatalOnTimeout: true,
+      signal: abort.signal,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        const data = chunk.data;
+        if (!responseState.location) {
+          if (data.section !== "historyDateLocation") throw invalidSessionResponse("历史日期定位缺少定位区块");
+          if (!validHistoryDateLocation(data, session.repository.objectFormat, pageSize)) throw invalidSessionResponse("历史日期定位区块无效");
+          const location = data.location;
+          responseState.location = location;
+          responseState.knownCursorHit = knownCursors.includes(location.cursor);
+          if (responseState.knownCursorHit) {
+            if (!chunk.done || !chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) {
+              throw invalidSessionResponse("历史日期缓存命中 envelope 无效");
+            }
+          } else if (chunk.done || chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) {
+            throw invalidSessionResponse("历史日期缓存未命中 envelope 无效");
+          }
+          return;
+        }
+        if (responseState.knownCursorHit) throw invalidSessionResponse("历史日期缓存命中之后仍收到数据");
+        const location = responseState.location;
+        if (!location) throw invalidSessionResponse("核心未返回历史日期定位区块");
+        appendHistoryPageChunk(chunk, pageState, session, pageSize, location.cursor, location.offset);
+      },
+    });
+    this.ensureCurrent(session);
+    const location = responseState.location;
+    const knownCursorHit = responseState.knownCursorHit;
+    if (!location) throw invalidSessionResponse("核心未返回历史日期定位区块");
+    if (knownCursorHit) {
+      if (pageState.page || !completion.coverage.complete || completion.coverage.processed !== 0 || completion.nextCursor !== null) {
+        throw invalidSessionResponse("历史日期缓存命中响应不完整或不一致");
+      }
+      return { oid: location.oid, cursor: location.cursor, offset: location.offset, pageSize: location.pageSize, page: null };
+    }
+    const page = completeHistoryPage(pageState, completion.coverage, completion.nextCursor, location.oid);
+    if (page.offset !== location.offset || page.pageSize !== location.pageSize) throw invalidSessionResponse("历史日期定位与历史页位置不一致");
+    return { oid: location.oid, cursor: location.cursor, offset: location.offset, pageSize: location.pageSize, page };
+  }
+
   private async readHistoryPageRequest(
     session: RepositorySessionInfo,
     cursor: string | null,
     pageSize: number,
     abort: AbortController,
-    location?: { kind: "commit"; oid: string } | { kind: "date"; beforeTimestamp: number },
+    location?: { kind: "commit"; oid: string },
   ): Promise<HistoryPage> {
     let repository: RepositoryInfo | undefined;
     let refs: RefInfo[] = [];
     let refsTruncated = false;
-    let page: Omit<HistoryPage, "repository" | "refs" | "refsTruncated" | "nextCursor"> | undefined;
-    const commits: HistoryCommit[] = [];
-    let metadata = "";
+    const pageState: HistoryPageAccumulator = { commits: [], metadata: "", sawTerminalPage: false };
     let sawRepository = false;
-    let sawTerminalPage = false;
-    const method = location?.kind === "commit" ? "locateCommit" : location?.kind === "date" ? "locateHistoryDate" : "readHistoryPage";
+    const method = location?.kind === "commit" ? "locateCommit" : "readHistoryPage";
     const params = location?.kind === "commit" ? { oid: location.oid, pageSize }
-      : location?.kind === "date" ? { beforeTimestamp: location.beforeTimestamp, pageSize }
-        : { cursor, pageSize };
+      : { cursor, pageSize };
     const completion = await this.core.request(method, params, contextOf(session), {
       timeoutMs: SESSION_TIMEOUT_MS,
       drainAfterAbort: true,
@@ -1366,10 +1425,10 @@ export class RepositorySessionController {
       signal: abort.signal,
       onChunk: chunk => {
         this.ensureCurrent(session);
-        if (sawTerminalPage) throw invalidSessionResponse("历史页终止块之后仍收到数据");
         const data = chunk.data;
+        if (pageState.sawTerminalPage) throw invalidSessionResponse("历史页终止块之后仍收到数据");
         if (data.section === "repository") {
-          if (sawRepository || page || chunk.done) throw invalidSessionResponse("历史页仓库头位置无效");
+          if (sawRepository || pageState.page || chunk.done) throw invalidSessionResponse("历史页仓库头位置无效");
           if (chunk.coverage.complete || chunk.coverage.processed !== 0 || chunk.nextCursor !== null) throw invalidSessionResponse("历史页仓库头 envelope 无效");
           sawRepository = true;
           repository = data.repository;
@@ -1379,48 +1438,17 @@ export class RepositorySessionController {
         }
         if (data.section !== "historyPage") throw invalidSessionResponse(`历史页收到意外区块：${data.section}`);
         if (!sawRepository) throw invalidSessionResponse("历史页缺少仓库头");
-        const currentMetadata = JSON.stringify({
-          cursor: data.cursor,
-          offset: data.offset,
-          pageSize: data.pageSize,
-          previousCursor: data.previousCursor,
-          hasMore: data.hasMore,
-          newSinceLastSeenStatus: data.newSinceLastSeenStatus,
-          lastSeenDividerOid: data.lastSeenDividerOid,
-        });
-        if (metadata && currentMetadata !== metadata) throw invalidSessionResponse("历史页分块元数据不一致");
-        metadata = currentMetadata;
-        if (data.pageSize !== pageSize || data.commits.length + commits.length > pageSize) {
-          throw invalidSessionResponse("历史页提交数量超过请求上限");
-        }
-        if (!Array.isArray(data.commits) || !data.commits.every(commit => validHistoryGraphCommit(commit, session.repository.objectFormat))) {
-          throw invalidSessionResponse("历史页包含无效或缺失的图布局");
-        }
-        if ((!location && cursor === null && (data.offset !== 0 || data.previousCursor !== null)) ||
-          (cursor !== null && data.cursor !== cursor)) throw invalidSessionResponse("历史页游标与位置不一致");
-        if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
-          : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("历史页 envelope 终态无效");
-        commits.push(...data.commits);
-        page = {
-          commits,
-          offset: data.offset,
-          pageSize: data.pageSize,
-          cursor: data.cursor,
-          previousCursor: data.previousCursor,
-          hasMore: data.hasMore,
-          newSinceLastSeenStatus: data.newSinceLastSeenStatus,
-          lastSeenDividerOid: data.lastSeenDividerOid,
-        };
-        if (chunk.done) sawTerminalPage = true;
+        appendHistoryPageChunk(chunk, pageState, session, pageSize,
+          cursor ?? (location?.kind === "commit" ? undefined : null),
+          undefined,
+          !location && cursor === null);
       },
     });
     this.ensureCurrent(session);
-    if (!repository || !sawRepository || !page || !sawTerminalPage || !completion.coverage.complete ||
-      completion.coverage.processed !== commits.length || completion.nextCursor && !page.hasMore ||
-      !completion.nextCursor && page.hasMore || location?.kind === "commit" && !commits.some(commit => commit.oid === location.oid)) {
-      throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
-    }
-    return { repository, refs, refsTruncated, ...page, commits, nextCursor: completion.nextCursor };
+    if (!repository || !sawRepository) throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
+    const page = completeHistoryPage(pageState, completion.coverage, completion.nextCursor,
+      location?.kind === "commit" ? location.oid : undefined);
+    return { repository, refs, refsTruncated, ...page };
   }
 
   private async refreshRepositoryRequest(
@@ -1839,6 +1867,85 @@ function validSearchPathMatches(matches: SearchPage["pathMatches"], params: Sear
 function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function validHistoryDateLocation(
+  response: HistoryDateLocationResponse,
+  objectFormat: string,
+  pageSize: number,
+): boolean {
+  const location = response.location as unknown;
+  const oidLength = objectFormat === "sha1" ? 40 : objectFormat === "sha256" ? 64 : 0;
+  return isRecord(location) && hasExactKeys(location, ["cursor", "offset", "oid", "pageSize"]) &&
+    typeof location.oid === "string" && location.oid.length === oidLength && /^[0-9a-fA-F]+$/.test(location.oid) &&
+    typeof location.cursor === "string" && location.cursor.length > 0 && location.cursor.length <= 512 &&
+    Number.isSafeInteger(location.offset) && (location.offset as number) >= 0 && (location.offset as number) <= 0xffff_ffff &&
+    Number.isInteger(location.pageSize) && location.pageSize === pageSize && (location.offset as number) % pageSize === 0;
+}
+
+function appendHistoryPageChunk(
+  chunk: ServerResponseMessage,
+  state: HistoryPageAccumulator,
+  session: RepositorySessionInfo,
+  pageSize: number,
+  expectedCursor?: string | null,
+  expectedOffset?: number,
+  initialPage = false,
+): void {
+  if (state.sawTerminalPage) throw invalidSessionResponse("历史页终止块之后仍收到数据");
+  if (chunk.data.section !== "historyPage") throw invalidSessionResponse(`历史页收到意外区块：${chunk.data.section}`);
+  const data = chunk.data;
+  const currentMetadata = JSON.stringify({
+    cursor: data.cursor,
+    offset: data.offset,
+    pageSize: data.pageSize,
+    previousCursor: data.previousCursor,
+    hasMore: data.hasMore,
+    newSinceLastSeenStatus: data.newSinceLastSeenStatus,
+    lastSeenDividerOid: data.lastSeenDividerOid,
+  });
+  if (state.metadata && currentMetadata !== state.metadata) throw invalidSessionResponse("历史页分块元数据不一致");
+  state.metadata = currentMetadata;
+  if (!Array.isArray(data.commits) || data.pageSize !== pageSize || state.commits.length + data.commits.length > pageSize) {
+    throw invalidSessionResponse("历史页提交数量超过请求上限");
+  }
+  if (!data.commits.every(commit => validHistoryGraphCommit(commit, session.repository.objectFormat))) {
+    throw invalidSessionResponse("历史页包含无效或缺失的图布局");
+  }
+  if ((initialPage && (data.offset !== 0 || data.previousCursor !== null)) ||
+    (typeof expectedCursor === "string" && data.cursor !== expectedCursor) ||
+    (expectedOffset !== undefined && data.offset !== expectedOffset)) {
+    throw invalidSessionResponse("历史页游标与位置不一致");
+  }
+  if (chunk.done ? (!chunk.coverage.complete || data.hasMore !== (chunk.nextCursor !== null))
+    : (chunk.coverage.complete || chunk.nextCursor !== null)) throw invalidSessionResponse("历史页 envelope 终态无效");
+  state.commits.push(...data.commits);
+  state.page = {
+    commits: state.commits,
+    offset: data.offset,
+    pageSize: data.pageSize,
+    cursor: data.cursor,
+    previousCursor: data.previousCursor,
+    hasMore: data.hasMore,
+    newSinceLastSeenStatus: data.newSinceLastSeenStatus,
+    lastSeenDividerOid: data.lastSeenDividerOid,
+  };
+  if (chunk.done) state.sawTerminalPage = true;
+}
+
+function completeHistoryPage(
+  state: HistoryPageAccumulator,
+  coverage: { complete: boolean; processed: number },
+  nextCursor: string | null,
+  expectedOid?: string,
+): HistoryPageContent {
+  const page = state.page;
+  if (!page || !state.sawTerminalPage || !coverage.complete || coverage.processed !== state.commits.length ||
+    (nextCursor !== null && !page.hasMore) || (nextCursor === null && page.hasMore) ||
+    (expectedOid !== undefined && !state.commits.some(commit => commit.oid === expectedOid))) {
+    throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
+  }
+  return { ...page, commits: state.commits, nextCursor };
 }
 
 function validHistoryGraphCommit(value: unknown, objectFormat: string): boolean {

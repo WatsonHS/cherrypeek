@@ -314,6 +314,12 @@ test("the real controller accepts daemon navigation and merge-status coverage", 
     assert.equal(containing.observedAtUnixMs, opened.observedAtUnixMs);
     assert.ok(containing.branches.some(ref => ref.name === "refs/heads/main"));
 
+    const located = await controller.locateHistoryDate(4_102_444_800, 200, []);
+    assert.ok(located.page.commits.some(commit => commit.oid === located.oid));
+    assert.equal("refs" in located.page, false, "date pages reuse the existing snapshot references");
+    const reused = await controller.locateHistoryDate(4_102_444_800, 200, [located.cursor]);
+    assert.deepEqual(reused, { ...located, page: null }, "a real transport round trip reuses the retained page");
+
     const selected = await controller.selectScope({ ref: "refs/heads/feature/merged" }, 50);
     assert.equal(selected.session.scope.ref, "refs/heads/feature/merged");
     assert.deepEqual(selected.session.tips, [selected.page.commits[0]?.oid].filter(Boolean));
