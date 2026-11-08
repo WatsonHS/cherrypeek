@@ -826,27 +826,31 @@ export class RepositorySessionStore {
   }
 
   private async loadPage(token: number, session: RepositorySessionInfo, cursor: string, direction: "before" | "after"): Promise<HistoryPage | undefined> {
-    const requestDone = settle(this.api.readHistoryPage(cursor, this.view.pageSize)).then(result => {
+    const repository = this.view.repository;
+    if (!repository) return undefined;
+    const snapshot = { repository, refs: this.view.refs, refsTruncated: this.view.refsTruncated };
+    const requestDone = settle(this.api.readHistoryPage(cursor, this.view.pageSize, true)).then(result => {
       if (token !== this.pageOperation || !sameSession(this.view.session, session)) return undefined;
       if (!result.ok) {
         this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: result.error, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
         return undefined;
       }
-      if (!validHistoryPage(result.value, this.view.pageSize)) {
+      const page = { ...result.value, ...snapshot };
+      if (!validHistoryPage(page, this.view.pageSize)) {
         this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: { code: "PROTOCOL_ERROR", message: "核心返回的历史页不完整" }, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
         return undefined;
       }
       const current = this.view;
       const edge = direction === "before" ? this.pages[0] : this.pages.at(-1);
       const adjacent = direction === "before"
-        ? result.value.offset + result.value.commits.length === edge?.offset && result.value.nextCursor === edge.cursor
-        : result.value.offset === (edge?.offset ?? -1) + (edge?.commits.length ?? 0) && result.value.previousCursor === edge?.cursor;
-      const duplicate = result.value.commits.some(commit => current.commits.some(existing => existing.oid === commit.oid));
+        ? page.offset + page.commits.length === edge?.offset && page.nextCursor === edge.cursor
+        : page.offset === (edge?.offset ?? -1) + (edge?.commits.length ?? 0) && page.previousCursor === edge?.cursor;
+      const duplicate = page.commits.some(commit => current.commits.some(existing => existing.oid === commit.oid));
       if (!adjacent || duplicate) {
         this.update({ ...current, pageLoading: false, pageRequestDirection: null, pageRequestKind: null, pageError: { code: "PROTOCOL_ERROR", message: "核心返回的历史页与当前窗口不连续" }, pageErrorKind: "read", retryCursor: cursor, retryDirection: direction });
         return undefined;
       }
-      const nextPages = direction === "before" ? [result.value, ...this.pages] : [...this.pages, result.value];
+      const nextPages = direction === "before" ? [page, ...this.pages] : [...this.pages, page];
       while (nextPages.reduce((total, item) => total + item.commits.length, 0) > 1_800) {
         const protectedIndex = this.viewportAnchorOid
           ? nextPages.findIndex(item => item.commits.some(commit => commit.oid === this.viewportAnchorOid))
@@ -870,7 +874,7 @@ export class RepositorySessionStore {
         retryDirection: direction,
         pageErrorKind: null,
       });
-      return result.value;
+      return page;
     });
     return await requestDone;
   }

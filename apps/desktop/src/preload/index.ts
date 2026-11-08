@@ -21,7 +21,7 @@ const api: CommitScopeApi = {
   openRepositorySession: path => ipcRenderer.invoke("commitscope:session:open", path),
   getRepositorySession: () => ipcRenderer.invoke("commitscope:session:get"),
   readSessionPreview: () => ipcRenderer.invoke("commitscope:session:preview"),
-  readHistoryPage: (cursor, pageSize) => ipcRenderer.invoke("commitscope:history:read-page", cursor, pageSize),
+  readHistoryPage: (cursor, pageSize, contentOnly) => ipcRenderer.invoke("commitscope:history:read-page", cursor, pageSize, contentOnly),
   locateCommit: (oid, pageSize) => ipcRenderer.invoke("commitscope:history:locate-commit", { oid, pageSize: pageSize ?? 200 }),
   locateHistoryDate: (beforeTimestamp, pageSize, knownCursors = []) => ipcRenderer.invoke("commitscope:history:locate-date", beforeTimestamp, pageSize ?? 200, knownCursors),
   cancelHistoryRead: () => ipcRenderer.invoke("commitscope:history:cancel-read"),

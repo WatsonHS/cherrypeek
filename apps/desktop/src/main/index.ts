@@ -219,9 +219,15 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.cancelCommitDetails());
   });
-  ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown) => {
+  ipcMain.handle(IPC_HISTORY_READ, (event, cursor: unknown, pageSize: unknown, contentOnly: unknown = false) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
-    return sessionResult(() => repositorySessions!.readHistoryPage(cursor, pageSize === undefined ? 200 : pageSize as number));
+    return sessionResult(async () => {
+      if (typeof contentOnly !== "boolean") throw new ProtocolClientError("INVALID_REQUEST", "历史页读取参数无效");
+      const page = await repositorySessions!.readHistoryPage(cursor, pageSize === undefined ? 200 : pageSize as number);
+      if (!contentOnly) return page;
+      const { repository, refs, refsTruncated, ...content } = page;
+      return content;
+    });
   });
   ipcMain.handle(IPC_HISTORY_LOCATE, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

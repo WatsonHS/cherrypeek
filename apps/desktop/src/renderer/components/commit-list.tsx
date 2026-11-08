@@ -56,7 +56,9 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   const index = new Map<string, RefInfo[]>();
   for (const ref of refs) {
     const target = refTarget(ref);
-    index.set(target, [...(index.get(target) ?? []), ref]);
+    const bucket = index.get(target);
+    if (bucket) bucket.push(ref);
+    else index.set(target, [ref]);
   }
   return index;
 }

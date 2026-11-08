@@ -48,7 +48,7 @@ try {
   await page.bringToFront();
   await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"]')?.dataset.state === "ready", null, { timeout: 45_000 });
   await page.waitForFunction(() => {
-    const list = document.querySelector('[aria-label="提交"]');
+    const list = document.querySelector('[role="listbox"][aria-label="提交"]');
     return list && Number(list.dataset.loadedCount) >= 200 && list.querySelector('[data-testid="commit-row"]');
   }, null, { timeout: 30_000 });
   output.measurements.window = await app.evaluate(({ BrowserWindow }) => {
@@ -103,6 +103,37 @@ try {
   await goNewest(page);
   output.measurements.fastScroll = await fastScroll(page);
   await goNewest(page);
+  if (args.retention === "true") {
+    const { diagnoseRendererRetention } = await import("./lib/renderer-retention.mjs");
+    output.measurements.retention = await diagnoseRendererRetention({ app, page, outputPath: args.output,
+      sampleTree: () => sampleProcessTree(app.process().pid),
+      cycle: async () => {
+        const drag = await dragSliderAndMeasure(page, dates[3]);
+        await goNewest(page);
+        const scroll = await fastScroll(page);
+        await goNewest(page);
+        return { drag, scroll };
+      },
+    });
+    output.measurements.paginationPayload = await page.evaluate(async () => {
+      const first = await window.commitScope.readHistoryPage(null, 200);
+      if (!first.ok || !first.value.nextCursor) throw new Error("Missing second history page");
+      const full = await window.commitScope.readHistoryPage(first.value.nextCursor, 200);
+      const content = await window.commitScope.readHistoryPage(first.value.nextCursor, 200, true);
+      if (!full.ok || !content.ok) throw new Error("History payload comparison failed");
+      const { repository, refs, refsTruncated, ...expected } = full.value;
+      if (JSON.stringify(expected) !== JSON.stringify(content.value)) throw new Error("Content-only history page differs");
+      return { fullBytes: new TextEncoder().encode(JSON.stringify(full.value)).length,
+        contentBytes: new TextEncoder().encode(JSON.stringify(content.value)).length,
+        rowCount: content.value.commits.length, offset: content.value.offset, equalContent: true };
+    });
+    await page.getByTestId("scope-picker").click();
+    await page.getByTestId("scope-popover").waitFor({ state: "visible" });
+    const visibleRefCount = await page.locator("[data-scope-ref-kind]").count();
+    await page.mouse.click(900, 600);
+    await page.getByTestId("scope-popover").waitFor({ state: "hidden" });
+    output.measurements.scopeMenu = { visibleRefCount, outsideClickClosed: true };
+  }
   if (output.failures.length) process.exitCode = 1;
 } catch (error) {
   output.failure = { message: error.message, stack: error.stack };
@@ -126,7 +157,7 @@ function parseArgs(argv) {
     const split = token.indexOf("=");
     if (!token.startsWith("--") || split < 3) throw new Error(`Expected --name=value: ${token}`);
     const name = token.slice(2, split);
-    if (!["repository", "profile", "output"].includes(name)) throw new Error(`Unknown argument: ${name}`);
+    if (!["repository", "profile", "output", "retention"].includes(name)) throw new Error(`Unknown argument: ${name}`);
     values[name] = token.slice(split + 1);
   }
   for (const name of ["repository", "profile", "output"]) if (!values[name]) throw new Error("Usage: node scripts/benchmark-history-navigation.mjs --repository=/abs/wide-history --profile=/abs/app-data --output=/abs/new.json");
@@ -201,7 +232,7 @@ async function waitForStableHistory(target, timeoutMs) {
   let previous = "", stableSamples = 0, stableAt = null;
   while (Date.now() < deadline) {
     const state = await target.evaluate(() => {
-      const list = document.querySelector('[aria-label="提交"]');
+      const list = document.querySelector('[role="listbox"][aria-label="提交"]');
       const slider = document.querySelector('[data-testid="history-time-slider-track"]');
       return list ? { busy: list.getAttribute("aria-busy"), sliderBusy: slider?.getAttribute("aria-busy") ?? "false", loading: list.dataset.pageLoading, offset: list.dataset.loadedOffset, count: list.dataset.loadedCount, selectedOid: list.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") ?? null } : null;
     });
@@ -224,7 +255,7 @@ async function fastScroll(target) {
   if (!listBox) throw new Error("History list has no bounding box");
   await target.mouse.move(listBox.x + listBox.width / 2, listBox.y + listBox.height / 2);
   await list.evaluate(() => {
-    const list = document.querySelector('[aria-label="提交"]');
+    const list = document.querySelector('[role="listbox"][aria-label="提交"]');
     if (!list) throw new Error("History list missing");
     const samples = [];
     let edgeBusyStart = null, edgeWaitMs = 0, edgeWaitCount = 0, maxDomRows = 0, maxLoadedCount = 0;
@@ -264,7 +295,7 @@ async function goNewest(target) {
   const newest = target.getByTestId("history-newest");
   if (await newest.count()) await newest.click({ timeout: 5_000 });
   await target.waitForFunction(() => {
-    const list = document.querySelector('[aria-label="提交"]');
+    const list = document.querySelector('[role="listbox"][aria-label="提交"]');
     return list && list.dataset.pageLoading === "false" && Number(list.dataset.loadedOffset) === 0;
   }, null, { timeout: 5_000 });
 }

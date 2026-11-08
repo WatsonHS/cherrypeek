@@ -357,7 +357,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
         </span>
       </Button>
     </PopoverTrigger>
-    <PopoverContent className="flex max-h-(--radix-popover-content-available-height) w-[440px] flex-col p-0" data-testid="scope-popover">
+    {open ? <PopoverContent className="flex max-h-(--radix-popover-content-available-height) w-[440px] flex-col p-0" data-testid="scope-popover">
       <div className="flex flex-col gap-1 border-b border-line px-4 py-3">
         <span className="font-semibold">浏览范围</span>
         <span className="text-xs text-fg3">只切换只读历史范围；不会切换或修改任何 worktree。</span>
@@ -430,7 +430,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
       </div>
       {navigation ? <div className="border-t border-line px-4 py-2 text-[11px] text-fg3">本地引用快照 {momentLabel(navigation.observedAtUnixMs)} · 未 fetch</div> : null}
       {preview.refsTruncated ? <div className="border-t border-line bg-bg px-4 py-2.5 text-xs text-fg3">引用数量达到显示上限，列表不完整。</div> : null}
-    </PopoverContent>
+    </PopoverContent> : null}
   </Popover>;
 }
 

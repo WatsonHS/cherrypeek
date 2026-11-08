@@ -38,6 +38,10 @@ function fakeApi() {
       await settled();
       const call = pending[name].shift();
       assert.ok(call, `expected a pending ${name} call`);
+      if (name === "readHistoryPage" && call.args[2] === true && value.ok) {
+        const { repository, refs, refsTruncated, ...content } = value.value;
+        value = ok(content);
+      }
       call.resolve(value);
       await settled();
     },
@@ -464,10 +468,12 @@ test("failed next page keeps the current page and retries the failed cursor", as
   const store = new RepositorySessionStore(fake.api);
   const session = await openReady(fake, store, "a", { nextCursor: "cursor-200", count: 200 });
   const firstPage = store.getView().commits;
+  const snapshotRefs = store.getView().refs;
+  const snapshotRepository = store.getView().repository;
 
   const next = store.nextPage();
   await settled();
-  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200]);
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200, true]);
   await fake.answer("readHistoryPage", err("GIT_ERROR", "temporary"));
   await next;
   assert.equal(store.getView().state, "ready");
@@ -476,13 +482,15 @@ test("failed next page keeps the current page and retries the failed cursor", as
 
   const retry = store.retryPage();
   await settled();
-  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200]);
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-200", 200, true]);
   await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { offset: 200, cursor: "cursor-200", previousCursor: "cursor-0", count: 200 })));
   await retry;
   assert.equal(store.getView().pageOffset, 0);
   assert.equal(store.getView().commits.length, 400);
   assert.equal(store.getView().commits[0].summary, "summary 1");
   assert.equal(store.getView().commits[200].summary, "summary 201");
+  assert.equal(store.getView().refs, snapshotRefs, "appended pages keep the frozen reference array");
+  assert.equal(store.getView().repository, snapshotRepository);
   assert.deepEqual(fake.pending.readHistoryPage, []);
 
   const previousLoadedPage = await store.previousPage();
@@ -545,7 +553,7 @@ test("the renderer retains at most 1,800 commits for the detail-page budget and 
   assert.equal(store.getView().pageCursor, "cursor-200");
   const previous = store.previousPage();
   await settled();
-  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200]);
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200, true]);
   await fake.answer("readHistoryPage", ok(makeHistoryPage(session, { count: 200, cursor: "cursor-0", nextCursor: "cursor-200" })));
   const selected = await previous;
   assert.equal(selected, store.getView().commits[199].oid);
@@ -569,10 +577,10 @@ test("a newer reverse intent drains and supersedes a pending forward prefetch", 
   assert.equal(store.getView().pageRequestDirection, "after");
   const reverse = store.readPage("cursor-0");
   await settled();
-  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-400", 200]);
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-400", 200, true]);
   await fake.answer("readHistoryPage", err("CANCELLED", "superseded"));
   await settled();
-  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200]);
+  assert.deepEqual(fake.pending.readHistoryPage[0].args, ["cursor-0", 200, true]);
   await fake.answer("readHistoryPage", ok(makeHistoryPage(session, {
     offset: 0, count: 200, cursor: "cursor-0", nextCursor: "cursor-200",
   })));
