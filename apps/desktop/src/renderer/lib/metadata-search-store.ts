@@ -95,6 +95,8 @@ export class MetadataSearchStore {
   private identityIntent = 0;
   private identityTail: Promise<void> = Promise.resolve();
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** A scheduled search came due while suggestions were loading; it runs once they finish. */
+  private searchWaitingForSuggestions = false;
   private composing = false;
   private pages: SearchPage[] = [];
   private sessionKey: string | null = null;
@@ -244,6 +246,7 @@ export class MetadataSearchStore {
     const operation = ++this.identityOperation[field];
     const searchPending = this.view.loading || this.view.pageLoading;
     const resumeSearch = this.view.active && (searchPending || Boolean(this.view.window && !this.view.window.coverage.complete));
+    if (resumeSearch) this.searchWaitingForSuggestions = true;
     if (searchPending) ++this.operation;
     const otherField = field === "author" ? "committer" : "author";
     this.update({ ...this.view, loading: false, pageLoading: false,
@@ -254,12 +257,12 @@ export class MetadataSearchStore {
     if (intent !== this.identityIntent || operation !== this.identityOperation[field]) return;
     if (!result.ok) {
       this.updateIdentity(field, { ...this.identitiesFor(field), loading: false, error: result.error.message });
-      if (resumeSearch && !this.composing && this.view.active && !this.view.authorIdentities.loading && !this.view.committerIdentities.loading) this.schedule(250);
+      this.resumeAfterSuggestions();
       return;
     }
     this.updateIdentity(field, { values: result.value.identities,
       loading: false, error: null, truncated: result.value.truncated, coverage: result.value.coverage });
-    if (resumeSearch && !this.composing && this.view.active && !this.view.authorIdentities.loading && !this.view.committerIdentities.loading) this.schedule(250);
+    this.resumeAfterSuggestions();
   }
 
   async loadPaths(text: string): Promise<void> {
@@ -267,6 +270,7 @@ export class MetadataSearchStore {
     const operation = ++this.pathSuggestionOperation;
     const searchPending = this.view.loading || this.view.pageLoading;
     const resumeSearch = this.view.active && (searchPending || Boolean(this.view.window && !this.view.window.coverage.complete));
+    if (resumeSearch) this.searchWaitingForSuggestions = true;
     if (searchPending) ++this.operation;
     this.update({ ...this.view, loading: false, pageLoading: false,
       pathSuggestions: { ...this.view.pathSuggestions, text, loading: true, error: null } });
@@ -276,11 +280,11 @@ export class MetadataSearchStore {
     if (!result || intent !== this.identityIntent || operation !== this.pathSuggestionOperation) return;
     if (!result.ok) {
       this.update({ ...this.view, pathSuggestions: { ...this.view.pathSuggestions, loading: false, error: result.error.message } });
-      if (resumeSearch && !this.composing && this.view.active) this.schedule(250);
+      this.resumeAfterSuggestions();
       return;
     }
     this.update({ ...this.view, pathSuggestions: { text, entries: result.value.entries, loading: false, error: null, truncated: result.value.truncated } });
-    if (resumeSearch && !this.composing && this.view.active) this.schedule(250);
+    this.resumeAfterSuggestions();
   }
 
   async loadNext(): Promise<void> {
@@ -357,12 +361,33 @@ export class MetadataSearchStore {
     this.clearDebounce();
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = undefined;
+      // Suggestions answer what the user is typing right now. Running the search would cancel
+      // them and leave "没有匹配身份建议" on screen, so the search waits for them instead.
+      if (this.suggestionsLoading()) {
+        this.searchWaitingForSuggestions = true;
+        return;
+      }
       void this.runSearch({ cursor: null, anchorOid: this.view.anchorOid });
     }, delay);
   }
 
+  private suggestionsLoading(): boolean {
+    return this.view.authorIdentities.loading || this.view.committerIdentities.loading || this.view.pathSuggestions.loading;
+  }
+
+  /**
+   * After a suggestion request, runs the search it interrupted or that came due meanwhile.
+   * Whichever suggestion request finishes last does this, even if an earlier one was superseded.
+   */
+  private resumeAfterSuggestions(): void {
+    if (!this.searchWaitingForSuggestions || this.composing || !this.view.active || this.suggestionsLoading()) return;
+    this.searchWaitingForSuggestions = false;
+    this.schedule(250);
+  }
+
   private async runSearch(options: { cursor: string | null; anchorOid: string | null }): Promise<void> {
     if (this.composing) return;
+    this.searchWaitingForSuggestions = false;
     const operation = ++this.operation;
     ++this.identityIntent;
     ++this.identityOperation.author;
@@ -475,6 +500,7 @@ export class MetadataSearchStore {
   private clearDebounce(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = undefined;
+    this.searchWaitingForSuggestions = false;
   }
 
   private async enqueueIdentityRequest<T>(intent: number, request: () => Promise<T>): Promise<T | undefined> {

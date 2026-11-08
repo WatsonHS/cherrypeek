@@ -225,6 +225,57 @@ test("identity suggestions supersede an in-flight page without persisting CANCEL
   assert.equal(store.getView().error, null);
 });
 
+test("a search that comes due while identity suggestions load waits for them instead of dropping them", async () => {
+  let searchCalls = 0;
+  let answerIdentities;
+  const store = new MetadataSearchStore({
+    searchCommits: async () => {
+      searchCalls += 1;
+      return ok(page({ version: "v1", commits: [commit("a")], complete: true }));
+    },
+    listSearchIdentities: () => new Promise(resolve => { answerIdentities = resolve; }),
+    cancelSearch: async () => ok({ cancelled: true }),
+  });
+  // Choosing an Author schedules a search; typing a Committer name right after asks for suggestions.
+  store.updateQuery({ ...DEFAULT_SEARCH_QUERY, message: "needle" });
+  const loading = store.loadIdentities("committer", "Committer");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(searchCalls, 0, "the due search waits for the suggestions");
+  assert.equal(store.getView().committerIdentities.loading, true, "the picker keeps showing that suggestions are loading");
+
+  answerIdentities(ok({ field: "committer", identities: [{ name: "Xavier Committer", email: "x@example.invalid" }], truncated: false,
+    coverage: { processed: 1, complete: true } }));
+  await loading;
+  const names = () => store.getView().committerIdentities.values.map(identity => identity.name);
+  assert.deepEqual(names(), ["Xavier Committer"]);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(searchCalls, 1, "the search runs once the suggestions are in");
+  assert.equal(store.getView().window.commits[0].oid, "a");
+  assert.deepEqual(names(), ["Xavier Committer"], "the search keeps the suggestions");
+});
+
+test("a search interrupted by suggestions resumes even when a newer suggestion request replaces the first", async () => {
+  let searchCalls = 0;
+  const store = new MetadataSearchStore({
+    searchCommits: async () => {
+      searchCalls += 1;
+      if (searchCalls === 1) return new Promise(() => {});
+      return ok(page({ version: "v2", commits: [commit("resumed")], complete: true }));
+    },
+    listSearchIdentities: async params => ok({ field: params.field, identities: [{ name: params.text, email: "a@example.invalid" }], truncated: false,
+      coverage: { processed: 1, complete: true } }),
+    cancelSearch: async () => ok({ cancelled: true }),
+  });
+  store.updateQuery({ ...DEFAULT_SEARCH_QUERY, message: "needle" });
+  await new Promise(resolve => setTimeout(resolve, 275));
+  assert.equal(searchCalls, 1);
+  await Promise.all([store.loadIdentities("author", "A"), store.loadIdentities("author", "Al")]);
+  assert.deepEqual(store.getView().authorIdentities.values.map(identity => identity.name), ["Al"]);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(searchCalls, 2, "the interrupted search runs again");
+  assert.equal(store.getView().window.commits[0].oid, "resumed");
+});
+
 test("a new query during leave keeps the saved deep-history return point", async () => {
   let resolveCancel;
   const point = { cursor: "deep-history-cursor", selectedOid: "history-oid", selectedCommit: null,

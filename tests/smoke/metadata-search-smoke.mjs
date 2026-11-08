@@ -102,9 +102,12 @@ try {
     if (!(await next.count())) break;
     const beforeHeight = await resultList.evaluate(element => element.scrollHeight);
     await next.click();
+    // The window holds at most 1800 results, one of which is kept for the history selection, so
+    // the ninth page already drops the first one. Once "读取更早结果" shows, the list stops growing.
+    const earlier = page.getByTestId("search-results").getByRole("button", { name: "读取更早结果" });
     await waitUntil(async () => {
       const current = await resultList.evaluate(element => ({ height: element.scrollHeight, busy: element.getAttribute("aria-busy") }));
-      return current.busy === "false" && (current.height > beforeHeight || index >= 8) ? true : null;
+      return current.busy === "false" && (current.height > beforeHeight || await earlier.count() > 0) ? true : null;
     }, `search page ${index + 1} loaded`, 30_000);
   }
   const listDiagnostics = await resultList.evaluate(element => ({
@@ -123,12 +126,14 @@ try {
   await page.getByTestId("search-identity-author-0").waitFor({ state: "visible" });
   await page.getByTestId("search-identity-author-0").click();
   await page.getByText("Bob Search", { exact: true }).waitFor({ state: "visible" });
-  await page.getByRole("option", { name: /Bob Search/u }).click();
+  // Result rows are options too and show identities, so look only in the suggestion list.
+  await page.getByRole("listbox", { name: "Author建议" }).getByRole("option", { name: /Bob Search/u }).click();
   await addSearchCondition(page, "committer");
   const committerInput = page.getByLabel("搜索Committer姓名或邮箱");
   await committerInput.fill("Committer");
-  await page.getByRole("option", { name: /Xavier Committer/u }).waitFor({ state: "visible" });
-  await page.getByRole("option", { name: /Xavier Committer/u }).click();
+  const xavier = page.getByRole("listbox", { name: "Committer建议" }).getByRole("option", { name: /Xavier Committer/u });
+  await xavier.waitFor({ state: "visible" });
+  await xavier.click();
   await input.fill("common searchable marker");
   const expectedCombined = [...fixture.commits.values()].filter(commit =>
     commit.message.includes("common searchable marker") &&
