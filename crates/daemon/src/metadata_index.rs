@@ -23,6 +23,10 @@ use std::{
 const APPLICATION_ID: i32 = 0x43534958;
 const SCHEMA_VERSION: i32 = 1;
 const DEFAULT_QUOTA: u64 = 2 * 1024 * 1024 * 1024;
+/// How long an index write keeps trying while readers (activity stats, search) hold the database.
+const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(60);
+/// Pause between write attempts; no lock is held meanwhile, so readers can finish.
+const BUSY_RETRY_PAUSE: Duration = Duration::from_millis(200);
 const MIN_QUOTA: u64 = 256 * 1024;
 const MAX_BATCH: usize = 64;
 const KNOWN_SIDECARS: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -1104,10 +1108,12 @@ fn run_index_inner(
     {
         return Ok(index.status(session));
     }
-    index.set_state(&snapshot_key, MetadataIndexState::Running, None)?;
+    retry_while_busy(cancelled, || {
+        index.set_state(&snapshot_key, MetadataIndexState::Running, None)
+    })?;
     progress(index.status(session));
     if tips.is_empty() {
-        index.mark_complete(&snapshot_key)?;
+        retry_while_busy(cancelled, || index.mark_complete(&snapshot_key))?;
         let status = index.status(session);
         progress(status.clone());
         return Ok(status);
@@ -1237,7 +1243,7 @@ fn run_index_inner(
         Instant::now() + Duration::from_secs(15),
     )
     .map_err(map_repository_error)?;
-    index.mark_complete(&snapshot_key)?;
+    retry_while_busy(cancelled, || index.mark_complete(&snapshot_key))?;
     let status = index.status(session);
     progress(status.clone());
     Ok(status)
@@ -1275,7 +1281,9 @@ fn index_batch(
     if parsed.len() != oids.len() {
         return Err(corrupt("Git returned an incomplete metadata batch"));
     }
-    index.insert_batch(snapshot_key, &parsed, quota)?;
+    retry_while_busy(cancelled, || {
+        index.insert_batch(snapshot_key, &parsed, quota)
+    })?;
     repository::verify_graph_fingerprint(
         &session.discovered,
         cancelled,
@@ -1310,7 +1318,7 @@ impl IndexStore {
         };
         let connection = index.connection()?;
         connection
-            .busy_timeout(Duration::from_millis(250))
+            .busy_timeout(Duration::from_millis(1_000))
             .map_err(map_sql_error)?;
         connection
             .pragma_update(None, "trusted_schema", "OFF")
@@ -1837,7 +1845,36 @@ fn map_repository_error(error: repository::PreviewError) -> IndexError {
         message: error.message,
     }
 }
+/// Runs an index write again while the database is busy. In the rollback-journal mode used here a
+/// long read blocks the commit; a failed attempt rolls back, so it can simply be repeated.
+fn retry_while_busy<T>(
+    cancelled: &AtomicBool,
+    mut write: impl FnMut() -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
+    let deadline = Instant::now() + BUSY_RETRY_LIMIT;
+    loop {
+        match write() {
+            Err(error)
+                if error.code == ErrorCode::Busy
+                    && Instant::now() < deadline
+                    && !cancelled.load(Ordering::Acquire) =>
+            {
+                thread::sleep(BUSY_RETRY_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
 fn map_sql_error(error: rusqlite::Error) -> IndexError {
+    // A lock held by another reader or writer is temporary, not damage.
+    if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    {
+        return IndexError {
+            code: ErrorCode::Busy,
+            message: "Metadata index is busy with another read or write; try again shortly".into(),
+        };
+    }
     if matches!(&error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DiskFull)
     {
         return IndexError {
@@ -1914,6 +1951,70 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn a_locked_database_is_busy_not_damaged() {
+        for code in [
+            rusqlite::ErrorCode::DatabaseBusy,
+            rusqlite::ErrorCode::DatabaseLocked,
+        ] {
+            let error = map_sql_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code,
+                    extended_code: 0,
+                },
+                Some("database is locked".into()),
+            ));
+            assert_eq!(error.code, ErrorCode::Busy);
+        }
+        let other = map_sql_error(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseCorrupt,
+                extended_code: 0,
+            },
+            None,
+        ));
+        assert_eq!(other.code, ErrorCode::IndexCorrupt);
+    }
+
+    #[test]
+    fn busy_index_writes_are_retried_until_they_succeed_or_stop() {
+        let busy = || IndexError {
+            code: ErrorCode::Busy,
+            message: "busy".into(),
+        };
+        let cancelled = AtomicBool::new(false);
+        let mut attempts = 0;
+        let result = retry_while_busy(&cancelled, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(busy())
+            } else {
+                Ok(attempts)
+            }
+        });
+        assert_eq!(result.unwrap(), 3, "a busy write is tried again");
+
+        let mut corrupt_attempts = 0;
+        let result: Result<(), IndexError> = retry_while_busy(&cancelled, || {
+            corrupt_attempts += 1;
+            Err(corrupt("damaged"))
+        });
+        assert_eq!(result.unwrap_err().code, ErrorCode::IndexCorrupt);
+        assert_eq!(corrupt_attempts, 1, "other errors are not retried");
+
+        cancelled.store(true, Ordering::Release);
+        let mut cancelled_attempts = 0;
+        let result: Result<(), IndexError> = retry_while_busy(&cancelled, || {
+            cancelled_attempts += 1;
+            Err(busy())
+        });
+        assert_eq!(result.unwrap_err().code, ErrorCode::Busy);
+        assert_eq!(
+            cancelled_attempts, 1,
+            "a stopped index task does not keep retrying"
+        );
+    }
 
     #[test]
     fn shutdown_invalidates_context_before_reaping_worker() {

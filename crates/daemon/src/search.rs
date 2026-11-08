@@ -475,20 +475,38 @@ fn record_activity(
     *matched_count = matched_count
         .checked_add(1)
         .ok_or_else(|| invalid_request("Activity match count overflow"))?;
-    increment_bounded(days, date, ACTIVITY_DAY_LIMIT, days_truncated)?;
+    // Past the limit the newest days stay: the date rail and "recent activity" both start there.
+    increment_bounded(
+        days,
+        date,
+        ACTIVITY_DAY_LIMIT,
+        Keep::Highest,
+        days_truncated,
+    )?;
     increment_bounded(
         authors,
         (author_name, author_email),
         ACTIVITY_AUTHOR_LIMIT,
+        Keep::Lowest,
         authors_truncated,
     )?;
     Ok(())
 }
 
+/// Which end of the key order a full bucket map keeps.
+#[derive(Clone, Copy)]
+enum Keep {
+    Lowest,
+    Highest,
+}
+
+/// Counts `key`, keeping at most `limit` keys from the `keep` end. The cut-off only moves inward,
+/// so a key that is kept has every one of its commits counted.
 fn increment_bounded<K: Ord>(
     values: &mut BTreeMap<K, u64>,
     key: K,
     limit: usize,
+    keep: Keep,
     truncated: &mut bool,
 ) -> Result<(), IndexError> {
     if let Some(count) = values.get_mut(&key) {
@@ -499,12 +517,21 @@ fn increment_bounded<K: Ord>(
     }
     if values.len() < limit {
         values.insert(key, 1);
-    } else if values.last_key_value().is_some_and(|(last, _)| &key < last) {
-        values.pop_last();
+        return Ok(());
+    }
+    *truncated = true;
+    let replaces = match keep {
+        Keep::Lowest => values.last_key_value().is_some_and(|(last, _)| &key < last),
+        Keep::Highest => values
+            .first_key_value()
+            .is_some_and(|(first, _)| &key > first),
+    };
+    if replaces {
+        match keep {
+            Keep::Lowest => values.pop_last(),
+            Keep::Highest => values.pop_first(),
+        };
         values.insert(key, 1);
-        *truncated = true;
-    } else {
-        *truncated = true;
     }
     Ok(())
 }
@@ -1943,6 +1970,31 @@ mod tests {
         insert_path_suggestion(&mut entries, b"src/lib.rs".to_vec(), 0, 1, &mut truncated);
         assert!(truncated);
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn activity_days_past_the_limit_keep_the_newest() {
+        let mut days = BTreeMap::new();
+        let mut truncated = false;
+        for day in [
+            "2024-01-03",
+            "2024-01-01",
+            "2024-01-02",
+            "2024-01-04",
+            "2024-01-03",
+            "2023-12-31",
+        ] {
+            increment_bounded(&mut days, day.to_owned(), 3, Keep::Highest, &mut truncated).unwrap();
+        }
+        assert!(truncated);
+        assert_eq!(
+            days.into_iter().collect::<Vec<_>>(),
+            vec![
+                ("2024-01-02".to_owned(), 1),
+                ("2024-01-03".to_owned(), 2),
+                ("2024-01-04".to_owned(), 1)
+            ]
+        );
     }
 
     #[test]

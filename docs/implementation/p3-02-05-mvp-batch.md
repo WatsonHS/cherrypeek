@@ -41,6 +41,6 @@ handoff 入口覆盖详情头部、分支更多菜单、merge 概览和相关 wo
 - `cargo check -p commitscope-daemon`、`cargo fmt --all -- --check`、`pnpm protocol:check` 通过。
 - Rust 定向 3 项通过：`activity_buckets_use_iana_dst_and_raw_author_identity`、`observe_and_diff_preserve_browse_generation_and_report_fast_forward`、`handoff_facts_distinguish_window_and_branch_worktrees_without_faking_missing_base`。
 - Prompt 定向 3 项通过：不可信文本只在 JSON 参考段、无仓库自定义与缺失编号、多父 merge 分组及清理条件。
-- 日桶最多 3660 项、Author 分组最多 500 项，超出显式标记截断。路径统计超时返回错误，不声称完整结果。
+- 日桶最多 3660 项、Author 分组最多 500 项，超出显式标记截断；日桶超出时保留最新的日期（2026-11-08 起，此前保留最早的，超过十年的仓库会丢掉最近的活动）。路径统计超时返回错误，不声称完整结果。
 - 引用差异本版在展开时重算，尚未加入按快照对缓存；后续由实际耗时决定。外部观察只保留一个最新状态。
 - 未运行全量 Rust/协议/Electron 检查、主题缩放矩阵、大仓性能或长时稳定性检查。
