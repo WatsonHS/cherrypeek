@@ -47,7 +47,18 @@ export class CommitDetailStore {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryWake?: () => void;
 
-  constructor(private readonly api: CommitDetailApi) {}
+  private diffFile: { file: ChangedFile; parentIndex: number | null } | null = null;
+
+  /** `fullFile` says whether the open diff should carry the whole file as context (P4-11). */
+  constructor(private readonly api: CommitDetailApi, private readonly fullFile: () => boolean = () => false) {}
+
+  /** Re-reads the open diff, e.g. after switching between changes-only and the whole file. */
+  async reloadDiff(): Promise<void> {
+    const open = this.diffFile;
+    if (!open || !this.view.diffKey || this.view.diff.state === "idle") return;
+    this.update({ ...this.view, diffKey: null });
+    await this.toggleDiff(open.file, open.parentIndex);
+  }
 
   getView = (): CommitDetailView => this.view;
   subscribe = (listener: () => void): (() => void) => {
@@ -181,12 +192,18 @@ export class CommitDetailStore {
     if (!this.hasCurrentContextDetails()) return;
     const selection = this.selectionIntent;
     const sequence = ++this.sequenceIntent;
+    this.diffFile = { file, parentIndex };
     this.update({ ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key });
     await this.cancelActiveRequest("diff");
     if (!this.isCurrent(selection, sequence, sessionKey, oid) || this.view.diffKey !== key) return;
     this.view = { ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key };
     this.emit();
-    await this.perform(selection, sequence, sessionKey, oid, "diff", () => this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex }), result => {
+    const full = this.fullFile();
+    await this.perform(selection, sequence, sessionKey, oid, "diff", async () => {
+      const result = await this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex, ...(full ? { fullFile: true } : {}) });
+      // Files over the whole-file limit fall back to the changes only.
+      return full && !result.ok && result.error.code === "RESOURCE_LIMIT" ? this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex }) : result;
+    }, result => {
       this.update({ ...this.view, diff: ready(result), diffKey: key });
     });
   }

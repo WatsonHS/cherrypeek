@@ -161,6 +161,47 @@
       ],
       "type": "object"
     },
+    "ListTreeParams": {
+      "additionalProperties": false,
+      "description": "P4-10: one directory of the tree at a commit, directories first, then by raw name bytes.",
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint16",
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pathHex": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Directory to list; null for the root."
+        }
+      },
+      "required": [
+        "commit",
+        "pathHex",
+        "offset",
+        "limit"
+      ],
+      "type": "object"
+    },
     "LocateCommitParams": {
       "additionalProperties": false,
       "properties": {
@@ -235,9 +276,34 @@
       ],
       "type": "object"
     },
+    "ReadBlameParams": {
+      "additionalProperties": false,
+      "description": "P4-12: blame of a file at a commit, streamed in chunks.",
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pathHex": {
+          "maxLength": 32768,
+          "minLength": 2,
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "pathHex"
+      ],
+      "type": "object"
+    },
     "ReadDiffParams": {
       "additionalProperties": false,
       "properties": {
+        "fullFile": {
+          "description": "P4-11: whole file as context. Only sent when the core declares `diffFullContext`.",
+          "type": "boolean"
+        },
         "newPathHex": {
           "anyOf": [
             {
@@ -283,6 +349,129 @@
         "parentIndex",
         "oldPathHex",
         "newPathHex"
+      ],
+      "type": "object"
+    },
+    "ReadFileChangeParams": {
+      "additionalProperties": false,
+      "description": "One file's change in one commit, without loading the commit details first.",
+      "properties": {
+        "fullFile": {
+          "type": "boolean"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "oldPathHex": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The path in the parent when the file was renamed in this commit."
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pathHex": {
+          "maxLength": 32768,
+          "minLength": 2,
+          "type": "string"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "pathHex",
+        "oldPathHex"
+      ],
+      "type": "object"
+    },
+    "ReadFileContentParams": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "maxLines": {
+          "format": "uint16",
+          "maximum": 5000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pathHex": {
+          "maxLength": 32768,
+          "minLength": 2,
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "pathHex",
+        "maxLines"
+      ],
+      "type": "object"
+    },
+    "ReadFileHistoryParams": {
+      "additionalProperties": false,
+      "description": "History of one literal path, reachable from `commit` (the tree version). No rename following.",
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "cursor": {
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/SearchPathKind"
+        },
+        "message": {
+          "description": "Literal substring of the commit message; empty for no filter.",
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pathHex": {
+          "description": "Empty for the repository root (directory history of everything).",
+          "maxLength": 32768,
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "pathHex",
+        "kind",
+        "message",
+        "cursor",
+        "pageSize"
       ],
       "type": "object"
     },
@@ -360,6 +549,10 @@
     "ReadWorkspaceDiffParams": {
       "additionalProperties": false,
       "properties": {
+        "fullFile": {
+          "description": "P4-11: whole file as context. Only sent when the core declares `diffFullContext`.",
+          "type": "boolean"
+        },
         "oldPathHex": {
           "anyOf": [
             {
@@ -592,6 +785,21 @@
         },
         {
           "$ref": "#/definitions/ReadWorkspaceFileParams"
+        },
+        {
+          "$ref": "#/definitions/ListTreeParams"
+        },
+        {
+          "$ref": "#/definitions/ReadFileContentParams"
+        },
+        {
+          "$ref": "#/definitions/ReadFileHistoryParams"
+        },
+        {
+          "$ref": "#/definitions/ReadFileChangeParams"
+        },
+        {
+          "$ref": "#/definitions/ReadBlameParams"
         }
       ]
     },

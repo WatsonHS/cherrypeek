@@ -19,13 +19,16 @@ import { FOCUS_SEARCH_EVENT, TopBar } from "./components/top-bar.js";
 import type { AppPage } from "./components/page-switch.js";
 import { PageSearchBox } from "./components/search-controls.js";
 import { WorkspacePage } from "./components/workspace-page.js";
-import { useDiffDisplayShortcuts } from "./components/diff-view.js";
-import { FilesPage } from "./components/files-page.js";
+import { DiffFullContext, useDiffDisplayShortcuts } from "./components/diff-view.js";
+import { FilesPage, type FilesActions, type VersionOption } from "./components/files-page.js";
+import { FilesStore, type TreeVersion } from "./lib/files-store.js";
+import { diffDisplay } from "./lib/diff-display.js";
+import type { GitPath } from "../../../../packages/protocol/src/generated/server-message.js";
 import { workspaceBadge, workspaceBranchLabel } from "./lib/workspace-indicator.js";
 import { WorkspaceStore, workspaceIndicatorFor } from "./lib/workspace-store.js";
 import { cn } from "./lib/utils.js";
 import { errorTitle } from "./lib/errors.js";
-import { repositoryName } from "./lib/format.js";
+import { repositoryName, shortRefName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
@@ -173,13 +176,16 @@ export function App(): React.JSX.Element {
   const { status, readError } = useCoreStatus();
   const store = React.useMemo(() => new RepositorySessionStore(window.commitScope), []);
   const searchStore = React.useMemo(() => new MetadataSearchStore(window.commitScope), []);
-  const detailStore = React.useMemo(() => new CommitDetailStore(window.commitScope), []);
-  const workspaceStore = React.useMemo(() => new WorkspaceStore(window.commitScope), []);
+  const fullFileWanted = React.useRef(false);
+  const detailStore = React.useMemo(() => new CommitDetailStore(window.commitScope, () => fullFileWanted.current && diffDisplay.getView().scope === "full"), []);
+  const workspaceStore = React.useMemo(() => new WorkspaceStore(window.commitScope, () => Date.now(), () => fullFileWanted.current && diffDisplay.getView().scope === "full"), []);
+  const filesStore = React.useMemo(() => new FilesStore(window.commitScope, () => diffDisplay.getView().scope === "full"), []);
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   const searchView = React.useSyncExternalStore(searchStore.subscribe, searchStore.getView);
   const detailView = React.useSyncExternalStore(detailStore.subscribe, detailStore.getView);
   const workspaceView = React.useSyncExternalStore(workspaceStore.subscribe, workspaceStore.getView);
+  const filesView = React.useSyncExternalStore(filesStore.subscribe, filesStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
@@ -208,7 +214,14 @@ export function App(): React.JSX.Element {
   const [handoffRequest, setHandoffRequest] = React.useState<HandoffRequest | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [page, setPage] = React.useState<AppPage>("commits");
+  const pageRef = React.useRef(page);
+  pageRef.current = page;
   const [workspaceFilter, setWorkspaceFilter] = React.useState("");
+  const [filesVersionPinned, setFilesVersionPinned] = React.useState<TreeVersion | null>(null);
+  const [filesFind, setFilesFind] = React.useState({ query: "", current: 0 });
+  const [filesFindCount, setFilesFindCount] = React.useState(0);
+  const [filesHistoryQuery, setFilesHistoryQuery] = React.useState("");
+  const filesVisited = React.useRef(false);
   const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
@@ -568,7 +581,56 @@ export function App(): React.JSX.Element {
   }, [workspaceStore]);
   React.useEffect(() => { if (page === "workspace") void workspaceStore.readStatus(); }, [page, workspaceStore]);
   React.useEffect(() => () => workspaceStore.dispose(), [workspaceStore]);
-  useDiffDisplayShortcuts(false);
+  // P4-10 to P4-12: the files page reads a tree version; until visited it reads nothing.
+  const coreCapabilities = ready ? status.core.capabilities : [];
+  const filesCapabilities = { files: coreCapabilities.includes("fileBrowsing"), blame: coreCapabilities.includes("blame"), fullFile: coreCapabilities.includes("diffFullContext") };
+  fullFileWanted.current = filesCapabilities.fullFile;
+  React.useEffect(() => {
+    filesStore.bind(workspaceRepo, filesCapabilities);
+  }, [filesStore, workspaceRepo, filesCapabilities.files, filesCapabilities.blame, filesCapabilities.fullFile]);
+  React.useEffect(() => {
+    filesVisited.current = false;
+    setFilesVersionPinned(null);
+    setFilesFind({ query: "", current: 0 });
+    setFilesHistoryQuery("");
+  }, [workspaceRepo]);
+  const scopeTreeVersion = React.useMemo(() => treeVersionForScope(view), [view.session, view.repository, view.refs, view.navigation]);
+  const filesVersion = filesVersionPinned ?? scopeTreeVersion;
+  React.useEffect(() => {
+    if (page === "files") filesVisited.current = true;
+    if (filesVisited.current) filesStore.setVersion(filesVersion);
+  }, [filesStore, page, filesVersion?.commit, filesVersion?.label]);
+  React.useEffect(() => {
+    const timer = setTimeout(() => filesStore.setHistoryMessage(filesHistoryQuery.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [filesStore, filesHistoryQuery]);
+  React.useEffect(() => {
+    let scope = diffDisplay.getView().scope;
+    return diffDisplay.subscribe(() => {
+      const next = diffDisplay.getView().scope;
+      if (next === scope) return;
+      scope = next;
+      if (!fullFileWanted.current) return;
+      filesStore.reloadChange();
+      void detailStore.reloadDiff();
+      workspaceStore.retryContent();
+    });
+  }, [filesStore, detailStore, workspaceStore]);
+  React.useEffect(() => () => filesStore.dispose(), [filesStore]);
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "KeyB" || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || event.isComposing) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/u.test(target.tagName))) return;
+      const files = filesStore.getView();
+      if (pageRef.current !== "files" || files.tab !== "content" || files.selection?.kind !== "file" || !files.blameSupported) return;
+      event.preventDefault();
+      filesStore.setBlame(!files.blameEnabled);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [filesStore]);
+  useDiffDisplayShortcuts(ready && status.core.capabilities.includes("diffFullContext"));
   useLaunchRepository(ready, store);
 
   // Restarting the core drops the repository session; reopen what was on screen once it is back.
@@ -760,8 +822,42 @@ export function App(): React.JSX.Element {
   React.useEffect(() => {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
-  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage });
-  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage };
+  const openFileHistory = React.useCallback((path: GitPath, oid?: string) => {
+    filesVisited.current = true;
+    filesStore.setVersion(filesVersion);
+    setPage("files");
+    filesStore.select({ path, kind: "file" }, { tab: "history", commit: oid });
+  }, [filesStore, filesVersion]);
+  const openCommitFromFiles = React.useCallback(async (oid: string) => {
+    setPage("commits");
+    if (searchStore.getView().active) {
+      await locateSelectedInHistory(oid);
+      return;
+    }
+    selectionIntent.invalidate();
+    const found = await store.locateCommit(oid);
+    if (found) setSelectedOid(oid);
+  }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
+  const filesActions = React.useMemo<FilesActions>(() => ({
+    toggleDirectory: pathHex => filesStore.toggleDirectory(pathHex),
+    loadMoreEntries: pathHex => filesStore.loadMoreEntries(pathHex),
+    retryDirectory: pathHex => filesStore.retryDirectory(pathHex),
+    select: selection => filesStore.select(selection),
+    setTab: tab => filesStore.setTab(tab),
+    setBlame: enabled => filesStore.setBlame(enabled),
+    locateFromBlame: line => filesStore.locateFromBlame(line),
+    returnToLine: () => filesStore.returnToLine(),
+    selectCommit: oid => filesStore.selectCommit(oid, filesStore.getView().history?.entries.find(entry => entry.commit.oid === oid)?.commit.parents.length === 0 ? null : 0),
+    setParentIndex: parentIndex => filesStore.setParentIndex(parentIndex),
+    loadMoreHistory: () => filesStore.loadMoreHistory(),
+    retryHistory: () => filesStore.retryHistory(),
+    retryContent: () => filesStore.retryContent(),
+    setVersion: version => setFilesVersionPinned(version.commit === scopeTreeVersion?.commit && version.label === scopeTreeVersion.label ? null : version),
+    openCommit: oid => { void openCommitFromFiles(oid); },
+  }), [filesStore, openCommitFromFiles, scopeTreeVersion]);
+  const versionOptions = React.useMemo(() => treeVersionOptions(view, scopeTreeVersion), [view.navigation, view.refs, scopeTreeVersion]);
+  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesStore });
+  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesStore };
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
@@ -787,6 +883,9 @@ export function App(): React.JSX.Element {
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "commits") {
         event.preventDefault();
         actions.setDetailTab(event.code === "Digit1" ? "overview" : "changes");
+      } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "files") {
+        event.preventDefault();
+        actions.filesStore.setTab(event.code === "Digit1" ? "content" : "history");
       } else if (event.code === "KeyR" && event.altKey) {
         event.preventDefault();
         void actions.refresh();
@@ -848,7 +947,7 @@ export function App(): React.JSX.Element {
   const loadSearchPrevious = React.useCallback(() => { void searchStore.loadPrevious(); }, [searchStore]);
   const retrySearch = React.useCallback(() => { void searchStore.retry(); }, [searchStore]);
 
-  return <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+  return <DiffFullContext.Provider value={filesCapabilities.fullFile}><div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
     {view.repository
       ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
@@ -862,8 +961,7 @@ export function App(): React.JSX.Element {
         pageSearch={page === "workspace"
           ? <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value={workspaceFilter} onChange={setWorkspaceFilter}
             disabled={!workspaceView.supported} title={workspaceView.supported ? "按路径过滤左栏，不重新读取工作区（⌘F）" : "工作区状态尚未接入（占位 · P4-09）"} />
-          : <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
-            title="文件内容尚未接入（占位 · P4-10）" />} />
+          : filesSearchBox(filesView, filesFind, filesFindCount, setFilesFind, filesHistoryQuery, setFilesHistoryQuery)} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {status.state === "error" || alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {status.state === "error" ? <div className="flex items-center gap-2">
@@ -927,6 +1025,7 @@ export function App(): React.JSX.Element {
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
             selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
+            onOpenFileHistory={filesView.supported ? openFileHistory : undefined}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}
@@ -949,11 +1048,11 @@ export function App(): React.JSX.Element {
             }} />
         </HistorySplitView>
       </div>
-      {page === "files" ? <FilesPage /> : null}
+      {page === "files" ? <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount} /> : null}
       {page === "workspace" ? <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
         onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
         onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
-        onRetryContent={() => workspaceStore.retryContent()} /> : null}
+        onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path) : undefined} /> : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}
@@ -972,7 +1071,68 @@ export function App(): React.JSX.Element {
     <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} request={handoffRequest} sessionKey={detailSessionKey}
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />
-  </div>;
+  </div></DiffFullContext.Provider>;
+}
+
+/** The tree the files page shows by default: the newest commit of the browsing scope. */
+function treeVersionForScope(view: RepositoryView): TreeVersion | null {
+  const session = view.session;
+  const repository = view.repository;
+  if (!session || !repository) return null;
+  const head = repository.headOid ? { commit: repository.headOid, label: repository.headReference ? shortRefName(repository.headReference) : "HEAD" } : null;
+  const scope = session.scope;
+  if (scope === "head") return head;
+  if (scope === "allBranches") return head;
+  if ("ref" in scope) {
+    const ref = view.refs.find(item => item.name === scope.ref);
+    const commit = ref ? ref.peeledOid ?? ref.oid : session.tips[0];
+    return commit ? { commit, label: shortRefName(scope.ref) } : head;
+  }
+  const worktree = view.navigation?.worktrees.find(item => item.id === scope.worktree);
+  const commit = worktree?.headOid ?? session.tips[0];
+  return commit ? { commit, label: worktree?.headReference ? shortRefName(worktree.headReference) : `worktree ${repositoryName(worktree?.path ?? "")}` } : head;
+}
+
+/** Versions offered by the tree-version picker: the scope's default, then local branches, tags and remote branches. */
+function treeVersionOptions(view: RepositoryView, scopeVersion: TreeVersion | null): VersionOption[] {
+  const options: VersionOption[] = scopeVersion ? [{ id: "scope", version: scopeVersion, group: "浏览范围", hint: "默认" }] : [];
+  const refs = view.navigation?.refs ?? view.refs;
+  const group = { localBranch: "本地分支", tag: "标签", remoteBranch: "远端跟踪" } as const;
+  for (const kind of ["localBranch", "tag", "remoteBranch"] as const) {
+    for (const ref of refs.filter(item => item.kind === kind).slice(0, 200)) {
+      options.push({ id: `${kind}:${ref.name}`, version: { commit: ref.peeledOid ?? ref.oid, label: shortRefName(ref.name) }, group: group[kind] });
+    }
+  }
+  return options;
+}
+
+/** The top-bar search on the files page: find in the loaded content, or search the path's history by message. */
+function filesSearchBox(files: ReturnType<FilesStore["getView"]>, find: { query: string; current: number }, count: number,
+  setFind: React.Dispatch<React.SetStateAction<{ query: string; current: number }>>, historyQuery: string, setHistoryQuery: (value: string) => void): React.ReactNode {
+  const selection = files.selection;
+  if (!files.supported || !selection) {
+    return <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
+      title={files.supported ? "先选择一个文件或目录" : "文件页尚未接入（占位 · P4-10）"} />;
+  }
+  if (files.tab === "content" && selection.kind === "file") {
+    const truncated = files.content?.value?.truncated ?? false;
+    const lines = files.content?.value?.lines ?? 0;
+    const position = count ? ((find.current % count) + count) % count + 1 : 0;
+    const trailing = find.query
+      ? <span className="shrink-0 font-mono text-[11.5px] whitespace-nowrap text-fg3 tabular-nums" data-testid="find-count">
+        {count ? `${position} / ${count}${truncated ? ` · 前 ${lines.toLocaleString()} 行` : ""}` : truncated ? `前 ${lines.toLocaleString()} 行中没有` : "0 / 0"}</span>
+      : undefined;
+    return <PageSearchBox scope={`${selection.path.display.split("/").at(-1)} 中`} label="在文件内容中查找" placeholder="查找" value={find.query}
+      onChange={query => setFind({ query, current: 0 })} trailing={trailing}
+      title={truncated ? `只在已加载的前 ${lines.toLocaleString()} 行里查找；Enter / ⇧Enter 跳到下一处 / 上一处` : "在文件里查找；Enter / ⇧Enter 跳到下一处 / 上一处（⌘F）"}
+      onKeyDown={event => {
+        if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        setFind(current => ({ ...current, current: current.current + (event.shiftKey ? -1 : 1) }));
+      }} />;
+  }
+  return <PageSearchBox scope={selection.kind === "directory" ? "这个目录的历史" : "这个文件的历史"} label="按提交消息搜索这个路径的历史" placeholder="搜索提交消息"
+    value={historyQuery} onChange={setHistoryQuery} title="按提交消息搜索，路径条件固定为当前文件或目录（⌘F）" />;
 }
 
 function describeScope(scope: RepositoryScope | null, navigation: RepositoryNavigation | null): string {

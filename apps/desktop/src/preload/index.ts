@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { CommitScopeApi, CoreStatus } from "../../../../packages/protocol/src/core-status.js";
-import type { RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
+import type { BlameChunkEvent, RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
 
 const api: CommitScopeApi = {
   getCoreStatus: () => ipcRenderer.invoke("commitscope:core:get-status") as Promise<CoreStatus>,
@@ -57,6 +57,17 @@ const api: CommitScopeApi = {
   readWorkspaceDiff: params => ipcRenderer.invoke("commitscope:workspace:diff", params),
   readWorkspaceFile: params => ipcRenderer.invoke("commitscope:workspace:file", params),
   cancelWorkspace: () => ipcRenderer.invoke("commitscope:workspace:cancel"),
+  listTree: params => ipcRenderer.invoke("commitscope:files:tree", params),
+  readFileContent: params => ipcRenderer.invoke("commitscope:files:content", params),
+  readFileHistory: params => ipcRenderer.invoke("commitscope:files:history", params),
+  readFileChange: params => ipcRenderer.invoke("commitscope:files:change", params),
+  readBlame: (params, streamId) => ipcRenderer.invoke("commitscope:files:blame", params, streamId),
+  cancelFiles: () => ipcRenderer.invoke("commitscope:files:cancel"),
+  onBlameChunk(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, chunk: BlameChunkEvent) => listener(chunk);
+    ipcRenderer.on("commitscope:files:blame-chunk", wrapped);
+    return () => ipcRenderer.removeListener("commitscope:files:blame-chunk", wrapped);
+  },
   onWorkspaceChanged(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, change: WorkspaceChangeEvent) => listener(change);
     ipcRenderer.on("commitscope:workspace:changed", wrapped);

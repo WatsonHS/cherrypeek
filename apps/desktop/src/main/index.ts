@@ -62,6 +62,13 @@ const IPC_WORKSPACE_DIFF = "commitscope:workspace:diff";
 const IPC_WORKSPACE_FILE = "commitscope:workspace:file";
 const IPC_WORKSPACE_CANCEL = "commitscope:workspace:cancel";
 const IPC_WORKSPACE_CHANGED = "commitscope:workspace:changed";
+const IPC_FILES_TREE = "commitscope:files:tree";
+const IPC_FILES_CONTENT = "commitscope:files:content";
+const IPC_FILES_HISTORY = "commitscope:files:history";
+const IPC_FILES_CHANGE = "commitscope:files:change";
+const IPC_FILES_BLAME = "commitscope:files:blame";
+const IPC_FILES_BLAME_CHUNK = "commitscope:files:blame-chunk";
+const IPC_FILES_CANCEL = "commitscope:files:cancel";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
@@ -305,6 +312,36 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_WORKSPACE_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.cancelWorkspace());
+  });
+  ipcMain.handle(IPC_FILES_TREE, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.listTree(params));
+  });
+  ipcMain.handle(IPC_FILES_CONTENT, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readFileContent(params));
+  });
+  ipcMain.handle(IPC_FILES_HISTORY, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readFileHistory(params));
+  });
+  ipcMain.handle(IPC_FILES_CHANGE, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readFileChange(params));
+  });
+  ipcMain.handle(IPC_FILES_BLAME, (event, params: unknown, streamId: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(async () => {
+      if (typeof streamId !== "string" || !/^[A-Za-z0-9-]{1,64}$/u.test(streamId)) throw new ProtocolClientError("INVALID_REQUEST", "逐行追溯的流标识无效");
+      const sender = event.sender;
+      return repositorySessions!.readBlame(params, chunk => {
+        if (!sender.isDestroyed()) sender.send(IPC_FILES_BLAME_CHUNK, { streamId, chunk });
+      });
+    });
+  });
+  ipcMain.handle(IPC_FILES_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelFiles());
   });
 }
 

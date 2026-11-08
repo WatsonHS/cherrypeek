@@ -6,6 +6,8 @@ export default defineConfig({
   base: "./",
   root: resolve(import.meta.dirname, "./"),
   plugins: [tailwindcss()],
+  // The syntax worker loads one chunk per language on first use instead of one bundle with every grammar.
+  worker: { format: "es" },
   build: {
     outDir: "dist/renderer",
     emptyOutDir: true,

@@ -25,6 +25,10 @@ import type {
   WorkspaceDiff,
   WorkspaceFile,
   WorkspaceStatus,
+  TreePage,
+  FileContent,
+  FileHistoryPage,
+  BlameChunk,
   RepositoryScope,
   RepositoryNavigation,
   RefMergeStatusResult,
@@ -35,7 +39,8 @@ import type { MetadataIndexAction } from "./generated/client-message.js";
 import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField,
   ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
-  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams } from "./generated/client-message.js";
+  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
@@ -49,6 +54,7 @@ export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTi
 export type { GetActivityStatsParams, GetHandoffFactsParams } from "./generated/client-message.js";
 export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 export type { ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams, WorkspaceSide } from "./generated/client-message.js";
+export type { ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -108,6 +114,12 @@ export interface WorkspaceChangeEvent {
   repoId: string;
 }
 
+/** One chunk of a blame stream, tagged with the id the renderer passed to `readBlame`. */
+export interface BlameChunkEvent {
+  streamId: string;
+  chunk: BlameChunk;
+}
+
 export interface RepositoryObservationEvent {
   repoId: string;
   browsingGeneration: string;
@@ -158,4 +170,13 @@ export interface RepositorySessionApi {
   cancelWorkspace(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   /** A hint that files in the working tree changed; the status must be re-read to know what changed. */
   onWorkspaceChanged(listener: (change: WorkspaceChangeEvent) => void): () => void;
+  /** P4-10: the files page. These fail with UNKNOWN_METHOD until the core declares `fileBrowsing`. */
+  listTree(params: ListTreeParams): Promise<RepositorySessionResult<TreePage>>;
+  readFileContent(params: ReadFileContentParams): Promise<RepositorySessionResult<FileContent>>;
+  readFileHistory(params: ReadFileHistoryParams): Promise<RepositorySessionResult<FileHistoryPage>>;
+  readFileChange(params: ReadFileChangeParams): Promise<RepositorySessionResult<FileDiff>>;
+  cancelFiles(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  /** P4-12: chunks arrive through `onBlameChunk` with the same `streamId`; the result resolves when the file is covered. */
+  readBlame(params: ReadBlameParams, streamId: string): Promise<RepositorySessionResult<{ totalLines: number; blocks: number }>>;
+  onBlameChunk(listener: (event: BlameChunkEvent) => void): () => void;
 }

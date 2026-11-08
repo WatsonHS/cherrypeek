@@ -16,7 +16,10 @@ export type Capability =
       | "repositoryObservation"
       | "handoffFacts"
     )
-  | "workspaceStatus";
+  | "workspaceStatus"
+  | "fileBrowsing"
+  | "diffFullContext"
+  | "blame";
 
 export interface CoreReady {
   capabilities: Capability[];

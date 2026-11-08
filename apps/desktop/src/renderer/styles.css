@@ -31,6 +31,8 @@
   --shadow-pop: 0 16px 40px rgba(20, 20, 18, 0.16);
   --l0: #2b59d9; --l1: #d0661a; --l2: #8a4fd0; --l3: #12806a; --l4: #c2366b; --l5: #8a7400;
   --add: #1c6b3e; --del: #a8281d; --add-bg: #eaf6ee; --del-bg: #fcedeb; --hunk-bg: #f0f3fa;
+  --syn-keyword: #6e2fad; --syn-string: #0a5e52; --syn-number: #8a4100;
+  --syn-function: #1c47b3; --syn-type: #7e2f5f; --syn-comment: #595852;
 
   --av0-bg: #fbe3e6; --av0-fg: #9b1c35;
   --av1-bg: #f9e6da; --av1-fg: #8a3a10;
@@ -72,6 +74,8 @@
   --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
   --l0: #8ba8ff; --l1: #f0a15e; --l2: #c29bf5; --l3: #4fc7a9; --l4: #f27aa6; --l5: #d9c24a;
   --add: #86d9a2; --del: #ff9c93; --add-bg: #14261a; --del-bg: #2d1717; --hunk-bg: #1c2233;
+  --syn-keyword: #d2b0fa; --syn-string: #7adbc8; --syn-number: #f5b077;
+  --syn-function: #a3bdff; --syn-type: #f5a8d0; --syn-comment: #abaaa3;
 
   --av0-bg: #3f1d24; --av0-fg: #f6a8b7;
   --av1-bg: #3d2619; --av1-fg: #f5b48c;
@@ -110,6 +114,12 @@
   --color-add-bg: var(--add-bg);
   --color-del-bg: var(--del-bg);
   --color-hunk-bg: var(--hunk-bg);
+  --color-syn-keyword: var(--syn-keyword);
+  --color-syn-string: var(--syn-string);
+  --color-syn-number: var(--syn-number);
+  --color-syn-function: var(--syn-function);
+  --color-syn-type: var(--syn-type);
+  --color-syn-comment: var(--syn-comment);
 
   /* shadcn semantic names mapped onto the same tokens */
   --color-background: var(--bg);

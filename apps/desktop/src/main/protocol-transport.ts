@@ -196,7 +196,7 @@ export class ProtocolTransport {
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "locateHistoryDate" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
       method !== "getActivityStats" && method !== "observeRepository" && method !== "diffRefSnapshots" && method !== "getHandoffFacts" &&
-      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS].includes(method)) {
+      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "selectRepositoryScope"].includes(method)) {
@@ -613,7 +613,8 @@ function validRequestParams(method: string, params: unknown): boolean {
     (method === "listChangedFiles"
       ? params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127
       : Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 1 && (params.parentIndex as number) <= 127)) return true;
-  if (method === "readDiff" && isRecord(params) && hasExactKeys(params, ["newPathHex", "oid", "oldPathHex", "parentIndex"]) &&
+  if (method === "readDiff" && isRecord(params) && hasKeysWithOptional(params, ["newPathHex", "oid", "oldPathHex", "parentIndex"], ["fullFile"]) &&
+    (params.fullFile === undefined || typeof params.fullFile === "boolean") &&
     typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
     (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
     (params.oldPathHex === null || typeof params.oldPathHex === "string" && params.oldPathHex.length > 0 && params.oldPathHex.length <= 32 * 1024 && params.oldPathHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(params.oldPathHex)) &&
@@ -621,15 +622,44 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.oldPathHex !== null || params.newPathHex !== null)) return true;
   if (method === "readWorkspaceStatus" && isRecord(params) && hasExactKeys(params, ["maxEntries"]) &&
     Number.isInteger(params.maxEntries) && (params.maxEntries as number) >= 1 && (params.maxEntries as number) <= 2000) return true;
-  if (method === "readWorkspaceDiff" && isRecord(params) && hasExactKeys(params, ["oldPathHex", "pathHex", "side"]) &&
+  if (method === "readWorkspaceDiff" && isRecord(params) && hasKeysWithOptional(params, ["oldPathHex", "pathHex", "side"], ["fullFile"]) &&
+    (params.fullFile === undefined || typeof params.fullFile === "boolean") &&
     (params.side === "staged" || params.side === "unstaged") && validPathHex(params.pathHex) &&
     (params.oldPathHex === null || validPathHex(params.oldPathHex))) return true;
   if (method === "readWorkspaceFile" && isRecord(params) && hasExactKeys(params, ["maxLines", "pathHex"]) && validPathHex(params.pathHex) &&
     Number.isInteger(params.maxLines) && (params.maxLines as number) >= 1 && (params.maxLines as number) <= 5000) return true;
+  if (method === "listTree" && isRecord(params) && hasExactKeys(params, ["commit", "limit", "offset", "pathHex"]) && validOid(params.commit) &&
+    (params.pathHex === null || validPathHex(params.pathHex)) && Number.isInteger(params.offset) && (params.offset as number) >= 0 &&
+    (params.offset as number) <= 0xffff_ffff && Number.isInteger(params.limit) && (params.limit as number) >= 1 && (params.limit as number) <= 500) return true;
+  if (method === "readFileContent" && isRecord(params) && hasExactKeys(params, ["commit", "maxLines", "pathHex"]) && validOid(params.commit) &&
+    validPathHex(params.pathHex) && Number.isInteger(params.maxLines) && (params.maxLines as number) >= 1 && (params.maxLines as number) <= 5000) return true;
+  if (method === "readFileHistory" && isRecord(params) && hasExactKeys(params, ["commit", "cursor", "kind", "message", "pageSize", "pathHex"]) &&
+    validOid(params.commit) && (params.kind === "file" || params.kind === "directory") &&
+    (params.pathHex === "" ? params.kind === "directory" : validPathHex(params.pathHex)) &&
+    typeof params.message === "string" && Buffer.byteLength(params.message, "utf8") <= 4096 &&
+    (params.cursor === null || typeof params.cursor === "string" && params.cursor.length > 0 && Buffer.byteLength(params.cursor, "utf8") <= 512) &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 200) return true;
+  if (method === "readFileChange" && isRecord(params) && hasKeysWithOptional(params, ["oid", "oldPathHex", "parentIndex", "pathHex"], ["fullFile"]) &&
+    validOid(params.oid) && validPathHex(params.pathHex) && (params.oldPathHex === null || validPathHex(params.oldPathHex)) &&
+    (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
+    (params.fullFile === undefined || typeof params.fullFile === "boolean")) return true;
+  if (method === "readBlame" && isRecord(params) && hasExactKeys(params, ["commit", "pathHex"]) && validOid(params.commit) && validPathHex(params.pathHex)) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   return false;
+}
+
+/** P4-10 to P4-12 reads of the files page: session methods that can be cancelled and drained. */
+const FILE_METHODS = ["listTree", "readFileContent", "readFileHistory", "readFileChange", "readBlame"];
+
+function validOid(value: unknown): boolean {
+  return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value);
+}
+
+function hasKeysWithOptional(value: Record<string, unknown>, required: string[], optional: string[]): boolean {
+  const keys = Object.keys(value);
+  return required.every(key => Object.hasOwn(value, key)) && keys.every(key => required.includes(key) || optional.includes(key));
 }
 
 /** P4-09 workspace reads: session methods that can be cancelled and drained. */
@@ -676,7 +706,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS].includes(method)) return "session";
   return undefined;
 }
 

@@ -298,6 +298,12 @@ pub enum Capability {
     HandoffFacts,
     /// P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.
     WorkspaceStatus,
+    /// P4-10: tree listing, file content, file history and per-file changes at a commit.
+    FileBrowsing,
+    /// P4-11: `fullFile` on diff requests returns the whole file as context.
+    DiffFullContext,
+    /// P4-12: line-by-line blame.
+    Blame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -409,6 +415,11 @@ pub enum RequestParams {
     ReadWorkspaceStatus(ReadWorkspaceStatusParams),
     ReadWorkspaceDiff(ReadWorkspaceDiffParams),
     ReadWorkspaceFile(ReadWorkspaceFileParams),
+    ListTree(ListTreeParams),
+    ReadFileContent(ReadFileContentParams),
+    ReadFileHistory(ReadFileHistoryParams),
+    ReadFileChange(ReadFileChangeParams),
+    ReadBlame(ReadBlameParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -973,6 +984,9 @@ pub struct ReadDiffParams {
     #[schemars(required)]
     #[schemars(with = "NullablePathHexSchema")]
     pub new_path_hex: Option<String>,
+    /// P4-11: whole file as context. Only sent when the core declares `diffFullContext`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1114,7 +1128,8 @@ pub struct FileDiff {
     pub parent_oid: Option<String>,
     pub file: ChangedFile,
     pub kind: FileDiffKind,
-    #[schemars(length(max = 131072))]
+    /// At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).
+    #[schemars(length(max = 1048576))]
     pub patch: String,
     pub truncated: bool,
     pub text_lossy: bool,
@@ -1155,6 +1170,9 @@ pub struct ReadWorkspaceDiffParams {
     #[schemars(required)]
     #[schemars(with = "NullablePathHexSchema")]
     pub old_path_hex: Option<String>,
+    /// P4-11: whole file as context. Only sent when the core declares `diffFullContext`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1265,7 +1283,8 @@ pub struct WorkspaceDiff {
     #[schemars(with = "NullableGitPathSchema")]
     pub old_path: Option<GitPath>,
     pub kind: FileDiffKind,
-    #[schemars(length(max = 131072))]
+    /// At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).
+    #[schemars(length(max = 1048576))]
     pub patch: String,
     pub truncated: bool,
     pub text_lossy: bool,
@@ -1308,6 +1327,263 @@ pub struct WorkspaceFile {
     #[schemars(required)]
     #[schemars(with = "NullableGitPathSchema")]
     pub symlink_target: Option<GitPath>,
+}
+
+/// P4-10: one directory of the tree at a commit, directories first, then by raw name bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListTreeParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    /// Directory to list; null for the root.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullablePathHexSchema")]
+    pub path_hex: Option<String>,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 500))]
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TreeEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Submodule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TreeEntry {
+    /// Last path component.
+    pub name: GitPath,
+    /// Full repository-relative path.
+    pub path: GitPath,
+    pub kind: TreeEntryKind,
+    #[schemars(length(min = 6, max = 6))]
+    pub mode: String,
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    /// Blob size in bytes; null for directories and submodules.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TreePage {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub path: Option<GitPath>,
+    #[schemars(length(max = 500))]
+    pub entries: Vec<TreeEntry>,
+    pub offset: u32,
+    pub total: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadFileContentParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    #[schemars(length(min = 2, max = 32768))]
+    pub path_hex: String,
+    #[schemars(range(min = 1, max = 5000))]
+    pub max_lines: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum FileContentKind {
+    Text,
+    Binary,
+    Lfs,
+    Submodule,
+    Symlink,
+    TooLarge,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileContent {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    pub path: GitPath,
+    pub kind: FileContentKind,
+    /// The first `lines` lines when `kind` is text; at most 1 MiB.
+    #[schemars(length(max = 1048576))]
+    pub text: String,
+    pub lines: u32,
+    /// Total line count of the blob when known, also when `text` was truncated.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub total_lines: Option<u64>,
+    pub truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub size: Option<u64>,
+    pub text_lossy: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub symlink_target: Option<GitPath>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub blob_oid: Option<String>,
+}
+
+/// History of one literal path, reachable from `commit` (the tree version). No rename following.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadFileHistoryParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    /// Empty for the repository root (directory history of everything).
+    #[schemars(length(max = 32768))]
+    pub path_hex: String,
+    pub kind: SearchPathKind,
+    /// Literal substring of the commit message; empty for no filter.
+    #[schemars(length(max = 4096))]
+    pub message: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 512))]
+    pub cursor: Option<String>,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileHistoryChange {
+    /// Relative to the first parent (or the empty tree for a root commit).
+    pub status: ChangedFileStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub old_path: Option<GitPath>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub additions: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub deletions: Option<u64>,
+    pub binary: bool,
+    /// Files changed under the path; 1 for a file.
+    pub files: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileHistoryEntry {
+    pub commit: CommitSummary,
+    pub change: FileHistoryChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileHistoryPage {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    pub path: GitPath,
+    #[schemars(length(max = 200))]
+    pub entries: Vec<FileHistoryEntry>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    #[schemars(length(max = 512))]
+    pub next_cursor: Option<String>,
+}
+
+/// One file's change in one commit, without loading the commit details first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadFileChangeParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    #[schemars(length(min = 2, max = 32768))]
+    pub path_hex: String,
+    /// The path in the parent when the file was renamed in this commit.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullablePathHexSchema")]
+    pub old_path_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_file: bool,
+}
+
+/// P4-12: blame of a file at a commit, streamed in chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadBlameParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    #[schemars(length(min = 2, max = 32768))]
+    pub path_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlameCommit {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    pub summary: String,
+    pub summary_truncated: bool,
+    pub author_name: String,
+    pub author_email: String,
+    /// Unix seconds.
+    pub author_time: i64,
+    pub text_lossy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlameBlock {
+    /// First line in the file at `commit`, 1-based.
+    pub start_line: u32,
+    pub line_count: u32,
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    /// First line of this block in the commit that last changed it.
+    pub original_start_line: u32,
+    /// Path in that commit when it differs from the current path (whole-file rename).
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub original_path: Option<GitPath>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlameChunk {
+    #[schemars(length(min = 40, max = 64))]
+    pub commit: String,
+    pub path: GitPath,
+    pub total_lines: u32,
+    #[schemars(length(max = 5000))]
+    pub blocks: Vec<BlameBlock>,
+    /// Commits first referenced in this chunk.
+    #[schemars(length(max = 5000))]
+    pub commits: Vec<BlameCommit>,
 }
 
 struct NullableU8Schema;
@@ -1545,6 +1821,14 @@ pub enum ResponseData {
     WorkspaceDiff { diff: WorkspaceDiff },
     #[serde(rename = "workspaceFile")]
     WorkspaceFile { file: WorkspaceFile },
+    #[serde(rename = "treePage")]
+    TreePage { page: TreePage },
+    #[serde(rename = "fileContent")]
+    FileContent { content: FileContent },
+    #[serde(rename = "fileHistory")]
+    FileHistory { page: FileHistoryPage },
+    #[serde(rename = "blameChunk")]
+    BlameChunk { chunk: BlameChunk },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]

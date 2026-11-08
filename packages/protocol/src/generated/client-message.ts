@@ -40,7 +40,12 @@ export type RequestParams =
   | GetHandoffFactsParams
   | ReadWorkspaceStatusParams
   | ReadWorkspaceDiffParams
-  | ReadWorkspaceFileParams;
+  | ReadWorkspaceFileParams
+  | ListTreeParams
+  | ReadFileContentParams
+  | ReadFileHistoryParams
+  | ReadFileChangeParams
+  | ReadBlameParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -162,6 +167,10 @@ export interface BranchesContainingParams {
   oid: string;
 }
 export interface ReadDiffParams {
+  /**
+   * P4-11: whole file as context. Only sent when the core declares `diffFullContext`.
+   */
+  fullFile?: boolean;
   newPathHex: string | null;
   oid: string;
   oldPathHex: string | null;
@@ -187,11 +196,69 @@ export interface ReadWorkspaceStatusParams {
   maxEntries: number;
 }
 export interface ReadWorkspaceDiffParams {
+  /**
+   * P4-11: whole file as context. Only sent when the core declares `diffFullContext`.
+   */
+  fullFile?: boolean;
   oldPathHex: string | null;
   pathHex: string;
   side: WorkspaceSide;
 }
 export interface ReadWorkspaceFileParams {
   maxLines: number;
+  pathHex: string;
+}
+/**
+ * P4-10: one directory of the tree at a commit, directories first, then by raw name bytes.
+ */
+export interface ListTreeParams {
+  commit: string;
+  limit: number;
+  offset: number;
+  /**
+   * Directory to list; null for the root.
+   */
+  pathHex: string | null;
+}
+export interface ReadFileContentParams {
+  commit: string;
+  maxLines: number;
+  pathHex: string;
+}
+/**
+ * History of one literal path, reachable from `commit` (the tree version). No rename following.
+ */
+export interface ReadFileHistoryParams {
+  commit: string;
+  cursor: string | null;
+  kind: SearchPathKind;
+  /**
+   * Literal substring of the commit message; empty for no filter.
+   */
+  message: string;
+  pageSize: number;
+  /**
+   * Empty for the repository root (directory history of everything).
+   */
+  pathHex: string;
+}
+/**
+ * One file's change in one commit, without loading the commit details first.
+ */
+export interface ReadFileChangeParams {
+  fullFile?: boolean;
+  oid: string;
+  /**
+   * The path in the parent when the file was renamed in this commit.
+   */
+  oldPathHex: string | null;
+  parentIndex: number | null;
+  pathHex: string;
+}
+/**
+ * P4-12: blame of a file at a commit, streamed in chunks.
+ */
+export interface ReadBlameParams {
+  commit: string;
   pathHex: string;
 }

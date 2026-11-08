@@ -107,6 +107,133 @@
       ],
       "type": "object"
     },
+    "BlameBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "lineCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "originalPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Path in that commit when it differs from the current path (whole-file rename)."
+        },
+        "originalStartLine": {
+          "description": "First line of this block in the commit that last changed it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "startLine": {
+          "description": "First line in the file at `commit`, 1-based.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startLine",
+        "lineCount",
+        "oid",
+        "originalStartLine",
+        "originalPath"
+      ],
+      "type": "object"
+    },
+    "BlameChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/definitions/BlameBlock"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "commits": {
+          "description": "Commits first referenced in this chunk.",
+          "items": {
+            "$ref": "#/definitions/BlameCommit"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "totalLines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "commit",
+        "path",
+        "totalLines",
+        "blocks",
+        "commits"
+      ],
+      "type": "object"
+    },
+    "BlameCommit": {
+      "additionalProperties": false,
+      "properties": {
+        "authorEmail": {
+          "type": "string"
+        },
+        "authorName": {
+          "type": "string"
+        },
+        "authorTime": {
+          "description": "Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "summaryTruncated": {
+          "type": "boolean"
+        },
+        "textLossy": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "oid",
+        "summary",
+        "summaryTruncated",
+        "authorName",
+        "authorEmail",
+        "authorTime",
+        "textLossy"
+      ],
+      "type": "object"
+    },
     "BranchesContainingResult": {
       "additionalProperties": false,
       "properties": {
@@ -170,6 +297,21 @@
         {
           "const": "workspaceStatus",
           "description": "P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.",
+          "type": "string"
+        },
+        {
+          "const": "fileBrowsing",
+          "description": "P4-10: tree listing, file content, file history and per-file changes at a commit.",
+          "type": "string"
+        },
+        {
+          "const": "diffFullContext",
+          "description": "P4-11: `fullFile` on diff requests returns the whole file as context.",
+          "type": "string"
+        },
+        {
+          "const": "blame",
+          "description": "P4-12: line-by-line blame.",
           "type": "string"
         }
       ]
@@ -774,6 +916,108 @@
       ],
       "type": "string"
     },
+    "FileContent": {
+      "additionalProperties": false,
+      "properties": {
+        "blobOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/FileContentKind"
+        },
+        "lines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symlinkTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "description": "The first `lines` lines when `kind` is text; at most 1 MiB.",
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "textLossy": {
+          "type": "boolean"
+        },
+        "totalLines": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Total line count of the blob when known, also when `text` was truncated."
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "commit",
+        "path",
+        "kind",
+        "text",
+        "lines",
+        "totalLines",
+        "truncated",
+        "size",
+        "textLossy",
+        "symlinkTarget",
+        "blobOid"
+      ],
+      "type": "object"
+    },
+    "FileContentKind": {
+      "enum": [
+        "text",
+        "binary",
+        "lfs",
+        "submodule",
+        "symlink",
+        "tooLarge",
+        "missing"
+      ],
+      "type": "string"
+    },
     "FileDiff": {
       "additionalProperties": false,
       "properties": {
@@ -834,7 +1078,8 @@
           ]
         },
         "patch": {
-          "maxLength": 131072,
+          "description": "At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).",
+          "maxLength": 1048576,
           "type": "string"
         },
         "textLossy": {
@@ -867,6 +1112,119 @@
         "tooLarge"
       ],
       "type": "string"
+    },
+    "FileHistoryChange": {
+      "additionalProperties": false,
+      "properties": {
+        "additions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "deletions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "description": "Files changed under the path; 1 for a file.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oldPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ChangedFileStatus"
+            }
+          ],
+          "description": "Relative to the first parent (or the empty tree for a root commit)."
+        }
+      },
+      "required": [
+        "status",
+        "oldPath",
+        "additions",
+        "deletions",
+        "binary",
+        "files"
+      ],
+      "type": "object"
+    },
+    "FileHistoryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "$ref": "#/definitions/FileHistoryChange"
+        },
+        "commit": {
+          "$ref": "#/definitions/CommitSummary"
+        }
+      },
+      "required": [
+        "commit",
+        "change"
+      ],
+      "type": "object"
+    },
+    "FileHistoryPage": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/FileHistoryEntry"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "nextCursor": {
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        }
+      },
+      "required": [
+        "commit",
+        "path",
+        "entries",
+        "nextCursor"
+      ],
+      "type": "object"
     },
     "GitInfo": {
       "additionalProperties": false,
@@ -2461,6 +2819,74 @@
         {
           "additionalProperties": false,
           "properties": {
+            "page": {
+              "$ref": "#/definitions/TreePage"
+            },
+            "section": {
+              "const": "treePage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "$ref": "#/definitions/FileContent"
+            },
+            "section": {
+              "const": "fileContent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "page": {
+              "$ref": "#/definitions/FileHistoryPage"
+            },
+            "section": {
+              "const": "fileHistory",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "chunk": {
+              "$ref": "#/definitions/BlameChunk"
+            },
+            "section": {
+              "const": "blameChunk",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "chunk"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -2980,6 +3406,119 @@
       ],
       "type": "object"
     },
+    "TreeEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TreeEntryKind"
+        },
+        "mode": {
+          "maxLength": 6,
+          "minLength": 6,
+          "type": "string"
+        },
+        "name": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            }
+          ],
+          "description": "Last path component."
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "path": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            }
+          ],
+          "description": "Full repository-relative path."
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Blob size in bytes; null for directories and submodules."
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "kind",
+        "mode",
+        "oid",
+        "size"
+      ],
+      "type": "object"
+    },
+    "TreeEntryKind": {
+      "enum": [
+        "directory",
+        "file",
+        "symlink",
+        "submodule"
+      ],
+      "type": "string"
+    },
+    "TreePage": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/TreeEntry"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "commit",
+        "path",
+        "entries",
+        "offset",
+        "total",
+        "hasMore"
+      ],
+      "type": "object"
+    },
     "WorkspaceChange": {
       "additionalProperties": false,
       "properties": {
@@ -3075,7 +3614,8 @@
           ]
         },
         "patch": {
-          "maxLength": 131072,
+          "description": "At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).",
+          "maxLength": 1048576,
           "type": "string"
         },
         "path": {

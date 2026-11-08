@@ -9,6 +9,10 @@ import type {
   WorkspaceDiff,
   WorkspaceFile,
   WorkspaceStatus,
+  TreePage,
+  FileContent,
+  FileHistoryPage,
+  BlameChunk,
   HistoryCommit,
   RefInfo,
   RepositoryInfo,
@@ -23,7 +27,8 @@ import type {
 } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
-  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams } from "../../../../packages/protocol/src/generated/client-message.js";
+  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   HistoryDateLocation,
@@ -153,9 +158,14 @@ export class RepositorySessionController {
   private commitDetailsIntent = 0;
   private activeCommitDetailRequest?: ActiveCommitDetailRequest;
   private currentCommitDetails?: { session: RepositorySessionInfo; details: CommitDetails };
-  /** P4-09: the file list and the shown file's diff or content each have one channel; a new read replaces the old one. */
-  private readonly workspaceIntent: Record<WorkspaceChannel, number> = { status: 0, content: 0 };
-  private readonly activeWorkspace: Partial<Record<WorkspaceChannel, ActiveWorkspaceRequest>> = {};
+  /**
+   * P4-09 to P4-12: each kind of workspace and files-page read has one channel; a new read replaces the
+   * previous one on the same channel, so a slow answer never lands on a newer selection.
+   */
+  private readonly channelIntent: Record<ReadChannel, number> = {
+    workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, blame: 0,
+  };
+  private readonly activeChannel: Partial<Record<ReadChannel, ActiveChannelRequest>> = {};
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -797,13 +807,14 @@ export class RepositorySessionController {
     this.validateOidForSession(params.oid, session);
     const details = this.requireLoadedCommitDetails(session, params.oid);
     validateFileParent(params.parentIndex, details.commit.parents.length);
+    if (params.fullFile) this.requireCapability("diffFullContext");
     return this.runCommitDetailsRequest("diff", session, signal => this.readFileDiff(session, params, details, signal));
   }
 
   async readWorkspaceStatus(input: unknown): Promise<WorkspaceStatus> {
     const params = validateWorkspaceStatusParams(input);
     const session = this.requireWorkspaceCapability();
-    return this.runWorkspaceRequest("status", session, signal => this.readWorkspaceSection(session, "readWorkspaceStatus", params, signal,
+    return this.runChannelRequest("workspaceStatus", session, signal => this.readSingleSection(session, "readWorkspaceStatus", params, signal,
       data => data.section === "workspaceStatus" ? data.status : undefined,
       status => {
         const shownConflicts = status.entries.filter(entry => entry.conflict !== null).length;
@@ -815,32 +826,123 @@ export class RepositorySessionController {
   async readWorkspaceDiff(input: unknown): Promise<WorkspaceDiff> {
     const params = validateWorkspaceDiffParams(input);
     const session = this.requireWorkspaceCapability();
-    return this.runWorkspaceRequest("content", session, signal => this.readWorkspaceSection(session, "readWorkspaceDiff", params, signal,
+    if (params.fullFile) this.requireCapability("diffFullContext");
+    return this.runChannelRequest("workspaceContent", session, signal => this.readSingleSection(session, "readWorkspaceDiff", params, signal,
       data => data.section === "workspaceDiff" ? data.diff : undefined,
-      diff => diff.side === params.side && diff.path.rawHex.toLowerCase() === params.pathHex.toLowerCase()));
+      diff => diff.side === params.side && diff.path.rawHex.toLowerCase() === params.pathHex.toLowerCase() &&
+        Buffer.byteLength(diff.patch, "utf8") <= (params.fullFile ? FULL_FILE_PATCH_BYTES : PATCH_BYTES)));
   }
 
   async readWorkspaceFile(input: unknown): Promise<WorkspaceFile> {
     const params = validateWorkspaceFileParams(input);
     const session = this.requireWorkspaceCapability();
-    return this.runWorkspaceRequest("content", session, signal => this.readWorkspaceSection(session, "readWorkspaceFile", params, signal,
+    return this.runChannelRequest("workspaceContent", session, signal => this.readSingleSection(session, "readWorkspaceFile", params, signal,
       data => data.section === "workspaceFile" ? data.file : undefined,
       file => file.path.rawHex.toLowerCase() === params.pathHex.toLowerCase() && file.lines <= params.maxLines &&
         (file.kind === "text" || file.text === "")));
   }
 
   async cancelWorkspace(): Promise<{ cancelled: boolean }> {
+    return this.cancelChannels(["workspaceStatus", "workspaceContent"], "工作区读取已取消");
+  }
+
+  async listTree(input: unknown): Promise<TreePage> {
+    const params = validateListTreeParams(input);
+    const session = this.requireFilesCapability();
+    return this.runChannelRequest("tree", session, signal => this.readSingleSection(session, "listTree", params, signal,
+      data => data.section === "treePage" ? data.page : undefined,
+      page => page.commit.toLowerCase() === params.commit && page.offset === params.offset && page.entries.length <= params.limit &&
+        page.total >= page.offset + page.entries.length && page.hasMore === page.offset + page.entries.length < page.total &&
+        (page.path?.rawHex.toLowerCase() ?? null) === params.pathHex));
+  }
+
+  async readFileContent(input: unknown): Promise<FileContent> {
+    const params = validateFileContentParams(input);
+    const session = this.requireFilesCapability();
+    return this.runChannelRequest("fileContent", session, signal => this.readSingleSection(session, "readFileContent", params, signal,
+      data => data.section === "fileContent" ? data.content : undefined,
+      content => content.commit.toLowerCase() === params.commit && content.path.rawHex.toLowerCase() === params.pathHex &&
+        content.lines <= params.maxLines && (content.kind === "text" || content.text === "")));
+  }
+
+  async readFileHistory(input: unknown): Promise<FileHistoryPage> {
+    const params = validateFileHistoryParams(input);
+    const session = this.requireFilesCapability();
+    return this.runChannelRequest("fileHistory", session, signal => this.readSingleSection(session, "readFileHistory", params, signal,
+      data => data.section === "fileHistory" ? data.page : undefined,
+      page => page.commit.toLowerCase() === params.commit && page.path.rawHex.toLowerCase() === params.pathHex &&
+        page.entries.length <= params.pageSize && (page.nextCursor === null || page.entries.length > 0)));
+  }
+
+  async readFileChange(input: unknown): Promise<FileDiff> {
+    const params = validateFileChangeParams(input);
+    const session = this.requireFilesCapability();
+    if (params.fullFile) this.requireCapability("diffFullContext");
+    return this.runChannelRequest("fileChange", session, signal => this.readSingleSection(session, "readFileChange", params, signal,
+      data => data.section === "fileDiff" ? data.diff : undefined,
+      diff => diff.oid.toLowerCase() === params.oid && diff.parentIndex === params.parentIndex &&
+        (diff.file.newPath?.rawHex.toLowerCase() === params.pathHex || diff.file.oldPath?.rawHex.toLowerCase() === params.pathHex) &&
+        Buffer.byteLength(diff.patch, "utf8") <= (params.fullFile ? FULL_FILE_PATCH_BYTES : PATCH_BYTES) && (diff.kind === "text" || diff.patch === "")));
+  }
+
+  /** Streams blame chunks through `onChunk` as the core finds them; resolves with the line count once complete. */
+  async readBlame(input: unknown, onChunk: (chunk: BlameChunk) => void): Promise<{ totalLines: number; blocks: number }> {
+    const params = validateBlameParams(input);
+    const session = this.requireCurrent();
+    this.requireCapability("blame");
+    return this.runChannelRequest("blame", session, async signal => {
+      let totalLines: number | null = null;
+      let covered = 0;
+      let blocks = 0;
+      let finished = false;
+      const completion = await this.core.request("readBlame", params, contextOf(session), {
+        timeoutMs: BLAME_TIMEOUT_MS,
+        signal,
+        drainAfterAbort: true,
+        onChunk: chunk => {
+          this.ensureCurrent(session);
+          if (finished || chunk.data.section !== "blameChunk") throw invalidSessionResponse("逐行追溯响应无效");
+          const data = chunk.data.chunk;
+          if (data.commit.toLowerCase() !== params.commit || data.path.rawHex.toLowerCase() !== params.pathHex ||
+            totalLines !== null && data.totalLines !== totalLines) throw invalidSessionResponse("逐行追溯响应不一致");
+          totalLines = data.totalLines;
+          covered += data.blocks.reduce((sum, block) => sum + block.lineCount, 0);
+          blocks += data.blocks.length;
+          if (covered > totalLines || data.blocks.some(block => block.startLine < 1 || block.lineCount < 1 || block.startLine + block.lineCount - 1 > data.totalLines)) {
+            throw invalidSessionResponse("逐行追溯的行范围超出文件");
+          }
+          if (chunk.done) finished = true;
+          onChunk(data);
+        },
+      });
+      this.ensureCurrent(session);
+      if (!finished || !completion.coverage.complete || totalLines === null || covered !== totalLines) throw invalidSessionResponse("逐行追溯响应不完整");
+      return { totalLines, blocks };
+    });
+  }
+
+  async cancelFiles(): Promise<{ cancelled: boolean }> {
+    return this.cancelChannels(["tree", "fileContent", "fileHistory", "fileChange", "blame"], "文件页读取已取消");
+  }
+
+  private async cancelChannels(channels: ReadChannel[], reason: string): Promise<{ cancelled: boolean }> {
     let cancelled = false;
-    for (const channel of ["status", "content"] as const) {
-      ++this.workspaceIntent[channel];
-      const active = this.activeWorkspace[channel];
+    for (const channel of channels) {
+      ++this.channelIntent[channel];
+      const active = this.activeChannel[channel];
       if (!active) continue;
       cancelled = true;
-      active.abort.abort(new Error("工作区读取已取消"));
+      active.abort.abort(new Error(reason));
       await active.done.catch(() => undefined);
-      if (this.activeWorkspace[channel] === active) delete this.activeWorkspace[channel];
+      if (this.activeChannel[channel] === active) delete this.activeChannel[channel];
     }
     return { cancelled };
+  }
+
+  private requireFilesCapability(): RepositorySessionInfo {
+    const session = this.requireCurrent();
+    this.requireCapability("fileBrowsing");
+    return session;
   }
 
   private requireWorkspaceCapability(): RepositorySessionInfo {
@@ -850,33 +952,33 @@ export class RepositorySessionController {
     return session;
   }
 
-  private async runWorkspaceRequest<T>(channel: WorkspaceChannel, session: RepositorySessionInfo, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库正在更新，暂不能读取工作区", true);
-    const intent = ++this.workspaceIntent[channel];
-    const previous = this.activeWorkspace[channel];
+  private async runChannelRequest<T>(channel: ReadChannel, session: RepositorySessionInfo, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库正在更新，稍后再读取", true);
+    const intent = ++this.channelIntent[channel];
+    const previous = this.activeChannel[channel];
     if (previous) {
-      previous.abort.abort(new Error("工作区读取已被新的读取取代"));
+      previous.abort.abort(new Error("读取已被新的读取取代"));
       await previous.done.catch(() => undefined);
     }
-    if (intent !== this.workspaceIntent[channel]) throw new ProtocolClientError("CANCELLED", "工作区读取已被新的读取取代", true);
+    if (intent !== this.channelIntent[channel]) throw new ProtocolClientError("CANCELLED", "读取已被新的读取取代", true);
     this.ensureCurrent(session);
     const abort = new AbortController();
-    const active: ActiveWorkspaceRequest = { abort, done: Promise.resolve(undefined) };
+    const active: ActiveChannelRequest = { abort, done: Promise.resolve(undefined) };
     const done = read(abort.signal);
     active.done = done;
-    this.activeWorkspace[channel] = active;
+    this.activeChannel[channel] = active;
     try {
       const result = await done;
-      if (intent !== this.workspaceIntent[channel]) throw new ProtocolClientError("CANCELLED", "工作区读取已被新的读取取代", true);
+      if (intent !== this.channelIntent[channel]) throw new ProtocolClientError("CANCELLED", "读取已被新的读取取代", true);
       this.ensureCurrent(session);
       return result;
     } finally {
-      if (this.activeWorkspace[channel] === active) delete this.activeWorkspace[channel];
+      if (this.activeChannel[channel] === active) delete this.activeChannel[channel];
     }
   }
 
   /** One terminal chunk with the expected section; the schema validators in the transport have already checked its shape. */
-  private async readWorkspaceSection<T>(session: RepositorySessionInfo, method: string, params: object, signal: AbortSignal,
+  private async readSingleSection<T>(session: RepositorySessionInfo, method: string, params: object, signal: AbortSignal,
     pick: (data: ServerResponseMessage["data"]) => T | undefined, consistent: (value: T) => boolean): Promise<T> {
     let value: T | undefined;
     const completion = await this.core.request(method, params, contextOf(session), {
@@ -886,13 +988,13 @@ export class RepositorySessionController {
       onChunk: chunk => {
         this.ensureCurrent(session);
         const picked = pick(chunk.data);
-        if (value !== undefined || picked === undefined || !chunk.done) throw invalidSessionResponse("工作区响应无效");
+        if (value !== undefined || picked === undefined || !chunk.done) throw invalidSessionResponse(`${method} 响应无效`);
         value = picked;
       },
     });
     this.ensureCurrent(session);
     if (value === undefined || !completion.coverage.complete || completion.coverage.processed !== 1 || completion.nextCursor !== null ||
-      !consistent(value)) throw invalidSessionResponse("工作区响应不完整或不一致");
+      !consistent(value)) throw invalidSessionResponse(`${method} 响应不完整或不一致`);
     return value;
   }
 
@@ -1094,6 +1196,7 @@ export class RepositorySessionController {
   private async cancelPassiveRequestsForTransition(): Promise<void> {
     await Promise.all([
       this.cancelWorkspace(),
+      this.cancelFiles(),
       this.cancelActivityStats(),
       this.cancelRepositoryObservation(),
       this.cancelRefSnapshotDiff(),
@@ -1726,7 +1829,10 @@ export class RepositorySessionController {
           ? "核心不支持元数据搜索，请更新核心版本" : capability === "historyGraph"
             ? "核心不支持历史图布局，请更新核心版本" : capability === "commitDetails"
               ? "核心不支持提交详情，请更新核心版本" : capability === "workspaceStatus"
-                ? "核心还不能读取工作区（P4-09 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
+                ? "核心还不能读取工作区（P4-09 后端尚未接入）" : capability === "fileBrowsing"
+                  ? "核心还不能浏览目录和文件（P4-10 后端尚未接入）" : capability === "diffFullContext"
+                    ? "核心还不能返回完整文件 diff（P4-11 后端尚未接入）" : capability === "blame"
+                      ? "核心还不能逐行追溯（P4-12 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -1859,7 +1965,8 @@ function validateBranchesContainingParams(value: unknown): BranchesContainingPar
 function validateReadDiffParams(value: unknown): ReadDiffParams {
   const validPathHex = (item: unknown) => item === null || typeof item === "string" && item.length > 0 &&
     item.length <= MAX_PATH_BYTES * 2 && item.length % 2 === 0 && /^[0-9a-f]+$/i.test(item);
-  if (!isRecord(value) || !hasExactKeys(value, ["newPathHex", "oid", "oldPathHex", "parentIndex"]) ||
+  const fullFile = isRecord(value) ? fullFileParam(value) : null;
+  if (!isRecord(value) || fullFile === null || !exactKeys(value, ["newPathHex", "oid", "oldPathHex", "parentIndex"], ["fullFile"]) ||
     typeof value.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.oid) ||
     value.parentIndex !== null && (!Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 0 || (value.parentIndex as number) > 127) ||
     !validPathHex(value.oldPathHex) || !validPathHex(value.newPathHex) || value.oldPathHex === null && value.newPathHex === null) {
@@ -1867,7 +1974,7 @@ function validateReadDiffParams(value: unknown): ReadDiffParams {
   }
   return { oid: value.oid.toLowerCase(), parentIndex: value.parentIndex as number | null,
     oldPathHex: typeof value.oldPathHex === "string" ? value.oldPathHex.toLowerCase() : null,
-    newPathHex: typeof value.newPathHex === "string" ? value.newPathHex.toLowerCase() : null };
+    newPathHex: typeof value.newPathHex === "string" ? value.newPathHex.toLowerCase() : null, ...(fullFile ? { fullFile } : {}) };
 }
 
 function validateListChangedFilesParams(value: unknown): ListChangedFilesParams {
@@ -2257,7 +2364,7 @@ function validFileDiff(diff: FileDiff, params: ReadDiffParams, details: CommitDe
     diff.oid !== params.oid || diff.parentIndex !== params.parentIndex || diff.parentOid !== parentOid || !validChangedFile(diff.file, objectFormat) ||
     (diff.file.oldPath?.rawHex ?? null) !== params.oldPathHex || (diff.file.newPath?.rawHex ?? null) !== params.newPathHex ||
     !["text", "binary", "gitlink", "lfs", "tooLarge"].includes(diff.kind as string) || typeof diff.patch !== "string" ||
-    Buffer.byteLength(diff.patch, "utf8") > 128 * 1024 || typeof diff.textLossy !== "boolean" || typeof diff.truncated !== "boolean" ||
+    Buffer.byteLength(diff.patch, "utf8") > (params.fullFile ? FULL_FILE_PATCH_BYTES : PATCH_BYTES) || typeof diff.textLossy !== "boolean" || typeof diff.truncated !== "boolean" ||
     !(diff.oldSize === null || isNonnegativeSafeInteger(diff.oldSize)) || !(diff.newSize === null || isNonnegativeSafeInteger(diff.newSize))) return false;
   return diff.kind === "text" || diff.patch === "";
 }
@@ -2274,11 +2381,79 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type WorkspaceChannel = "status" | "content";
+type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "blame";
 
-interface ActiveWorkspaceRequest {
+interface ActiveChannelRequest {
   abort: AbortController;
   done: Promise<unknown>;
+}
+
+const PATCH_BYTES = 128 * 1024;
+const FULL_FILE_PATCH_BYTES = 1024 * 1024;
+const BLAME_TIMEOUT_MS = 60_000;
+
+function oidParam(value: unknown): string | null {
+  return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/u.test(value) ? value.toLowerCase() : null;
+}
+
+function fullFileParam(value: Record<string, unknown>): boolean | null {
+  return value.fullFile === undefined ? false : typeof value.fullFile === "boolean" ? value.fullFile : null;
+}
+
+function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const keys = Object.keys(value);
+  return required.every(key => Object.hasOwn(value, key)) && keys.every(key => required.includes(key) || optional.includes(key));
+}
+
+function validateListTreeParams(value: unknown): ListTreeParams {
+  const commit = isRecord(value) ? oidParam(value.commit) : null;
+  if (!isRecord(value) || !commit || !exactKeys(value, ["commit", "limit", "offset", "pathHex"]) || !(value.pathHex === null || workspacePathHex(value.pathHex)) ||
+    !Number.isInteger(value.offset) || (value.offset as number) < 0 || (value.offset as number) > 0xffff_ffff ||
+    !Number.isInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > 500) {
+    throw new ProtocolClientError("INVALID_REQUEST", "目录读取参数无效");
+  }
+  return { commit, pathHex: typeof value.pathHex === "string" ? value.pathHex.toLowerCase() : null, offset: value.offset as number, limit: value.limit as number };
+}
+
+function validateFileContentParams(value: unknown): ReadFileContentParams {
+  const commit = isRecord(value) ? oidParam(value.commit) : null;
+  if (!isRecord(value) || !commit || !exactKeys(value, ["commit", "maxLines", "pathHex"]) || !workspacePathHex(value.pathHex) ||
+    !Number.isInteger(value.maxLines) || (value.maxLines as number) < 1 || (value.maxLines as number) > 5000) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件内容参数无效");
+  }
+  return { commit, pathHex: value.pathHex.toLowerCase(), maxLines: value.maxLines as number };
+}
+
+function validateFileHistoryParams(value: unknown): ReadFileHistoryParams {
+  const commit = isRecord(value) ? oidParam(value.commit) : null;
+  if (!isRecord(value) || !commit || !exactKeys(value, ["commit", "cursor", "kind", "message", "pageSize", "pathHex"]) ||
+    (value.kind !== "file" && value.kind !== "directory") || !(value.pathHex === "" && value.kind === "directory" || workspacePathHex(value.pathHex)) ||
+    typeof value.message !== "string" || Buffer.byteLength(value.message, "utf8") > 4096 ||
+    !(value.cursor === null || typeof value.cursor === "string" && value.cursor.length > 0 && Buffer.byteLength(value.cursor, "utf8") <= 512) ||
+    !Number.isInteger(value.pageSize) || (value.pageSize as number) < 1 || (value.pageSize as number) > 200) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件历史参数无效");
+  }
+  return { commit, pathHex: (value.pathHex as string).toLowerCase(), kind: value.kind, message: value.message, cursor: value.cursor as string | null, pageSize: value.pageSize as number };
+}
+
+function validateFileChangeParams(value: unknown): ReadFileChangeParams {
+  const oid = isRecord(value) ? oidParam(value.oid) : null;
+  const fullFile = isRecord(value) ? fullFileParam(value) : null;
+  if (!isRecord(value) || !oid || fullFile === null || !exactKeys(value, ["oid", "oldPathHex", "parentIndex", "pathHex"], ["fullFile"]) ||
+    !workspacePathHex(value.pathHex) || !(value.oldPathHex === null || workspacePathHex(value.oldPathHex)) ||
+    value.parentIndex !== null && (!Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 0 || (value.parentIndex as number) > 127)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "文件改动参数无效");
+  }
+  return { oid, parentIndex: value.parentIndex as number | null, pathHex: value.pathHex.toLowerCase(),
+    oldPathHex: typeof value.oldPathHex === "string" ? value.oldPathHex.toLowerCase() : null, ...(fullFile ? { fullFile } : {}) };
+}
+
+function validateBlameParams(value: unknown): ReadBlameParams {
+  const commit = isRecord(value) ? oidParam(value.commit) : null;
+  if (!isRecord(value) || !commit || !exactKeys(value, ["commit", "pathHex"]) || !workspacePathHex(value.pathHex)) {
+    throw new ProtocolClientError("INVALID_REQUEST", "逐行追溯参数无效");
+  }
+  return { commit, pathHex: value.pathHex.toLowerCase() };
 }
 
 function workspacePathHex(value: unknown): value is string {
@@ -2294,11 +2469,12 @@ function validateWorkspaceStatusParams(value: unknown): ReadWorkspaceStatusParam
 }
 
 function validateWorkspaceDiffParams(value: unknown): ReadWorkspaceDiffParams {
-  if (!isRecord(value) || Object.keys(value).length !== 3 || (value.side !== "staged" && value.side !== "unstaged") || !workspacePathHex(value.pathHex) ||
-    !(value.oldPathHex === null || workspacePathHex(value.oldPathHex))) {
+  const fullFile = isRecord(value) ? fullFileParam(value) : null;
+  if (!isRecord(value) || fullFile === null || !exactKeys(value, ["oldPathHex", "pathHex", "side"], ["fullFile"]) || (value.side !== "staged" && value.side !== "unstaged") ||
+    !workspacePathHex(value.pathHex) || !(value.oldPathHex === null || workspacePathHex(value.oldPathHex))) {
     throw new ProtocolClientError("INVALID_REQUEST", "工作区 diff 参数无效");
   }
-  return { side: value.side, pathHex: value.pathHex, oldPathHex: value.oldPathHex };
+  return { side: value.side, pathHex: value.pathHex, oldPathHex: value.oldPathHex, ...(fullFile ? { fullFile } : {}) };
 }
 
 function validateWorkspaceFileParams(value: unknown): ReadWorkspaceFileParams {

@@ -41,7 +41,10 @@ export type Capability =
       | "repositoryObservation"
       | "handoffFacts"
     )
-  | "workspaceStatus";
+  | "workspaceStatus"
+  | "fileBrowsing"
+  | "diffFullContext"
+  | "blame";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -111,6 +114,22 @@ export type ResponseData =
   | {
       file: WorkspaceFile;
       section: "workspaceFile";
+    }
+  | {
+      page: TreePage;
+      section: "treePage";
+    }
+  | {
+      content: FileContent;
+      section: "fileContent";
+    }
+  | {
+      page: FileHistoryPage;
+      section: "fileHistory";
+    }
+  | {
+      chunk: BlameChunk;
+      section: "blameChunk";
     }
   | {
       git: GitInfo;
@@ -219,6 +238,8 @@ export type WorkspaceConflict =
 export type WorkspaceOperation = "none" | "merge" | "rebase" | "cherryPick" | "revert" | "bisect";
 export type WorkspaceSide = "staged" | "unstaged";
 export type WorkspaceFileKind = "text" | "binary" | "tooLarge" | "symlink" | "missing" | "notFile";
+export type TreeEntryKind = "directory" | "file" | "symlink" | "submodule";
+export type FileContentKind = "text" | "binary" | "lfs" | "submodule" | "symlink" | "tooLarge" | "missing";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
@@ -979,6 +1000,9 @@ export interface FileDiff {
   oldSize: number | null;
   parentIndex: number | null;
   parentOid: string | null;
+  /**
+   * At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).
+   */
   patch: string;
   textLossy: boolean;
   truncated: boolean;
@@ -1026,6 +1050,9 @@ export interface WorkspaceDiff {
   newSize: number | null;
   oldPath: GitPath | null;
   oldSize: number | null;
+  /**
+   * At most 128 KiB for a normal diff; up to 1 MiB when the whole file was requested (P4-11).
+   */
   patch: string;
   path: GitPath;
   side: WorkspaceSide;
@@ -1041,6 +1068,123 @@ export interface WorkspaceFile {
   text: string;
   textLossy: boolean;
   truncated: boolean;
+}
+export interface TreePage {
+  commit: string;
+  /**
+   * @maxItems 500
+   */
+  entries: TreeEntry[];
+  hasMore: boolean;
+  offset: number;
+  path: GitPath | null;
+  total: number;
+}
+export interface TreeEntry {
+  kind: TreeEntryKind;
+  mode: string;
+  /**
+   * Last path component.
+   */
+  name: GitPath;
+  oid: string;
+  /**
+   * Full repository-relative path.
+   */
+  path: GitPath;
+  /**
+   * Blob size in bytes; null for directories and submodules.
+   */
+  size: number | null;
+}
+export interface FileContent {
+  blobOid: string | null;
+  commit: string;
+  kind: FileContentKind;
+  lines: number;
+  path: GitPath;
+  size: number | null;
+  symlinkTarget: GitPath | null;
+  /**
+   * The first `lines` lines when `kind` is text; at most 1 MiB.
+   */
+  text: string;
+  textLossy: boolean;
+  /**
+   * Total line count of the blob when known, also when `text` was truncated.
+   */
+  totalLines: number | null;
+  truncated: boolean;
+}
+export interface FileHistoryPage {
+  commit: string;
+  /**
+   * @maxItems 200
+   */
+  entries: FileHistoryEntry[];
+  nextCursor: string | null;
+  path: GitPath;
+}
+export interface FileHistoryEntry {
+  change: FileHistoryChange;
+  commit: CommitSummary;
+}
+export interface FileHistoryChange {
+  additions: number | null;
+  binary: boolean;
+  deletions: number | null;
+  /**
+   * Files changed under the path; 1 for a file.
+   */
+  files: number;
+  oldPath: GitPath | null;
+  /**
+   * Relative to the first parent (or the empty tree for a root commit).
+   */
+  status: ChangedFileStatus;
+}
+export interface BlameChunk {
+  /**
+   * @maxItems 5000
+   */
+  blocks: BlameBlock[];
+  commit: string;
+  /**
+   * Commits first referenced in this chunk.
+   *
+   * @maxItems 5000
+   */
+  commits: BlameCommit[];
+  path: GitPath;
+  totalLines: number;
+}
+export interface BlameBlock {
+  lineCount: number;
+  oid: string;
+  /**
+   * Path in that commit when it differs from the current path (whole-file rename).
+   */
+  originalPath: GitPath | null;
+  /**
+   * First line of this block in the commit that last changed it.
+   */
+  originalStartLine: number;
+  /**
+   * First line in the file at `commit`, 1-based.
+   */
+  startLine: number;
+}
+export interface BlameCommit {
+  authorEmail: string;
+  authorName: string;
+  /**
+   * Unix seconds.
+   */
+  authorTime: number;
+  oid: string;
+  summary: string;
+  summaryTruncated: boolean;
+  textLossy: boolean;
 }
 export interface RepositorySessionInfo {
   generation: string;

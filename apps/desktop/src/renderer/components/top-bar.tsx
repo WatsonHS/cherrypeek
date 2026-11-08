@@ -115,7 +115,10 @@ function TopBarSearch({ label, children }: { label: string; children: React.Reac
   const rootRef = React.useRef<HTMLDivElement>(null);
   const focusInput = React.useCallback(() => {
     setExpanded(true);
-    requestAnimationFrame(() => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input")?.focus());
+    // A visible box takes focus at once, so keys typed right after ⌘F are not lost; a collapsed one focuses after it opens.
+    const input = rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input");
+    input?.focus();
+    if (document.activeElement !== input) requestAnimationFrame(() => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input")?.focus());
   }, []);
   React.useEffect(() => {
     window.addEventListener(FOCUS_SEARCH_EVENT, focusInput);

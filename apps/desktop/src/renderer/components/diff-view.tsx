@@ -4,6 +4,13 @@ import { DropdownMenu } from "radix-ui";
 import { diffDisplay, type DiffDisplay } from "../lib/diff-display.js";
 import { parseUnifiedPatch, splitRows, type DiffLine, type Segment, type SplitRow, type SplitSide } from "../lib/diff-model.js";
 import { cn } from "../lib/utils.js";
+import { languageForPath } from "../lib/syntax/languages.js";
+import { useSyntaxLines } from "../lib/syntax/highlight.js";
+import type { SyntaxToken } from "../lib/syntax/tokens.js";
+import { SyntaxLine } from "./syntax-text.js";
+
+/** Whether the core declares `diffFullContext`; set once by the app around all pages. */
+export const DiffFullContext = React.createContext(false);
 
 export function useDiffDisplay(): DiffDisplay {
   return React.useSyncExternalStore(diffDisplay.subscribe, diffDisplay.getView);
@@ -86,34 +93,106 @@ export function DiffDisplayMenu({ fullAvailable, fullUnavailableReason }: { full
 
 const NUMBER = "shrink-0 pr-2 text-right text-fg3 select-none";
 
-/** A text diff with a change stepper and the display menu above it. */
-export function DiffView({ patch, fullAvailable = false }: { patch: string; fullAvailable?: boolean }): React.JSX.Element {
+/** Marks one new-side line, e.g. the line a blame click came from. */
+export interface DiffFocus {
+  newLine: number;
+  label: string;
+}
+
+/**
+ * A text diff with a change stepper and the display menu above it. `leading` goes at the start of
+ * that header row. With `focus`, only the change containing that line is shown until the rest is expanded.
+ */
+export function DiffView({ patch, fullAvailable: fullAvailableProp, leading, focus, path }: {
+  patch: string;
+  /** Repository path of the file, used only to pick the syntax highlighting language. */
+  path?: string | null;
+  fullAvailable?: boolean;
+  leading?: React.ReactNode;
+  focus?: DiffFocus | null;
+}): React.JSX.Element {
   const display = useDiffDisplay();
+  const contextFull = React.useContext(DiffFullContext);
+  const fullAvailable = fullAvailableProp ?? contextFull;
   const parsed = React.useMemo(() => parseUnifiedPatch(patch), [patch]);
-  const rows = React.useMemo(() => display.layout === "split" ? splitRows(parsed) : null, [parsed, display.layout]);
+  const sides = React.useMemo(() => syntaxSides(parsed.lines), [parsed]);
+  const language = React.useMemo(() => path ? languageForPath(path) : null, [path]);
+  const oldTokens = useSyntaxLines(sides.oldLines, language);
+  const newTokens = useSyntaxLines(sides.newLines, language);
+  const tokensFor = React.useCallback((side: "old" | "new", number: number | null): readonly SyntaxToken[] | null => {
+    if (number === null) return null;
+    const index = (side === "old" ? sides.oldIndex : sides.newIndex).get(number);
+    return index === undefined ? null : (side === "old" ? oldTokens : newTokens)?.[index] ?? null;
+  }, [sides, oldTokens, newTokens]);
+  const [showAll, setShowAll] = React.useState(false);
+  const focusLine = focus?.newLine ?? null;
+  React.useEffect(() => setShowAll(false), [patch, focusLine]);
+  const focusHunk = focusLine === null ? null : parsed.lines.find(line => line.newNumber === focusLine && line.kind !== "del")?.hunk ?? null;
+  const onlyHunk = focusHunk !== null && !showAll ? focusHunk : null;
+  const lines = React.useMemo(() => parsed.lines.filter(line => line.kind !== "meta" && (onlyHunk === null || line.hunk === onlyHunk)), [parsed, onlyHunk]);
+  const rows = React.useMemo(() => {
+    if (display.layout !== "split") return null;
+    const all = splitRows(parsed).filter(row => row.kind !== "meta");
+    return onlyHunk === null ? all : all.filter(row => row.hunk === onlyHunk);
+  }, [parsed, display.layout, onlyHunk]);
   const rootRef = React.useRef<HTMLDivElement>(null);
   const [current, setCurrent] = React.useState(0);
   React.useEffect(() => setCurrent(0), [patch]);
+  React.useEffect(() => {
+    if (focusLine === null) return;
+    const frame = requestAnimationFrame(() => rootRef.current?.querySelector("[data-marked='true']")?.scrollIntoView({ block: "center" }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusLine, patch, display.layout]);
   const go = (next: number) => {
     const target = Math.max(0, Math.min(parsed.hunkCount - 1, next));
     setCurrent(target);
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     rootRef.current?.querySelector(`[data-hunk-start="${target}"]`)?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
   };
+  const mark = focus && focusHunk !== null ? focus : null;
   return <div ref={rootRef} data-testid="diff-view" data-layout={display.layout} data-wrap={display.wrap ? "true" : "false"}>
-    <div className="flex h-9 items-center gap-1 border-b border-line px-3">
+    <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-line px-3 py-1">
+      {leading}
       <div className="flex-1" />
-      {parsed.hunkCount > 1 ? <>
-        <span className="diff-hunk-count mr-0.5 text-xs text-fg3 tabular-nums" data-testid="diff-hunk-position">第 {current + 1} / {parsed.hunkCount} 处改动</span>
-        <button type="button" aria-label="上一处改动" disabled={current === 0} onClick={() => go(current - 1)}
-          className="flex size-[26px] items-center justify-center rounded-md text-fg2 hover:bg-hover disabled:text-fg3 disabled:opacity-50"><ChevronUp className="size-3.5" strokeWidth={1.75} /></button>
-        <button type="button" aria-label="下一处改动" disabled={current >= parsed.hunkCount - 1} onClick={() => go(current + 1)}
-          className="flex size-[26px] items-center justify-center rounded-md text-fg2 hover:bg-hover disabled:text-fg3 disabled:opacity-50"><ChevronDown className="size-3.5" strokeWidth={1.75} /></button>
-      </> : null}
+      {onlyHunk !== null
+        ? <span className="diff-hunk-count mr-0.5 text-xs text-fg3 tabular-nums" data-testid="diff-hunk-position">第 {onlyHunk + 1} / {parsed.hunkCount} 处改动</span>
+        : parsed.hunkCount > 1 ? <>
+          <span className="diff-hunk-count mr-0.5 text-xs text-fg3 tabular-nums" data-testid="diff-hunk-position">第 {current + 1} / {parsed.hunkCount} 处改动</span>
+          <button type="button" aria-label="上一处改动" disabled={current === 0} onClick={() => go(current - 1)}
+            className="flex size-[26px] items-center justify-center rounded-md text-fg2 hover:bg-hover disabled:text-fg3 disabled:opacity-50"><ChevronUp className="size-3.5" strokeWidth={1.75} /></button>
+          <button type="button" aria-label="下一处改动" disabled={current >= parsed.hunkCount - 1} onClick={() => go(current + 1)}
+            className="flex size-[26px] items-center justify-center rounded-md text-fg2 hover:bg-hover disabled:text-fg3 disabled:opacity-50"><ChevronDown className="size-3.5" strokeWidth={1.75} /></button>
+        </> : null}
       <DiffDisplayMenu fullAvailable={fullAvailable} fullUnavailableReason="完整文件需要核心返回带全文上下文的 diff（占位 · P4-11）" />
     </div>
-    {rows ? display.wrap ? <SplitWrapped rows={rows} /> : <SplitColumns rows={rows} /> : <Unified lines={parsed.lines} wrap={display.wrap} />}
+    <TokensContext.Provider value={tokensFor}>
+      {rows ? display.wrap ? <SplitWrapped rows={rows} mark={mark} /> : <SplitColumns rows={rows} mark={mark} /> : <Unified lines={lines} wrap={display.wrap} mark={mark} />}
+    </TokensContext.Provider>
+    {onlyHunk !== null && parsed.hunkCount > 1 ? <button type="button" onClick={() => setShowAll(true)} data-testid="diff-show-all"
+      className="mt-1.5 mb-2 ml-[70px] h-[26px] rounded-[7px] border border-line2 bg-panel px-2.5 text-xs text-fg2 hover:bg-hover">展开其余 {parsed.hunkCount - 1} 处改动</button> : null}
   </div>;
+}
+
+const MARKED = "shadow-[inset_3px_0_0_var(--accent)]";
+
+type TokensFor = (side: "old" | "new", number: number | null) => readonly SyntaxToken[] | null;
+const TokensContext = React.createContext<TokensFor>(() => null);
+
+/** The old side (context and removed lines) and the new side (context and added lines) as two documents. */
+function syntaxSides(lines: DiffLine[]): { oldLines: string[]; newLines: string[]; oldIndex: Map<number, number>; newIndex: Map<number, number> } {
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+  const oldIndex = new Map<number, number>();
+  const newIndex = new Map<number, number>();
+  for (const line of lines) {
+    if ((line.kind === "context" || line.kind === "del") && line.oldNumber !== null) { oldIndex.set(line.oldNumber, oldLines.length); oldLines.push(line.text); }
+    if ((line.kind === "context" || line.kind === "add") && line.newNumber !== null) { newIndex.set(line.newNumber, newLines.length); newLines.push(line.text); }
+  }
+  return { oldLines, newLines, oldIndex, newIndex };
+}
+
+function MarkTag({ label }: { label: string }): React.JSX.Element {
+  return <span className="ml-2 font-sans text-[11px] whitespace-nowrap text-accent-fg select-none">{label}</span>;
 }
 
 function rowTone(kind: DiffLine["kind"] | SplitSide["kind"]): string {
@@ -124,23 +203,29 @@ function noticeText(text: string): string {
   return text === "\\ No newline at end of file" ? "文件末尾没有换行" : text.replace(/^\\ ?/u, "");
 }
 
-function Unified({ lines, wrap }: { lines: DiffLine[]; wrap: boolean }): React.JSX.Element {
+function Unified({ lines, wrap, mark }: { lines: DiffLine[]; wrap: boolean; mark: DiffFocus | null }): React.JSX.Element {
+  const tokensFor = React.useContext(TokensContext);
   return <div className={cn("py-1 font-mono text-[12px] leading-[21px]", !wrap && "overflow-x-auto")} data-testid="diff-lines">
     {lines.map((line, index) => {
       const sign = line.kind === "add" ? "+" : line.kind === "del" ? "−" : line.kind === "notice" ? "!" : "";
-      return <div key={index} data-hunk-start={line.kind === "hunk" ? line.hunk : undefined}
-        className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", rowTone(line.kind))}>
+      const marked = Boolean(mark && line.newNumber === mark.newLine && line.kind !== "del");
+      return <div key={index} data-hunk-start={line.kind === "hunk" ? line.hunk : undefined} data-marked={marked ? "true" : undefined}
+        className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", rowTone(line.kind), marked && MARKED)}>
         <span className={cn(NUMBER, "w-12")}>{line.oldNumber ?? ""}</span>
         <span className={cn(NUMBER, "w-12")}>{line.newNumber ?? ""}</span>
         <span className={cn("w-5 shrink-0 text-center select-none", line.kind === "add" && "text-add", line.kind === "del" && "text-del")}>{sign}</span>
-        <span className={cn("pr-5", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}>{line.kind === "notice" ? noticeText(line.text) : line.text}</span>
+        <span className={cn("pr-5", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}>{line.kind === "notice" ? noticeText(line.text)
+          : line.kind === "del" || line.kind === "add" || line.kind === "context"
+            ? <SyntaxLine tokens={tokensFor(line.kind === "del" ? "old" : "new", line.kind === "del" ? line.oldNumber : line.newNumber)} fallback={line.text} />
+            : line.text}{marked ? <MarkTag label={mark!.label} /> : null}</span>
       </div>;
     })}
   </div>;
 }
 
-function SideText({ side }: { side: SplitSide }): React.JSX.Element {
-  if (!side.segments) return <>{side.text}</>;
+function SideText({ side, left }: { side: SplitSide; left: boolean }): React.JSX.Element {
+  const tokensFor = React.useContext(TokensContext);
+  if (!side.segments) return side.kind === "empty" ? <>{side.text}</> : <SyntaxLine tokens={tokensFor(left ? "old" : "new", side.number)} fallback={side.text} />;
   return <>{side.segments.map((segment: Segment, index) => segment.changed
     ? <span key={index} className={cn("rounded-[2px]", side.kind === "del" ? "bg-[color-mix(in_srgb,var(--del)_16%,transparent)]" : "bg-[color-mix(in_srgb,var(--add)_16%,transparent)]")}>{segment.text}</span>
     : <React.Fragment key={index}>{segment.text}</React.Fragment>)}</>;
@@ -148,12 +233,14 @@ function SideText({ side }: { side: SplitSide }): React.JSX.Element {
 
 const EMPTY_SIDE = "bg-[repeating-linear-gradient(135deg,var(--sunken)_0_3px,transparent_3px_7px)]";
 
-function SideCell({ side, wrap }: { side: SplitSide; wrap: boolean }): React.JSX.Element {
+function SideCell({ side, wrap, mark, left }: { side: SplitSide; wrap: boolean; mark?: DiffFocus | null; left: boolean }): React.JSX.Element {
   const sign = side.kind === "add" ? "+" : side.kind === "del" ? "−" : "";
-  return <div className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", side.kind === "empty" ? EMPTY_SIDE : rowTone(side.kind))}>
+  const marked = Boolean(mark && side.number === mark.newLine && side.kind !== "del" && side.kind !== "empty");
+  return <div data-marked={marked ? "true" : undefined}
+    className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", side.kind === "empty" ? EMPTY_SIDE : rowTone(side.kind), marked && MARKED)}>
     <span className={cn(NUMBER, "w-[42px]", !wrap && "sticky left-0 z-[1]", !wrap && (side.kind === "add" ? "bg-add-bg" : side.kind === "del" ? "bg-del-bg" : side.kind === "empty" ? "bg-transparent" : "bg-bg"))}>{side.number ?? ""}</span>
     <span className={cn("w-3.5 shrink-0 text-center select-none", side.kind === "add" && "text-add", side.kind === "del" && "text-del")}>{sign}</span>
-    <span className={cn("pr-3", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}><SideText side={side} /></span>
+    <span className={cn("pr-3", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}><SideText side={side} left={left} />{marked ? <MarkTag label={mark!.label} /> : null}</span>
   </div>;
 }
 
@@ -164,22 +251,22 @@ function FullRow({ row }: { row: Exclude<SplitRow, { kind: "pair" }> }): React.J
 }
 
 /** Wrapped side-by-side: one grid, so a long line on either side keeps both rows the same height. */
-function SplitWrapped({ rows }: { rows: SplitRow[] }): React.JSX.Element {
+function SplitWrapped({ rows, mark }: { rows: SplitRow[]; mark: DiffFocus | null }): React.JSX.Element {
   return <div className="py-1 font-mono text-[12px] leading-[21px]" data-testid="diff-split">
     {rows.map((row, index) => row.kind === "pair"
       ? <div key={index} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <SideCell side={row.left} wrap />
-        <div className="border-l border-line"><SideCell side={row.right} wrap /></div>
+        <SideCell side={row.left} wrap left />
+        <div className="border-l border-line"><SideCell side={row.right} wrap mark={mark} left={false} /></div>
       </div>
       : <FullRow key={index} row={row} />)}
   </div>;
 }
 
 /** Unwrapped side-by-side: every row has the same height, so each side can scroll sideways on its own. */
-function SplitColumns({ rows }: { rows: SplitRow[] }): React.JSX.Element {
+function SplitColumns({ rows, mark }: { rows: SplitRow[]; mark: DiffFocus | null }): React.JSX.Element {
   const column = (side: "left" | "right") => <div className={cn("min-w-0 overflow-x-auto py-1", side === "right" && "border-l border-line")}>
     {rows.map((row, index) => row.kind === "pair"
-      ? <SideCell key={index} side={row[side]} wrap={false} />
+      ? <SideCell key={index} side={row[side]} wrap={false} mark={side === "right" ? mark : null} left={side === "left"} />
       : <div key={index} data-hunk-start={side === "left" && row.kind === "hunk" ? row.hunk : undefined}
         className={cn("min-w-max px-3 whitespace-pre", rowTone(row.kind), row.kind === "meta" && "text-fg3")}>
         {side === "left" ? row.kind === "notice" ? noticeText(row.text) : row.text : " "}

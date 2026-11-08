@@ -11,10 +11,10 @@
 | 方法 | 参数 | 响应 section | 用途 |
 | --- | --- | --- | --- |
 | `readWorkspaceStatus` | `{ maxEntries: 1..2000 }` | `workspaceStatus` | 已暂存、未暂存、未跟踪、冲突文件清单 |
-| `readWorkspaceDiff` | `{ side: "staged" \| "unstaged", pathHex, oldPathHex }` | `workspaceDiff` | 一个文件在一组里的 diff |
+| `readWorkspaceDiff` | `{ side: "staged" \| "unstaged", pathHex, oldPathHex, fullFile? }` | `workspaceDiff` | 一个文件在一组里的 diff |
 | `readWorkspaceFile` | `{ pathHex, maxLines: 1..5000 }` | `workspaceFile` | 未跟踪文件预览、冲突文件内容 |
 
-每个方法只返回一个终态块，`coverage.complete = true`、`processed = 1`、`nextCursor = null`。取消沿用协议的 `cancel` 消息。
+`fullFile` 见 [P4-11](p4-11-diff-display.md)。每个方法只返回一个终态块，`coverage.complete = true`、`processed = 1`、`nextCursor = null`。取消沿用协议的 `cancel` 消息。
 
 ## 数据
 
@@ -72,7 +72,7 @@ type WorkspaceFile = {
 
 - 同一路径只出现一次；同时有已暂存和未暂存改动时两个字段都有值。`totalPaths` 按路径去重，忽略的文件不列出、不计数。
 - 只有一次完整、成功的读取且没有任何条目时，renderer 才显示“干净”；`complete = false` 时角标显示 `totalPaths+`。
-- `readWorkspaceDiff` 的 `pathHex` / `oldPathHex` 必须对应最近一次状态里的条目；文件不在对应组里时返回 `NOT_FOUND`。冲突条目不提供 diff，用 `readWorkspaceFile` 读带冲突标记的内容。
+- `readWorkspaceDiff` 的 `pathHex` / `oldPathHex` 必须对应最近一次状态里的条目；文件不在对应组里时返回 `MISSING_OBJECT`。冲突条目不提供 diff，用 `readWorkspaceFile` 读带冲突标记的内容。
 - `readWorkspaceFile` 读工作区里的文件本身：不跟随符号链接（返回 `symlink` 和目标）；路径必须在工作区内，否则返回 `INVALID_REQUEST`；超过 1 MiB 返回 `tooLarge` 且不读内容；含 NUL 的前 8 KiB 判为 `binary`。
 - bare 仓库调用任一方法返回 `INVALID_REQUEST`（renderer 不会对 bare 发请求）。
 

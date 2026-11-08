@@ -26,6 +26,21 @@
           "const": "workspaceStatus",
           "description": "P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.",
           "type": "string"
+        },
+        {
+          "const": "fileBrowsing",
+          "description": "P4-10: tree listing, file content, file history and per-file changes at a commit.",
+          "type": "string"
+        },
+        {
+          "const": "diffFullContext",
+          "description": "P4-11: `fullFile` on diff requests returns the whole file as context.",
+          "type": "string"
+        },
+        {
+          "const": "blame",
+          "description": "P4-12: line-by-line blame.",
+          "type": "string"
         }
       ]
     },

@@ -19,7 +19,7 @@ function SearchKeyHint(): React.JSX.Element {
 }
 
 /** The search box of the files and workspace pages: same look, a page-specific scope and behaviour. */
-export function PageSearchBox({ scope, label, placeholder, value, onChange, disabled, title, trailing }: {
+export function PageSearchBox({ scope, label, placeholder, value, onChange, disabled, title, trailing, onKeyDown }: {
   scope: string;
   label: string;
   placeholder: string;
@@ -29,6 +29,7 @@ export function PageSearchBox({ scope, label, placeholder, value, onChange, disa
   title?: string;
   /** Replaces the shortcut hint, e.g. a "1 / 8" match counter. */
   trailing?: React.ReactNode;
+  onKeyDown?(event: React.KeyboardEvent<HTMLInputElement>): void;
 }): React.JSX.Element {
   return <div className="topbar-search-controls flex min-w-0 flex-[0_1_300px] items-center">
     <label className="flex h-[34px] min-w-0 flex-1 items-center gap-[7px] rounded-lg bg-sunken pr-2 pl-2.5 text-fg3" title={title ?? `${label}（⌘F）`}>
@@ -36,7 +37,7 @@ export function PageSearchBox({ scope, label, placeholder, value, onChange, disa
       <SearchScopeChip>{scope}</SearchScopeChip>
       <span className="sr-only">{label}</span>
       <input data-testid="page-search-input" aria-label={label} value={value} placeholder={placeholder} disabled={disabled}
-        onChange={event => onChange(event.currentTarget.value)}
+        onChange={event => onChange(event.currentTarget.value)} onKeyDown={onKeyDown}
         className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-fg3 disabled:cursor-not-allowed" />
       {trailing ?? (value ? null : <SearchKeyHint />)}
       {value ? <button type="button" aria-label="清空" onClick={() => onChange("")}

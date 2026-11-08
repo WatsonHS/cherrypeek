@@ -101,7 +101,7 @@ export class WorkspaceStore {
   private lastReadAt = Number.NEGATIVE_INFINITY;
   private timer?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly api: WorkspaceApi, private readonly now: () => number = () => Date.now()) {}
+  constructor(private readonly api: WorkspaceApi, private readonly now: () => number = () => Date.now(), private readonly fullFile: () => boolean = () => false) {}
 
   getView = (): WorkspaceView => this.view;
   subscribe = (listener: () => void): (() => void) => {
@@ -203,9 +203,16 @@ export class WorkspaceStore {
     const intent = ++this.contentIntent;
     const keepShown = this.view.content?.key.startsWith(`${selection.group}:${selection.pathHex}:`) ? this.view.content : null;
     this.update({ ...this.view, content: { key, state: "loading", diff: keepShown?.diff ?? null, file: keepShown?.file ?? null, error: null } });
-    const result = selection.group === "staged" || selection.group === "unstaged"
-      ? await settle(this.api.readWorkspaceDiff({ side: selection.group, pathHex: entry.path.rawHex, oldPathHex: selection.group === "staged" ? entry.originalPath?.rawHex ?? null : null }))
-      : await settle(this.api.readWorkspaceFile({ pathHex: entry.path.rawHex, maxLines: this.view.previewLines }));
+    const full = this.fullFile();
+    const readDiff = (side: "staged" | "unstaged", withFull: boolean) => settle(this.api.readWorkspaceDiff({ side, pathHex: entry.path.rawHex,
+      oldPathHex: side === "staged" ? entry.originalPath?.rawHex ?? null : null, ...(withFull ? { fullFile: true } : {}) }));
+    let result: RepositorySessionResult<WorkspaceDiff | WorkspaceFile>;
+    if (selection.group === "staged" || selection.group === "unstaged") {
+      result = await readDiff(selection.group, full);
+      if (full && !result.ok && result.error.code === "RESOURCE_LIMIT") result = await readDiff(selection.group, false);
+    } else {
+      result = await settle(this.api.readWorkspaceFile({ pathHex: entry.path.rawHex, maxLines: this.view.previewLines }));
+    }
     if (intent !== this.contentIntent || this.view.content?.key !== key) return;
     if (!result.ok) {
       this.update({ ...this.view, content: { key, state: "error", diff: null, file: null, error: { code: result.error.code, message: result.error.message } } });
