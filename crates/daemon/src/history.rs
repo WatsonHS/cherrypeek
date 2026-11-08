@@ -9,6 +9,7 @@ use commitscope_core::{
 };
 use std::{
     collections::{HashSet, VecDeque},
+    mem::size_of,
     path::Path,
     sync::{Mutex, TryLockError, atomic::AtomicBool},
     time::Instant,
@@ -17,8 +18,13 @@ use std::{
 const CACHE_PAGE_LIMIT: usize = 8;
 const CACHE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const OID_LINE_LIMIT: usize = 80;
-const DATE_LINE_LIMIT: usize = 128;
 const TOPOLOGY_LINE_LIMIT: usize = 9 * 1024;
+const DATE_INDEX_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const DATE_INDEX_LINE_GROWTH: usize = 64 * 1024;
+const DATE_INDEX_RECORD_GROWTH: usize = 1024;
+const DATE_INDEX_READ_AHEAD_BYTES: usize = 256 * 1024;
+// Queue payload is capped at 16 MiB; stream-side, producer-side and line scratch are also bounded.
+const TOPOLOGY_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct HistoryState {
     query: Mutex<Option<Query>>,
@@ -39,6 +45,8 @@ struct Query {
     cached_bytes: usize,
     cached_pages: VecDeque<Page>,
     stream: Option<GitLineStream>,
+    date_index: Option<DateTopologyIndex>,
+    topology_position: u32,
     pending_entry: Option<TopologyEntry>,
     layout: LayoutState,
     checkpoints: VecDeque<Checkpoint>,
@@ -84,6 +92,159 @@ struct TopologyEntry {
 struct LocatedCommit {
     oid: String,
     page_offset: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct DateIndexKey {
+    timestamp: i64,
+    ordinal: u32,
+}
+
+struct DateTopologyIndex {
+    lines: Vec<u8>,
+    offsets: Vec<u32>,
+    dates: Vec<DateIndexKey>,
+    oid_length: usize,
+}
+
+impl DateTopologyIndex {
+    fn new(oid_length: usize) -> Self {
+        Self {
+            lines: Vec::new(),
+            offsets: Vec::new(),
+            dates: Vec::new(),
+            oid_length,
+        }
+    }
+
+    fn append(&mut self, timestamp: i64, ordinal: u32, topology: &[u8]) -> bool {
+        let Some(next_line_len) = self.lines.len().checked_add(topology.len() + 1) else {
+            return false;
+        };
+        let Some(next_record_count) = self.offsets.len().checked_add(1) else {
+            return false;
+        };
+        let Some(next_line_capacity) =
+            capacity_for(self.lines.capacity(), next_line_len, DATE_INDEX_LINE_GROWTH)
+        else {
+            return false;
+        };
+        let Some(next_record_capacity) = capacity_for(
+            self.offsets.capacity().max(self.dates.capacity()),
+            next_record_count,
+            DATE_INDEX_RECORD_GROWTH,
+        ) else {
+            return false;
+        };
+        let estimated_capacity = next_line_capacity
+            .saturating_add(next_record_capacity.saturating_mul(size_of::<u32>()))
+            .saturating_add(next_record_capacity.saturating_mul(size_of::<DateIndexKey>()));
+        if estimated_capacity > DATE_INDEX_LIMIT_BYTES || self.lines.len() > u32::MAX as usize {
+            return false;
+        }
+        if self.lines.capacity() < next_line_capacity
+            && self
+                .lines
+                .try_reserve_exact(next_line_capacity - self.lines.len())
+                .is_err()
+        {
+            return false;
+        }
+        if self.offsets.capacity() < next_record_capacity
+            && self
+                .offsets
+                .try_reserve_exact(next_record_capacity - self.offsets.len())
+                .is_err()
+        {
+            return false;
+        }
+        if self.dates.capacity() < next_record_capacity
+            && self
+                .dates
+                .try_reserve_exact(next_record_capacity - self.dates.len())
+                .is_err()
+        {
+            return false;
+        }
+        if self.allocated_bytes() > DATE_INDEX_LIMIT_BYTES {
+            return false;
+        }
+
+        self.offsets.push(self.lines.len() as u32);
+        self.lines.extend_from_slice(topology);
+        self.lines.push(b'\n');
+        self.dates.push(DateIndexKey { timestamp, ordinal });
+        true
+    }
+
+    fn finish(&mut self) {
+        self.dates.sort_unstable_by(|left, right| {
+            right
+                .timestamp
+                .cmp(&left.timestamp)
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+        });
+    }
+
+    fn target(
+        &self,
+        before_timestamp: i64,
+        page_size: u16,
+    ) -> Result<Option<LocatedCommit>, PreviewError> {
+        let date_position = self
+            .dates
+            .partition_point(|entry| entry.timestamp >= before_timestamp);
+        let Some(entry) = self.dates.get(date_position) else {
+            return Ok(None);
+        };
+        let Some(topology) = self.topology(entry.ordinal)? else {
+            return Ok(None);
+        };
+        let page_size = u32::from(page_size);
+        Ok(Some(LocatedCommit {
+            oid: topology.oid,
+            page_offset: Some(entry.ordinal / page_size * page_size),
+        }))
+    }
+
+    fn topology(&self, ordinal: u32) -> Result<Option<TopologyEntry>, PreviewError> {
+        let ordinal = ordinal as usize;
+        let Some(start) = self.offsets.get(ordinal).copied() else {
+            return Ok(None);
+        };
+        let end = self
+            .offsets
+            .get(ordinal + 1)
+            .copied()
+            .map_or(self.lines.len(), |offset| offset as usize);
+        let start = start as usize;
+        if end <= start || end > self.lines.len() || self.lines[end - 1] != b'\n' {
+            return Err(repository::git_error("Cached history topology is invalid"));
+        }
+        parse_topology_entry(&self.lines[start..end - 1], self.oid_length).map(Some)
+    }
+
+    fn allocated_bytes(&self) -> usize {
+        self.lines
+            .capacity()
+            .saturating_add(self.offsets.capacity().saturating_mul(size_of::<u32>()))
+            .saturating_add(
+                self.dates
+                    .capacity()
+                    .saturating_mul(size_of::<DateIndexKey>()),
+            )
+    }
+}
+
+fn capacity_for(current: usize, required: usize, growth: usize) -> Option<usize> {
+    if required <= current {
+        return Some(current);
+    }
+    let rounded = required
+        .checked_add(growth - 1)?
+        .checked_div(growth)?
+        .checked_mul(growth)?;
+    Some(rounded.max(current))
 }
 
 #[derive(Clone, Debug)]
@@ -276,25 +437,81 @@ impl HistoryState {
         if discovered.scope_tips.is_empty() {
             return Err(no_commits_before_date());
         }
-        verify_graph_fingerprint(discovered, cancelled, deadline)?;
-        let target = locate_date_target(
+        let mut query_guard = match self.query.try_lock() {
+            Ok(query) => query,
+            Err(TryLockError::WouldBlock) => return Err(busy_error()),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(repository::internal_error("History state is unavailable"));
+            }
+        };
+        let needs_fresh = query_guard
+            .as_ref()
+            .is_none_or(|query| query.page_size != params.page_size);
+        let mut fresh = if needs_fresh {
+            let baseline = self
+                .baseline
+                .lock()
+                .map_err(|_| repository::internal_error("History baseline is unavailable"))?
+                .clone();
+            Some(Query::new(params.page_size, baseline)?)
+        } else {
+            None
+        };
+        if fresh.is_some()
+            && let Some(previous) = query_guard.as_mut()
+        {
+            previous.reset_stream();
+            previous.pending_entry = None;
+        }
+        let query = fresh
+            .as_mut()
+            .or_else(|| query_guard.as_mut())
+            .expect("fresh or existing history query");
+
+        verify_query_snapshot(query, discovered, cancelled, deadline)?;
+        let target = if let Some(index) = query.date_index.as_ref() {
+            let target = index.target(params.before_timestamp, params.page_size)?;
+            check_active(cancelled, deadline)?;
+            verify_query_snapshot(query, discovered, cancelled, deadline)?;
+            target
+        } else {
+            // Avoid keeping the live rev-list child and its read-ahead queue beside the staged index.
+            query.reset_stream();
+            query.pending_entry = None;
+            query.topology_position = 0;
+            let (index, target) = locate_date_target(
+                executable,
+                discovered,
+                params.page_size,
+                params.before_timestamp,
+                cancelled,
+                deadline,
+            )?;
+            check_active(cancelled, deadline)?;
+            verify_query_snapshot(query, discovered, cancelled, deadline)?;
+            if let Some(index) = index {
+                query.date_index = Some(index);
+                query.pending_entry = None;
+                query.topology_position = 0;
+            }
+            target
+        };
+        let target = target.ok_or_else(no_commits_before_date)?;
+        let result = with_page_in_query(
+            query,
             executable,
             discovered,
-            params.page_size,
-            params.before_timestamp,
-            cancelled,
-            deadline,
-        )?;
-        verify_graph_fingerprint(discovered, cancelled, deadline)?;
-        self.with_located_target(
-            executable,
-            discovered,
-            target,
+            None,
+            Some(target),
             params.page_size,
             cancelled,
             deadline,
             emit,
-        )
+        )?;
+        if let Some(fresh) = fresh {
+            *query_guard = Some(fresh);
+        }
+        Ok(result)
     }
 }
 
@@ -503,7 +720,7 @@ fn locate_date_target(
     before_timestamp: i64,
     cancelled: &AtomicBool,
     deadline: Instant,
-) -> Result<LocatedCommit, PreviewError> {
+) -> Result<(Option<DateTopologyIndex>, Option<LocatedCommit>), PreviewError> {
     if discovered.scope_tips.is_empty() {
         return Err(no_commits_before_date());
     }
@@ -513,53 +730,66 @@ fn locate_date_target(
         string_arg("core.commitGraph=false"),
         string_arg("rev-list"),
         string_arg("--timestamp"),
+        string_arg("--parents"),
         string_arg("--topo-order"),
     ];
     args.extend(discovered.scope_tips.iter().map(string_arg));
     args.push(string_arg("--"));
     let mut stream = git
-        .stream_lines(Path::new(&discovered.info.path), &args, DATE_LINE_LIMIT)
+        .stream_lines_buffered(
+            Path::new(&discovered.info.path),
+            &args,
+            TOPOLOGY_LINE_LIMIT,
+            DATE_INDEX_READ_AHEAD_BYTES,
+        )
         .map_err(map_git_failure)?;
     let mut best: Option<(i64, u32, String)> = None;
+    let mut index = Some(DateTopologyIndex::new(discovered.oid_length));
     let mut ordinal = 0_u32;
     while let Some(line) = stream
         .next_line(cancelled, deadline)
         .map_err(map_git_failure)?
     {
         check_active(cancelled, deadline)?;
-        let text = std::str::from_utf8(&line)
-            .map_err(|_| repository::git_error("Git returned a non-UTF-8 dated history record"))?;
-        let mut fields = text.split_ascii_whitespace();
-        let timestamp = fields
-            .next()
-            .and_then(|field| field.parse::<i64>().ok())
-            .ok_or_else(|| repository::git_error("Git returned an invalid committer timestamp"))?;
-        let oid = fields
-            .next()
+        let separator = line
+            .iter()
+            .position(|byte| *byte == b' ')
             .ok_or_else(|| repository::git_error("Git returned an invalid dated history record"))?;
-        if fields.next().is_some() {
-            return Err(repository::git_error(
-                "Git returned an invalid dated history record",
-            ));
-        }
-        validate_topology_oid(oid, discovered.oid_length)?;
+        let timestamp = std::str::from_utf8(&line[..separator])
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .ok_or_else(|| repository::git_error("Git returned an invalid committer timestamp"))?;
+        let topology = &line[separator + 1..];
+        let entry = parse_topology_entry(topology, discovered.oid_length)?;
         if timestamp < before_timestamp
             && best
                 .as_ref()
                 .is_none_or(|(best_timestamp, _, _)| timestamp > *best_timestamp)
         {
-            best = Some((timestamp, ordinal, oid.to_ascii_lowercase()));
+            best = Some((timestamp, ordinal, entry.oid.clone()));
+        }
+        if index
+            .as_mut()
+            .is_some_and(|index| !index.append(timestamp, ordinal, topology))
+        {
+            index = None;
         }
         ordinal = ordinal.checked_add(1).ok_or_else(|| {
             repository::resource_limit("History position exceeds the supported cursor range")
         })?;
     }
-    let page_size = u32::from(page_size);
-    best.map(|(_, ordinal, oid)| LocatedCommit {
-        oid,
-        page_offset: Some(ordinal / page_size * page_size),
-    })
-    .ok_or_else(no_commits_before_date)
+    if let Some(index) = index.as_mut() {
+        index.finish();
+    }
+    let target = if let Some(index) = index.as_ref() {
+        index.target(before_timestamp, page_size)?
+    } else {
+        best.map(|(_, ordinal, oid)| LocatedCommit {
+            oid,
+            page_offset: Some(ordinal / u32::from(page_size) * u32::from(page_size)),
+        })
+    };
+    Ok((index, target))
 }
 
 fn check_page_active(
@@ -616,6 +846,8 @@ impl Query {
             cached_bytes: 0,
             cached_pages: VecDeque::new(),
             stream: None,
+            date_index: None,
+            topology_position: 0,
             pending_entry: None,
             layout: LayoutState::default(),
             checkpoints: VecDeque::new(),
@@ -638,6 +870,7 @@ impl Query {
         self.reset_stream();
         self.pending_entry = None;
         self.stream_position = 0;
+        self.topology_position = 0;
         self.layout = LayoutState::default();
     }
 
@@ -647,6 +880,8 @@ impl Query {
         self.cached_pages.clear();
         self.cached_bytes = 0;
         self.issued_frontier = 0;
+        self.date_index = None;
+        self.topology_position = 0;
     }
 
     fn marker_state(&self) -> MarkerState {
@@ -985,6 +1220,13 @@ fn next_topology_entry(
     if let Some(entry) = query.pending_entry.take() {
         return Ok(Some(entry));
     }
+    if let Some(index) = query.date_index.as_ref() {
+        let entry = index.topology(query.topology_position)?;
+        if entry.is_some() {
+            query.topology_position = query.topology_position.saturating_add(1);
+        }
+        return Ok(entry);
+    }
     let Some(stream) = query.stream.as_mut() else {
         return Ok(None);
     };
@@ -1001,7 +1243,11 @@ fn read_stream_entry(
         .next_line(cancelled, deadline)
         .map_err(map_git_failure)?;
     let Some(line) = line else { return Ok(None) };
-    let text = std::str::from_utf8(&line)
+    parse_topology_entry(&line, discovered.oid_length).map(Some)
+}
+
+fn parse_topology_entry(line: &[u8], oid_length: usize) -> Result<TopologyEntry, PreviewError> {
+    let text = std::str::from_utf8(line)
         .map_err(|_| repository::git_error("Git returned a non-UTF-8 topology record"))?;
     let mut fields = text.split_ascii_whitespace();
     let oid = fields
@@ -1014,14 +1260,14 @@ fn read_stream_entry(
                 "A history commit has more than 128 effective parents",
             ));
         }
-        validate_topology_oid(parent, discovered.oid_length)?;
+        validate_topology_oid(parent, oid_length)?;
         parents.push(parent.to_ascii_lowercase());
     }
-    validate_topology_oid(oid, discovered.oid_length)?;
-    Ok(Some(TopologyEntry {
+    validate_topology_oid(oid, oid_length)?;
+    Ok(TopologyEntry {
         oid: oid.to_ascii_lowercase(),
         parents,
-    }))
+    })
 }
 
 fn validate_topology_oid(oid: &str, oid_length: usize) -> Result<(), PreviewError> {
@@ -1041,6 +1287,9 @@ fn prepare_layout_at_offset(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<LayoutWork, PreviewError> {
+    if query.date_index.is_some() {
+        return prepare_layout_from_date_index(query, offset, cancelled, deadline);
+    }
     if query.stream.is_some()
         && query.stream_position == offset
         && query.layout.next_ordinal == offset
@@ -1101,6 +1350,80 @@ fn prepare_layout_at_offset(
         );
     }
     query.stream_position = offset;
+    Ok(work)
+}
+
+fn prepare_layout_from_date_index(
+    query: &mut Query,
+    offset: u32,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<LayoutWork, PreviewError> {
+    let pending_is_next =
+        query.pending_entry.is_some() && query.topology_position == offset.saturating_add(1);
+    if query.stream_position == offset
+        && query.layout.next_ordinal == offset
+        && (query.topology_position == offset || pending_is_next)
+    {
+        return Ok(LayoutWork {
+            state: query.layout.clone(),
+            checkpoints: Vec::new(),
+        });
+    }
+
+    let mut best = LayoutState::default();
+    if query.layout.next_ordinal <= offset {
+        best = query.layout.clone();
+    }
+    for checkpoint in &query.checkpoints {
+        if checkpoint.next_ordinal > offset || checkpoint.next_ordinal <= best.next_ordinal {
+            continue;
+        }
+        best = LayoutState {
+            next_ordinal: checkpoint.next_ordinal,
+            active_slots: checkpoint.active_slots.clone(),
+            boundary_oid: Some(checkpoint.boundary_oid.clone()),
+        };
+    }
+
+    let index = query
+        .date_index
+        .as_ref()
+        .expect("date index checked before layout preparation");
+    if best.next_ordinal > 0 {
+        let boundary = index
+            .topology(best.next_ordinal - 1)?
+            .ok_or_else(snapshot_changed_error)?;
+        if best.boundary_oid.as_deref() != Some(boundary.oid.as_str()) {
+            return Err(snapshot_changed_error());
+        }
+    }
+    let mut work = LayoutWork {
+        state: best,
+        checkpoints: Vec::new(),
+    };
+    let checkpoint_bytes = query.checkpoint_bytes;
+    let checkpoint_count = query.checkpoints.len();
+    while work.state.next_ordinal < offset {
+        check_active(cancelled, deadline)?;
+        let entry = index
+            .topology(work.state.next_ordinal)?
+            .ok_or_else(invalid_cursor)?;
+        let _ = work
+            .state
+            .advance(&entry.oid, &entry.parents, &entry.parents)
+            .map_err(map_layout_error)?;
+        stage_checkpoint(
+            &mut work.checkpoints,
+            work.state.checkpoint(),
+            checkpoint_bytes,
+            checkpoint_count,
+        );
+    }
+    query.reset_stream();
+    query.pending_entry = None;
+    query.stream_position = offset;
+    query.topology_position = offset;
     Ok(work)
 }
 
@@ -1247,8 +1570,13 @@ fn start_stream(
     ];
     args.extend(discovered.scope_tips.iter().map(string_arg));
     args.push(string_arg("--"));
-    git.stream_lines(Path::new(&discovered.info.path), &args, TOPOLOGY_LINE_LIMIT)
-        .map_err(map_git_failure)
+    git.stream_lines_buffered(
+        Path::new(&discovered.info.path),
+        &args,
+        TOPOLOGY_LINE_LIMIT,
+        TOPOLOGY_READ_AHEAD_BYTES,
+    )
+    .map_err(map_git_failure)
 }
 
 fn make_page(query: &Query, page: &Page) -> HistoryPage {
@@ -1308,6 +1636,22 @@ fn verify_graph_fingerprint(
     deadline: Instant,
 ) -> Result<(), PreviewError> {
     repository::verify_graph_fingerprint(discovered, cancelled, deadline)
+}
+
+fn verify_query_snapshot(
+    query: &mut Query,
+    discovered: &DiscoveredRepository,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), PreviewError> {
+    if let Err(error) = verify_graph_fingerprint(discovered, cancelled, deadline) {
+        if error.code == ErrorCode::SnapshotChanged {
+            query.reset_walk();
+            query.clear_graph_cache();
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn map_git_failure(error: GitFailure) -> PreviewError {
@@ -1707,6 +2051,104 @@ mod tests {
                 .iter()
                 .any(|commit| commit.commit.oid == expected)
         );
+        assert!(
+            state
+                .query
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .date_index
+                .as_ref()
+                .is_some_and(|index| index.allocated_bytes() <= DATE_INDEX_LIMIT_BYTES)
+        );
+
+        let second_date = locate_date_page(&state, &discovered, 250, 2)
+            .expect("locate another date from the cached index");
+        assert_eq!(second_date.offset, 0);
+        assert_eq!(
+            second_date.commits[1].commit.oid,
+            run_git(&path, &["rev-parse", "HEAD~1"])
+        );
+
+        let baseline = HistoryState::new();
+        let first = read_page(&baseline, &discovered, None, 2).expect("baseline first page");
+        let second = read_page(&baseline, &discovered, first.next_cursor.as_deref(), 2)
+            .expect("baseline located page");
+        let third = read_page(&baseline, &discovered, second.next_cursor.as_deref(), 2)
+            .expect("baseline next page");
+        assert_eq!(
+            page.commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>(),
+            second
+                .commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>()
+        );
+        let previous = read_page(&state, &discovered, page.previous_cursor.as_deref(), 2)
+            .expect("cached topology previous page");
+        let next = read_page(&state, &discovered, page.next_cursor.as_deref(), 2)
+            .expect("cached topology next page");
+        assert_eq!(
+            previous
+                .commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>(),
+            first
+                .commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            next.commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>(),
+            third
+                .commits
+                .iter()
+                .map(|commit| &commit.graph)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn date_topology_index_sorts_reverse_timestamps_and_keeps_topology_ties() {
+        let timestamps = [100, 340, 340, 200, 500];
+        let oids = (1..=timestamps.len())
+            .map(|value| format!("{value:040x}"))
+            .collect::<Vec<_>>();
+        let mut index = DateTopologyIndex::new(40);
+        for (ordinal, timestamp) in timestamps.into_iter().enumerate() {
+            let parent = ordinal
+                .checked_sub(1)
+                .map(|parent| format!(" {}", oids[parent]))
+                .unwrap_or_default();
+            let line = format!("{}{parent}", oids[ordinal]);
+            assert!(index.append(timestamp, ordinal as u32, line.as_bytes()));
+        }
+        index.finish();
+
+        let tied = index.target(400, 2).unwrap().unwrap();
+        assert_eq!(tied.oid, oids[1]);
+        assert_eq!(tied.page_offset, Some(0));
+        let lower_topology = index.target(250, 2).unwrap().unwrap();
+        assert_eq!(lower_topology.oid, oids[3]);
+        assert_eq!(lower_topology.page_offset, Some(2));
+        assert!(index.target(100, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn date_topology_index_rejects_growth_past_its_capacity_budget() {
+        let mut index = DateTopologyIndex::new(40);
+        let too_large = vec![b'x'; DATE_INDEX_LIMIT_BYTES];
+        assert!(!index.append(1, 0, &too_large));
+        assert_eq!(index.allocated_bytes(), 0);
     }
 
     #[test]
@@ -1777,6 +2219,37 @@ mod tests {
         let third = read_page(&state, &discovered, second.next_cursor.as_deref(), 2)
             .expect("cursor survives cancelled locate");
         assert_eq!(third.offset, 4);
+
+        let cancellable = HistoryState::new();
+        let first = read_page(&cancellable, &discovered, None, 2)
+            .expect("first page before cancelled date build");
+        let error = cancellable
+            .with_located_date_page(
+                &git_executable(),
+                &discovered,
+                &LocateHistoryDateParams {
+                    before_timestamp: i64::MAX,
+                    page_size: 2,
+                },
+                &AtomicBool::new(true),
+                Instant::now() + std::time::Duration::from_secs(5),
+                |page| Ok(page.clone()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert!(
+            cancellable
+                .query
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .date_index
+                .is_none()
+        );
+        let retried = read_page(&cancellable, &discovered, first.next_cursor.as_deref(), 2)
+            .expect("cursor remains usable after cancelled cache build");
+        assert_eq!(retried.offset, 2);
     }
 
     #[test]
@@ -1963,6 +2436,42 @@ mod tests {
                 .code,
             ErrorCode::SnapshotChanged
         );
+    }
+
+    #[test]
+    fn date_topology_cache_is_cleared_when_shallow_fingerprint_changes() {
+        let (_repo, path) = make_repo(5);
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        let _ = locate_date_page(&state, &discovered, i64::MAX, 2)
+            .expect("build the date topology cache");
+        assert!(
+            state
+                .query
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .date_index
+                .is_some()
+        );
+
+        fs::write(
+            Path::new(&discovered.info.common_dir).join("shallow"),
+            "boundary changed\n",
+        )
+        .expect("mutate shallow boundary");
+        assert_eq!(
+            locate_date_page(&state, &discovered, i64::MAX, 2)
+                .unwrap_err()
+                .code,
+            ErrorCode::SnapshotChanged
+        );
+        let query = state.query.lock().unwrap();
+        let query = query.as_ref().unwrap();
+        assert!(query.date_index.is_none());
+        assert!(query.cached_pages.is_empty());
+        assert_eq!(query.issued_frontier, 0);
     }
 
     #[test]

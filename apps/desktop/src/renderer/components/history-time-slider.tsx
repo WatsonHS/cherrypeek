@@ -12,6 +12,7 @@ const MIN_SPAN = DAY / 4;
 /** Dragging within this many pixels of the top or bottom moves the window, up to this many spans a second. */
 const EDGE = 28;
 const PAN_RATE = 0.8;
+const DRAG_JUMP_INTERVAL = 120;
 /** The moment being read sits this far down the window while it follows the list. */
 const FOLLOW_AT = 0.3;
 /** After the pointer leaves, the window waits this long before following the list again. */
@@ -51,6 +52,9 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
   const [keyboard, setKeyboard] = React.useState<number | null>(null);
   const [pending, setPending] = React.useState(false);
   const resumeTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragJumpTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestDragSeconds = React.useRef<number | null>(null);
+  const lastDragJumpAt = React.useRef(0);
   const panFrame = React.useRef(0);
   const inFlight = React.useRef(false);
   const queued = React.useRef<number | null>(null);
@@ -66,6 +70,11 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
     endScrubWhenIdle.current = false;
     scrubbingCallback.current?.(false);
   };
+  const clearDragJump = React.useCallback(() => {
+    if (dragJumpTimer.current) clearTimeout(dragJumpTimer.current);
+    dragJumpTimer.current = null;
+    latestDragSeconds.current = null;
+  }, []);
 
   React.useLayoutEffect(() => {
     const element = rootRef.current;
@@ -79,6 +88,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
   }, []);
   React.useEffect(() => {
     chooseIntent.current += 1;
+    clearDragJump();
     queued.current = null;
     if (endScrubWhenIdle.current) finishScrub();
     lastJump.current = Number.NaN;
@@ -89,12 +99,15 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
     setDragging(false);
     setKeyboard(null);
     setPending(false);
-  }, [sessionKey]);
+  }, [clearDragJump, sessionKey]);
   React.useEffect(() => () => {
     if (resumeTimer.current) clearTimeout(resumeTimer.current);
+    clearDragJump();
+    queued.current = null;
+    chooseIntent.current += 1;
     cancelAnimationFrame(panFrame.current);
     cancelAnimationFrame(moveFrame.current);
-  }, []);
+  }, [clearDragJump]);
 
   const counts = React.useMemo(() => {
     const map = new Map<string, number>();
@@ -151,6 +164,27 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       }
     });
   };
+  const scheduleDragJump = (seconds: number, immediate = false) => {
+    latestDragSeconds.current = seconds;
+    if (immediate) {
+      clearDragJump();
+      lastDragJumpAt.current = performance.now();
+      run(seconds);
+      return;
+    }
+    if (dragJumpTimer.current) return;
+    const flush = () => {
+      dragJumpTimer.current = null;
+      const latest = latestDragSeconds.current;
+      latestDragSeconds.current = null;
+      if (latest === null) return;
+      lastDragJumpAt.current = performance.now();
+      run(latest);
+    };
+    const delay = Math.max(0, DRAG_JUMP_INTERVAL - (performance.now() - lastDragJumpAt.current));
+    if (delay === 0) flush();
+    else dragJumpTimer.current = setTimeout(flush, delay);
+  };
   React.useEffect(() => { if (!loading && !inFlight.current) setPending(false); }, [loading]);
 
   const hold = () => {
@@ -183,7 +217,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
         const dt = Math.min(0.05, (now - previous) / 1000);
         const nextEnd = clampEnd(currentEnd + Math.sign(into) * Math.min(1, Math.abs(into)) * PAN_RATE * windowSpan * dt);
         setHeldEnd(nextEnd);
-        run(Math.min(nextEnd, Math.max(nextEnd - windowSpan, nextEnd - (y - PAD) / usable * windowSpan)));
+        scheduleDragJump(Math.min(nextEnd, Math.max(nextEnd - windowSpan, nextEnd - (y - PAD) / usable * windowSpan)));
       }
       pan(now);
     });
@@ -291,6 +325,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       }}
       onPointerDown={event => {
         if (event.button !== 0) return;
+        clearDragJump();
         event.currentTarget.setPointerCapture(event.pointerId);
         hold();
         setKeyboard(null);
@@ -300,20 +335,21 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
         const y = localY(event.clientY);
         setPointerY(y);
         latest.current = { ...latest.current, pointerY: y, dragging: true };
-        run(timeAt(y));
+        scheduleDragJump(timeAt(y), true);
         cancelAnimationFrame(panFrame.current);
         pan(performance.now());
       }}
       onPointerMoveCapture={event => {
         if (!dragging) return;
         const y = localY(event.clientY);
-        run(timeAt(y));
+        scheduleDragJump(timeAt(y));
       }}
       onPointerUp={event => {
         if (!dragging) return;
         cancelAnimationFrame(panFrame.current);
         setDragging(false);
         const y = localY(event.clientY);
+        clearDragJump();
         lastJump.current = Number.NaN;
         endScrubWhenIdle.current = true;
         run(timeAt(y));
@@ -327,6 +363,8 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       }}
       onPointerCancel={() => {
         cancelAnimationFrame(panFrame.current);
+        clearDragJump();
+        queued.current = null;
         setDragging(false);
         finishScrub();
       }}

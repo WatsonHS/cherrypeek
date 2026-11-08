@@ -1,15 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { Ajv } from "ajv";
-import coreReadySchema from "../../../../packages/protocol/schema/core-ready.schema.json" with { type: "json" };
-import clientMessageSchema from "../../../../packages/protocol/schema/client-message.schema.json" with { type: "json" };
-import serverMessageSchema from "../../../../packages/protocol/schema/server-message.schema.json" with { type: "json" };
+import type { ErrorObject } from "ajv";
+import validators from "./generated/protocol-validators.cjs";
 import type { CoreReady } from "../../../../packages/protocol/src/core-ready.js";
-import type {
-  ClientMessage,
-} from "../../../../packages/protocol/src/generated/client-message.js";
-import type { ServerMessage } from "../../../../packages/protocol/src/generated/server-message.js";
+import type { ClientMessage } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   ClientRequestMessage,
   ProtocolErrorCode,
@@ -27,10 +22,12 @@ const DEFAULT_QUEUE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PENDING = 2;
 const DEFAULT_TIMEOUT_MS = 5000;
 
-const ajv = new Ajv({ allErrors: true, strict: false, logger: false });
-const validateClient = ajv.compile<ClientMessage>(clientMessageSchema);
-const validateServer = ajv.compile<ServerMessage>(serverMessageSchema);
-const validateCoreReady = ajv.compile<CoreReady>(coreReadySchema);
+const { validateClient, validateServer, validateCoreReady } = validators;
+
+function errorsText(errors: ErrorObject[] | null | undefined): string {
+  if (!errors || errors.length === 0) return "No errors";
+  return errors.map(error => `data${error.instancePath} ${error.message}`).join(", ");
+}
 
 export class ProtocolClientError extends Error {
   constructor(
@@ -280,7 +277,7 @@ export class ProtocolTransport {
       return;
     }
     if (!validateServer(value)) {
-      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `服务端消息结构无效：${ajv.errorsText(validateServer.errors)}`));
+      this.fail(new ProtocolClientError("PROTOCOL_ERROR", `服务端消息结构无效：${errorsText(validateServer.errors)}`));
       return;
     }
     const message = value;
@@ -298,7 +295,7 @@ export class ProtocolTransport {
         return;
       }
       if (!validateCoreReady(message.core)) {
-        this.fail(new ProtocolClientError("PROTOCOL_ERROR", `CoreReady 结构无效：${ajv.errorsText(validateCoreReady.errors)}`));
+        this.fail(new ProtocolClientError("PROTOCOL_ERROR", `CoreReady 结构无效：${errorsText(validateCoreReady.errors)}`));
         return;
       }
       if (message.core.protocolVersion !== PROTOCOL_VERSION) {
@@ -435,7 +432,7 @@ export class ProtocolTransport {
   private enqueue(message: ClientMessage): Promise<void> {
     if (this.closed) return Promise.reject(new ProtocolClientError("CORE_EXITED", "核心连接已关闭", true));
     if (!validateClient(message)) {
-      return Promise.reject(new ProtocolClientError("PROTOCOL_ERROR", `客户端消息结构无效：${ajv.errorsText(validateClient.errors)}`));
+      return Promise.reject(new ProtocolClientError("PROTOCOL_ERROR", `客户端消息结构无效：${errorsText(validateClient.errors)}`));
     }
     const frame = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
     if (frame.length - 1 > this.maxFrameBytes) {

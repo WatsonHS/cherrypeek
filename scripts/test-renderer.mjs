@@ -19,6 +19,7 @@ try {
       "graph": resolve(root, "apps/desktop/src/renderer/lib/graph.ts"),
       "ref-labels": resolve(root, "apps/desktop/src/renderer/lib/ref-labels.ts"),
       "time-track": resolve(root, "apps/desktop/src/renderer/lib/time-track.ts"),
+      "history-prefetch": resolve(root, "apps/desktop/src/renderer/lib/history-prefetch.ts"),
       "handoff-prompt": resolve(root, "apps/desktop/src/renderer/lib/handoff-prompt.ts"),
     },
     outdir: buildDir,

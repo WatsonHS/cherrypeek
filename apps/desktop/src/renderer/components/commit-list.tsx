@@ -17,6 +17,7 @@ import { HistoryTimeSlider, type HistoryTimeSliderDay } from "./history-time-sli
 import { HistoryDayStrip, type DayMarker } from "./history-day-strip.js";
 import type { HandoffRequest } from "../lib/handoff-prompt.js";
 import { localDateInput } from "../lib/search-date.js";
+import { historyPrefetchDistance } from "../lib/history-prefetch.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
@@ -96,9 +97,16 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   const frameRef = React.useRef(0);
   const lastScrollTop = React.useRef(0);
   const latestScrollDirection = React.useRef<"up" | "down" | null>(null);
+  const scrollSample = React.useRef<{ top: number; at: number; direction: "up" | "down" } | null>(null);
+  const scrollVelocity = React.useRef(0);
   const programmaticScrollTop = React.useRef<number | null>(null);
   const cancelingPrefetch = React.useRef(false);
   const pendingAnchor = React.useRef<{ oid: string; offset: number; repoId: string; generation: string } | undefined>(undefined);
+  const pendingPrefetchCompletion = React.useRef<{ sessionKey: string; direction: "up" | "down"; pageRevision: number } | null>(null);
+  const resetScrollSpeed = React.useCallback(() => {
+    scrollSample.current = null;
+    scrollVelocity.current = 0;
+  }, []);
   const entries = React.useMemo(() => buildEntries(preview.commits,
     preview.newSinceLastSeenStatus === "ready" ? preview.lastSeenDividerOid : null),
   [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus]);
@@ -122,6 +130,8 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   /** The time slider is being dragged; the list follows it without the locating notice. */
   const [scrubbing, setScrubbing] = React.useState(false);
   const viewportSessionKey = preview.session ? `${preview.session.repoId}:${preview.session.generation}` : null;
+  const previousPageLoading = React.useRef(preview.pageLoading);
+  const previousPageRequestKind = React.useRef(preview.pageRequestKind);
   const viewportSessionRef = React.useRef<string | null>(null);
   const lastRestoredPageRevision = React.useRef(0);
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
@@ -180,6 +190,67 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
   }, [virtual]);
 
+  const maybePrefetch = React.useCallback((element: HTMLDivElement, direction: "up" | "down") => {
+    const model = latestScrollModel.current;
+    const session = model.preview.session;
+    if (!session || model.preview.state !== "ready" || model.preview.opening !== null || model.preview.scopeSwitching ||
+      model.preview.pageLoading || model.preview.refreshing) return;
+    const threshold = historyPrefetchDistance(element.clientHeight, scrollVelocity.current);
+    const nearEdge = direction === "up"
+      ? element.scrollTop <= threshold
+      : element.scrollHeight - element.clientHeight - element.scrollTop <= threshold;
+    const cursor = direction === "up" ? model.preview.windowPreviousCursor : model.preview.windowNextCursor;
+    if (!nearEdge || !cursor) return;
+    pendingAnchor.current = captureWindowAnchor(element, session, model.entries, model.virtual);
+    pendingPrefetchCompletion.current = {
+      sessionKey: `${session.repoId}:${session.generation}`,
+      direction,
+      pageRevision: model.preview.pageRevision,
+    };
+    if (direction === "up") model.onPrefetchPreviousPage();
+    else model.onPrefetchNextPage();
+  }, []);
+
+  React.useLayoutEffect(() => {
+    scrollSample.current = null;
+    scrollVelocity.current = 0;
+    latestScrollDirection.current = null;
+    lastScrollTop.current = listRef.current?.scrollTop ?? 0;
+    programmaticScrollTop.current = null;
+    pendingAnchor.current = undefined;
+    pendingPrefetchCompletion.current = null;
+    previousPageLoading.current = preview.pageLoading;
+    previousPageRequestKind.current = preview.pageRequestKind;
+    if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    frameRef.current = 0;
+  }, [viewportSessionKey]);
+
+  React.useEffect(() => {
+    const wasLoading = previousPageLoading.current;
+    const completedKind = previousPageRequestKind.current;
+    previousPageLoading.current = preview.pageLoading;
+    previousPageRequestKind.current = preview.pageRequestKind;
+    if (preview.pageLoading && preview.pageRequestKind !== "prefetch") {
+      pendingPrefetchCompletion.current = null;
+      return;
+    }
+    if (!wasLoading || preview.pageLoading) return;
+    const pending = pendingPrefetchCompletion.current;
+    if (!pending) return;
+    pendingPrefetchCompletion.current = null;
+    if (completedKind !== "prefetch" || preview.pageRevision <= pending.pageRevision || preview.pageError ||
+      viewportSessionKey !== pending.sessionKey || latestScrollDirection.current !== pending.direction) return;
+    const frame = requestAnimationFrame(() => {
+      const element = listRef.current;
+      const session = latestScrollModel.current.preview.session;
+      const currentSessionKey = session ? `${session.repoId}:${session.generation}` : null;
+      if (element && currentSessionKey === pending.sessionKey && latestScrollDirection.current === pending.direction) {
+        maybePrefetch(element, pending.direction);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [maybePrefetch, preview.pageError, preview.pageLoading, preview.pageRequestKind, preview.pageRevision, viewportSessionKey]);
+
   // High-frequency scroll position lives in refs; one frame computes the visible window.
   const handleScroll = () => {
     const element = listRef.current;
@@ -188,7 +259,22 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     const expectedTop = programmaticScrollTop.current;
     const isProgrammatic = expectedTop !== null && Math.abs(expectedTop - nextTop) < 1;
     programmaticScrollTop.current = null;
-    latestScrollDirection.current = isProgrammatic ? null : nextTop > lastScrollTop.current ? "down" : nextTop < lastScrollTop.current ? "up" : null;
+    const direction = isProgrammatic ? null : nextTop > lastScrollTop.current ? "down" : nextTop < lastScrollTop.current ? "up" : null;
+    const now = performance.now();
+    const sample = scrollSample.current;
+    if (isProgrammatic || !direction || !sample || sample.direction !== direction) {
+      scrollVelocity.current = 0;
+    } else {
+      const elapsed = now - sample.at;
+      if (elapsed > 0 && elapsed <= 250) {
+        const instantaneous = Math.abs(nextTop - sample.top) * 1000 / elapsed;
+        scrollVelocity.current = scrollVelocity.current * 0.65 + instantaneous * 0.35;
+      } else {
+        scrollVelocity.current = 0;
+      }
+    }
+    scrollSample.current = direction ? { top: nextTop, at: now, direction } : null;
+    if (!isProgrammatic) latestScrollDirection.current = direction;
     lastScrollTop.current = nextTop;
     if (preview.session) {
       const anchor = captureWindowAnchor(element, preview.session, entries, virtual);
@@ -230,21 +316,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
             if (!latest || latestScrollDirection.current !== direction || !requestRepoId ||
               currentPreview.session?.repoId !== requestRepoId || currentPreview.session.generation !== requestGeneration ||
               currentPreview.pageLoading || currentPreview.refreshing) return;
-            const threshold = Math.max(latest.clientHeight, 100);
-            if (direction === "up" && latest.scrollTop <= threshold && currentPreview.windowPreviousCursor) latestModel.onPrefetchPreviousPage();
-            else if (direction === "down" && latest.scrollHeight - latest.clientHeight - latest.scrollTop <= threshold && currentPreview.windowNextCursor) latestModel.onPrefetchNextPage();
+            maybePrefetch(latest, direction);
           });
         }
         return;
       }
-      const threshold = Math.max(current.clientHeight, 100);
-      if (direction === "down" && current.scrollHeight - current.clientHeight - current.scrollTop <= threshold && model.preview.windowNextCursor) {
-        if (model.preview.session) pendingAnchor.current = captureWindowAnchor(current, model.preview.session, model.entries, model.virtual);
-        model.onPrefetchNextPage();
-      } else if (direction === "up" && current.scrollTop <= threshold && model.preview.windowPreviousCursor) {
-        if (model.preview.session) pendingAnchor.current = captureWindowAnchor(current, model.preview.session, model.entries, model.virtual);
-        model.onPrefetchPreviousPage();
-      }
+      maybePrefetch(current, direction);
     });
   };
 
@@ -267,12 +344,13 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     const element = listRef.current;
     if (offset === undefined || !element) return;
     const target = Math.max(0, offset - anchor.offset);
+    resetScrollSpeed();
     programmaticScrollTop.current = target;
     element.scrollTop = target;
     lastScrollTop.current = element.scrollTop;
     onViewportAnchor(anchor.oid);
     setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, [preview.windowRevision, preview.session, onViewportAnchor, virtual]);
+  }, [preview.windowRevision, preview.session, onViewportAnchor, virtual, resetScrollSpeed]);
 
   React.useLayoutEffect(() => {
     if (preview.pageRevision === 0 || preview.pageRevision === lastRestoredPageRevision.current) return;
@@ -295,13 +373,14 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       onSetAnchorRestorationSpace(Math.min(element.clientHeight, preview.anchorRestorationSpace + extra));
       return;
     }
+    resetScrollSpeed();
     programmaticScrollTop.current = target;
     element.scrollTop = target;
     lastScrollTop.current = target;
     onViewportAnchor(anchor.oid);
     setRange(virtual.range(target, element.clientHeight, 12));
     lastRestoredPageRevision.current = preview.pageRevision;
-  }, [preview.pageRevision, preview.anchorMissing, preview.anchorRestorationSpace, restorationAnchor, onSetAnchorRestorationSpace, onViewportAnchor, virtual]);
+  }, [preview.pageRevision, preview.anchorMissing, preview.anchorRestorationSpace, restorationAnchor, onSetAnchorRestorationSpace, onViewportAnchor, virtual, resetScrollSpeed]);
 
   // Keep a selected row visible even when it is outside the currently mounted DOM slice.
   React.useLayoutEffect(() => {
@@ -315,13 +394,14 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     if (offset < target) target = offset;
     else if (rowBottom > target + element.clientHeight) target = rowBottom - element.clientHeight;
     if (target !== element.scrollTop) {
+      resetScrollSpeed();
       programmaticScrollTop.current = target;
       element.scrollTop = target;
       lastScrollTop.current = target;
       onViewportAnchor(selectedOid);
       setRange(virtual.range(target, element.clientHeight, 12));
     }
-  }, [selectedOid]);
+  }, [selectedOid, resetScrollSpeed]);
 
   const move = (delta: number | "first" | "last") => {
     const commits = preview.commits;
@@ -359,11 +439,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     const offset = oid ? latestScrollModel.current.virtual.offset(oid) : undefined;
     if (!element || offset === undefined) return;
     pendingDateJump.current = false;
+    resetScrollSpeed();
     element.scrollTop = Math.max(0, offset - DAY_ROW_HEIGHT);
     programmaticScrollTop.current = element.scrollTop;
     lastScrollTop.current = element.scrollTop;
     setRange(latestScrollModel.current.virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, []);
+  }, [resetScrollSpeed]);
   const jumpToDate = React.useCallback(async (day: string): Promise<boolean> => {
     pendingDateJump.current = false;
     const found = await onLocateHistoryDate(day);
@@ -388,6 +469,8 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     const element = listRef.current;
     if (!element) return;
     if (atNewest) {
+      resetScrollSpeed();
+      latestScrollDirection.current = null;
       element.scrollTo({ top: 0, behavior: element.scrollTop > element.clientHeight * 6 ? "auto" : "smooth" });
       return;
     }
@@ -396,12 +479,14 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const list = listRef.current;
       if (!list) return;
+      resetScrollSpeed();
+      latestScrollDirection.current = null;
       list.scrollTop = 0;
       programmaticScrollTop.current = 0;
       lastScrollTop.current = 0;
       setRange(latestScrollModel.current.virtual.range(0, list.clientHeight, 12));
     }));
-  }, [atNewest, onJumpToNewest]);
+  }, [atNewest, onJumpToNewest, resetScrollSpeed]);
   // Declared after the keep-selected-visible effect so the jump placement wins.
   React.useLayoutEffect(() => { placeDateJump(); }, [selectedOid, virtual, placeDateJump]);
 
