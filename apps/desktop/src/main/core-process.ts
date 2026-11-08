@@ -7,13 +7,20 @@ import type { ClientRequestMessage } from "../../../../packages/protocol/src/mes
 import { ProtocolClientError, ProtocolTransport, type ProtocolTransportOptions, type RequestCompletion, type RequestOptions } from "./protocol-transport.js";
 import { ViewContextGate } from "./view-context-gate.js";
 
-const START_TIMEOUT_MS = 5000;
+/** The core's own `git --version` probe may take up to 10 s on a busy machine. */
+const START_TIMEOUT_MS = 15_000;
+/** Pauses before restarting a core whose start failed in a way that can pass, such as a busy machine. */
+const START_RETRY_DELAYS_MS = [1_000, 3_000];
+
+interface LaunchFailure { message: string; retryable: boolean }
 
 export interface CoreProcessOptions {
   args?: string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   handshakeTimeoutMs?: number;
+  /** Pause before each automatic restart after a retryable start failure; one entry per retry. */
+  startRetryDelaysMs?: number[];
   transport?: Omit<ProtocolTransportOptions, "onFatal" | "contextGate">;
 }
 
@@ -34,6 +41,10 @@ export class CoreProcess {
   private stderrBytes = 0;
   private stderrTail = "";
   private stopPromise: Promise<void> | undefined;
+  /** Set when the launch in progress fails; the start loop decides whether to retry. */
+  private launchFailure: LaunchFailure | undefined;
+  private reaping: Promise<void> = Promise.resolve();
+  private restarting: Promise<void> | undefined;
 
   constructor(private readonly executable: string, private readonly options: CoreProcessOptions = {}) {}
 
@@ -51,7 +62,54 @@ export class CoreProcess {
   async start(): Promise<void> {
     if (this.started || this.stopping) throw new Error("Core process cannot be started more than once or after stop");
     this.started = true;
-    this.setStatus({ state: "starting" });
+    await this.launchWithRetries();
+  }
+
+  /** Starts the core again after it ended in an error, e.g. from the status bar's retry button. */
+  restart(): Promise<void> {
+    if (this.restarting) return this.restarting;
+    if (!this.started || this.stopping || this.status.state !== "error") return Promise.resolve();
+    this.restarting = (async () => {
+      await this.reaping;
+      if (!this.stopping) await this.launchWithRetries();
+    })().finally(() => { this.restarting = undefined; });
+    return this.restarting;
+  }
+
+  /**
+   * Launches the core. A start that fails in a way that can pass (a timeout, or the core exiting
+   * while starting) is retried after a pause, staying in "starting"; the error shows only after
+   * the last attempt.
+   */
+  private async launchWithRetries(): Promise<void> {
+    const delays = this.options.startRetryDelaysMs ?? START_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      const failure = await this.launch();
+      if (!failure || this.stopping) return;
+      if (!failure.retryable || attempt >= delays.length) {
+        this.setStatus({ state: "error", message: failure.message });
+        return;
+      }
+      process.stderr.write(`[commitscope] core start failed, retrying in ${delays[attempt]} ms: ${failure.message}\n`);
+      // A slow start would otherwise look stuck: say that it is being retried.
+      this.setStatus({ state: "starting", retry: { attempt: attempt + 1, limit: delays.length, reason: failure.message } });
+      await this.reaping;
+      await delay(delays[attempt]!);
+      if (this.stopping) return;
+    }
+  }
+
+  /** One start attempt; resolves with the failure, or undefined once the core is ready. */
+  private async launch(): Promise<LaunchFailure | undefined> {
+    this.launchFailure = undefined;
+    this.child = undefined;
+    this.transport = undefined;
+    this.childClosed = false;
+    this.childExitHandled = false;
+    this.exitPromise = undefined;
+    this.processGroupCleanup = undefined;
+    this.stderrTail = "";
+    if (this.status.state !== "starting") this.setStatus({ state: "starting" });
     const spawnOptions = {
       cwd: this.options.cwd,
       env: this.options.env,
@@ -64,31 +122,36 @@ export class CoreProcess {
       child = spawn(this.executable, this.options.args ?? [], spawnOptions);
     } catch (error) {
       this.fail(`无法启动核心：${errorMessage(error)}`);
-      return;
+      return this.launchFailure;
     }
     this.child = child;
     this.exitPromise = new Promise<void>(resolve => {
       child.once("exit", (code, signal) => { resolve(); this.handleChildExit(child, code, signal); });
       child.once("close", (code, signal) => { resolve(); this.handleChildExit(child, code, signal); });
     });
-    child.stderr?.on("data", (chunk: Buffer) => this.captureStderr(chunk));
-    child.on("error", error => this.fail(`核心进程错误：${error.message}`));
+    child.stderr?.on("data", (chunk: Buffer) => { if (child === this.child) this.captureStderr(chunk); });
+    child.on("error", error => { if (child === this.child) this.fail(`核心进程错误：${error.message}`); });
 
     if (!child.stdin || !child.stdout || child.pid === undefined) {
       this.fail("核心进程 stdio 未能建立");
-      return;
+      return this.launchFailure;
     }
-    this.transport = new ProtocolTransport(child.stdout, child.stdin, {
+    const transport = new ProtocolTransport(child.stdout, child.stdin, {
       ...this.options.transport,
       contextGate: this.contextGate,
-      onFatal: error => this.fail(`核心协议错误 [${error.code}]：${error.message}`),
+      onFatal: error => { if (transport === this.transport) this.fail(`核心协议错误 [${error.code}]：${error.message}`, error.retryable); },
     });
+    this.transport = transport;
     try {
-      const core = await this.transport.handshake(child.pid, this.options.handshakeTimeoutMs ?? START_TIMEOUT_MS);
-      if (!this.stopping && this.status.state === "starting") this.setStatus({ state: "ready", core });
+      const core = await transport.handshake(child.pid, this.options.handshakeTimeoutMs ?? START_TIMEOUT_MS);
+      if (!this.stopping && !this.launchFailure && this.status.state === "starting") {
+        this.setStatus({ state: "ready", core });
+        return undefined;
+      }
     } catch (error) {
-      if (!this.stopping) this.fail(`核心握手失败：${formatError(error)}`);
+      if (!this.stopping) this.fail(`核心握手失败：${formatError(error)}`, error instanceof ProtocolClientError && error.retryable);
     }
+    return this.launchFailure;
   }
 
   request(
@@ -141,12 +204,18 @@ export class CoreProcess {
     this.setStatus({ state: "stopped" });
   }
 
-  private fail(message: string): void {
-    if (this.stopping || this.status.state === "error") return;
+  /**
+   * Ends the current core. While starting, the failure goes to the start loop, which may retry;
+   * once the core has been ready, it shows as an error right away.
+   */
+  private fail(message: string, retryable = false): void {
+    if (this.stopping || this.status.state === "error" || this.launchFailure) return;
     const diagnostic = this.stderrTail.trim();
-    this.setStatus({ state: "error", message: diagnostic ? `${message}：${diagnostic}` : message });
+    const shown = diagnostic ? `${message}：${diagnostic}` : message;
     this.transport?.close(new ProtocolClientError("CORE_EXITED", message, true));
-    void this.reapAfterFailure();
+    this.reaping = this.reapAfterFailure();
+    if (this.status.state === "starting") this.launchFailure = { message: shown, retryable };
+    else this.setStatus({ state: "error", message: shown });
   }
 
   private async reapAfterFailure(): Promise<void> {
@@ -166,14 +235,16 @@ export class CoreProcess {
   }
 
   private handleChildExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
-    if (this.childExitHandled) return;
+    // A core replaced by a restart may report its exit late; it no longer concerns this one.
+    if (child !== this.child || this.childExitHandled) return;
     this.childExitHandled = true;
     this.childClosed = true;
     this.processGroupCleanup = this.cleanupProcessGroup(child);
     const message = `核心进程已退出（code=${code ?? "null"}, signal=${signal ?? "none"}）`;
     this.transport?.close(new ProtocolClientError("CORE_EXITED", message, true));
     if (this.stopping) this.setStatus({ state: "stopped" });
-    else if (this.status.state !== "error") this.fail(message);
+    // Exiting while starting may be a busy machine, so that start can be retried.
+    else if (this.status.state !== "error") this.fail(message, this.status.state === "starting");
   }
 
   private async cleanupProcessGroup(child: ChildProcess): Promise<void> {

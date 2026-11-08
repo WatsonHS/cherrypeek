@@ -18,6 +18,7 @@ const CORE_ENTRY = resolve(APP_ROOT, "resources/commitscope-daemon");
 const APP_URL = pathToFileURL(RENDERER_ENTRY).href;
 const IPC_GET_STATUS = "commitscope:core:get-status";
 const IPC_STATUS_CHANGED = "commitscope:core:status-changed";
+const IPC_RESTART_CORE = "commitscope:core:restart";
 const IPC_CHOOSE_REPOSITORY = "commitscope:repository:choose";
 const IPC_LAUNCH_REPOSITORY = "commitscope:repository:launch";
 const IPC_SESSION_OPEN = "commitscope:session:open";
@@ -78,6 +79,11 @@ function registerStatusIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     if (!core) throw new Error("Core process is unavailable");
     return core.getStatus();
+  });
+  ipcMain.handle(IPC_RESTART_CORE, async event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    if (quitting) return;
+    await core?.restart();
   });
   core?.subscribe((status: CoreStatus) => {
     if (window && !window.isDestroyed()) window.webContents.send(IPC_STATUS_CHANGED, status);

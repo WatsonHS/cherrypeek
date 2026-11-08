@@ -13,7 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 function coreLabel(status: CoreStatus): string {
   switch (status.state) {
     case "ready": return "核心已就绪";
-    case "starting": return "核心启动中";
+    case "starting": return status.retry ? `核心启动较慢，正在重试（第 ${status.retry.attempt}/${status.retry.limit} 次）` : "核心启动中";
     case "error": return "核心不可用";
     case "stopped": return "核心已停止";
   }
@@ -46,7 +46,8 @@ export function StatusBar({ status, preview, onIndexAction, previewStatus, searc
   return <footer className="flex min-h-7 shrink-0 flex-wrap items-center gap-x-[18px] border-t border-line px-4 text-xs text-fg3">
     {/* The core only needs attention when it is not ready; screen readers still hear the ready state. */}
     <span data-testid="core-status" data-state={status.state} className={cn("flex items-center gap-1.5", status.state === "ready" && "sr-only")}
-      title={status.state === "ready" ? `${status.core.coreVersion} · PID ${status.core.pid}` : undefined}>
+      title={status.state === "ready" ? `${status.core.coreVersion} · PID ${status.core.pid}`
+        : status.state === "starting" && status.retry ? `上一次启动失败：${status.retry.reason}` : undefined}>
       <span aria-hidden="true" className={cn("size-[7px] rounded-full", status.state === "ready" ? "bg-ok" : status.state === "error" ? "bg-bad" : "bg-line2")} />
       <span className={status.state === "error" ? "text-bad" : undefined}>{coreLabel(status)}</span>
     </span>

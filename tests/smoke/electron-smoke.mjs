@@ -78,7 +78,7 @@ try {
   assert.deepEqual(diagnostics.apiKeys, [
     "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "chooseRepository", "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository",
     "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation", "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "locateCommit", "locateHistoryDate", "observeRepository", "onCoreStatusChanged", "onRepositoryObservationChanged", "openRepositorySession",
-    "readDiff", "readHistoryPage", "readMergeCommits", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "searchCommits", "selectRepositoryScope",
+    "readDiff", "readHistoryPage", "readMergeCommits", "readSessionPreview", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");
@@ -103,13 +103,22 @@ try {
   await page.getByRole("alert").waitFor({ state: "visible" });
   assert.match(await page.getByRole("alert").textContent(), /CORE_EXITED/);
   await waitForExit(daemonPid);
+  // The banner's retry starts a new core in place, without reopening the app.
+  await page.getByTestId("core-restart").click();
+  await page.locator('[data-testid="core-status"][data-state="ready"]').waitFor({ state: "attached", timeout: 20000 });
+  const restartedStatus = await page.evaluate(() => window.commitScope.getCoreStatus());
+  assert.equal(restartedStatus.state, "ready");
+  assert.notEqual(restartedStatus.core.pid, daemonPid, "retry starts a new core process");
+  assert.equal(await page.getByTestId("core-restart").count(), 0, "the error banner goes away once the core is back");
+  const restartedPid = restartedStatus.core.pid;
   const electronPid = normal.process().pid;
   await normal.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
   await waitForExit(electronPid);
   await normal.close().catch(() => undefined);
   normalClosed = true;
   await waitForExit(daemonPid);
-  process.stdout.write(JSON.stringify({ ready: true, coreVersion, daemonPid, electronPid, security: electronSecurity, runtimeExitVisible: true, screenshot: "output/playwright/p0-01-ready.png" }, null, 2) + "\n");
+  await waitForExit(restartedPid);
+  process.stdout.write(JSON.stringify({ ready: true, coreVersion, daemonPid, restartedPid, electronPid, security: electronSecurity, runtimeExitVisible: true, retryRestoresCore: true, screenshot: "output/playwright/p0-01-ready.png" }, null, 2) + "\n");
 } finally {
   if (!normalClosed) await normal.close().catch(() => undefined);
 }

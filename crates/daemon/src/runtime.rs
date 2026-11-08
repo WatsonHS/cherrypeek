@@ -10,7 +10,20 @@ use std::{
 };
 
 const OUTPUT_LIMIT: usize = 4 * 1024;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// `git --version` answers in milliseconds, but a machine busy with builds and agents can take
+/// seconds. The limit still stops a hung Git from holding the core.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Lets tests shorten the probe limit; values outside 100 ms to 60 s are ignored.
+const PROBE_TIMEOUT_ENV: &str = "COMMITSCOPE_GIT_PROBE_TIMEOUT_MS";
+
+fn probe_timeout() -> Duration {
+    env::var(PROBE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|milliseconds| (100..=60_000).contains(milliseconds))
+        .map(Duration::from_millis)
+        .unwrap_or(PROBE_TIMEOUT)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailure {
@@ -100,7 +113,7 @@ pub fn probe_git(
     let stderr = child.0.stderr.take().expect("stderr was piped");
     let stdout_reader = thread::spawn(|| read_bounded(stdout));
     let stderr_reader = thread::spawn(|| read_bounded(stderr));
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + probe_timeout();
 
     let status = loop {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {

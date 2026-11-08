@@ -9,6 +9,7 @@ const api: CommitScopeApi = {
     ipcRenderer.on("commitscope:core:status-changed", wrapped);
     return () => ipcRenderer.removeListener("commitscope:core:status-changed", wrapped);
   },
+  restartCore: () => ipcRenderer.invoke("commitscope:core:restart") as Promise<void>,
   chooseRepository: () => ipcRenderer.invoke("commitscope:repository:choose") as Promise<string | null>,
   getLaunchRepository: () => ipcRenderer.invoke("commitscope:repository:launch") as Promise<string | null>,
   copyText: text => ipcRenderer.invoke("commitscope:clipboard:write-text", text) as Promise<void>,

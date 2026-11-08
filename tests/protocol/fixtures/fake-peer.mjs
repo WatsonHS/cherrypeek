@@ -1,6 +1,15 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const mode = process.argv[2] ?? "normal";
+// Counts launches across restarts; "no-hello-first" stays silent for the first
+// COMMITSCOPE_PEER_FAIL_STARTS launches (default 1), like a start that times out on a busy machine.
+const startCountFile = process.env.COMMITSCOPE_PEER_START_COUNT_FILE;
+let startNumber = 1;
+if (startCountFile) {
+  try { startNumber = (Number(readFileSync(startCountFile, "utf8").trim()) || 0) + 1; } catch { startNumber = 1; }
+  writeFileSync(startCountFile, `${startNumber}\n`);
+}
+const silentStarts = Number(process.env.COMMITSCOPE_PEER_FAIL_STARTS ?? 1);
 const ready = {
   protocolVersion: 1,
   coreVersion: "0.1.0-test",
@@ -35,7 +44,7 @@ function respond(request, sequenceStart = 0, context = {}) {
 
 function handle(message) {
   if (message.type === "hello") {
-    if (mode === "no-hello") return;
+    if (mode === "no-hello" || (mode === "no-hello-first" && startNumber <= silentStarts)) return;
     if (mode === "mismatch-version") process.stdout.write(hello(99));
     else if (mode === "duplicate-hello") process.stdout.write(Buffer.concat([hello(), hello()]));
     else if (mode === "split-handshake") {

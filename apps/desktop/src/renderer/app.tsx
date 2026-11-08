@@ -530,6 +530,20 @@ export function App(): React.JSX.Element {
 
   useViewRecording(store, view);
   useLaunchRepository(ready, store);
+
+  // Restarting the core drops the repository session; reopen what was on screen once it is back.
+  const reopenAfterRestart = React.useRef<string | null>(null);
+  const restartCore = React.useCallback(() => {
+    reopenAfterRestart.current = store.getView().repository?.path ?? null;
+    void window.commitScope.restartCore().catch(error => setActionError(error instanceof Error ? error.message : String(error)));
+  }, [store]);
+  React.useEffect(() => {
+    const path = reopenAfterRestart.current;
+    if (!ready || !path) return;
+    reopenAfterRestart.current = null;
+    const shown = store.getView();
+    if (!shown.session && shown.opening === null) void store.open(path);
+  }, [ready, store]);
   const searchIdentityBusy = searchView.authorIdentities.loading || searchView.committerIdentities.loading || searchView.pathSuggestions.loading;
   const searchRequestBusy = searchView.loading || searchView.pageLoading || searchIdentityBusy;
   const advancingPartialSearch = searchView.active && Boolean(searchView.window && !searchView.window.coverage.complete &&
@@ -731,7 +745,6 @@ export function App(): React.JSX.Element {
   }, []);
 
   const alerts = [
-    status.state === "error" ? `核心不可用：${status.message}` : undefined,
     readError ? `核心状态读取失败：${readError}` : undefined,
     actionError ? `操作失败：${actionError}` : undefined,
   ].filter((message): message is string => Boolean(message));
@@ -790,7 +803,11 @@ export function App(): React.JSX.Element {
         onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
         onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
-    {alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
+    {status.state === "error" || alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
+      {status.state === "error" ? <div className="flex items-center gap-2">
+        <p className="m-0 min-w-0 flex-1 break-words">核心不可用：{status.message}</p>
+        <Button type="button" variant="outline" size="sm" className="shrink-0" data-testid="core-restart" onClick={restartCore}>重试</Button>
+      </div> : null}
       {alerts.map(message => <p key={message} className="m-0">{message}</p>)}
       {view.scopeError ? <p className="m-0" data-testid="scope-error">
         {view.scopeErrorAction === "refresh" ? "刷新/读取范围失败" : `切换到${describeScope(view.scopeErrorTarget, view.navigation)}失败`}：{errorTitle(view.scopeError.code)}：{view.scopeError.message}。仍在查看{describeScope(view.session?.scope ?? null, view.navigation)}。

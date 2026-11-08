@@ -38,7 +38,9 @@ impl Daemon {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            // Keep the probe-timeout test within the receive wait; the default is 10 s.
+            .env("COMMITSCOPE_GIT_PROBE_TIMEOUT_MS", "2000");
         if let Some(path) = path {
             command.env("PATH", path);
         }
@@ -294,7 +296,10 @@ fn handshake_and_runtime_info_are_real_two_chunk_response() {
             "metadataIndex",
             "metadataSearch",
             "historyGraph",
-            "commitDetails"
+            "commitDetails",
+            "activityStats",
+            "repositoryObservation",
+            "handoffFacts"
         ])
     );
     assert_eq!(handshake["core"]["git"]["available"], true);

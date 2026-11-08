@@ -39,7 +39,7 @@ main 使用异步 `spawn` 启动随应用打包的 Rust 可执行文件，通过
 
 初始协议使用单个版本号和共享 schema，生成 TypeScript 类型并保留 Rust 编解码样例，避免双侧手写类型漂移。暂不建设通用插件协议。
 
-P0-02 的已实现契约见 [代码级计划](implementation/p0-02-protocol.md)：`hello`、`request`、`response`、`cancel`、`error` 五类消息，P0-03 新增 `readRepositoryPreview`，当前能力包含 `getRuntimeInfo` 与有界仓库预览。Git 版本探测使用固定绝对路径、有界输出与 2 秒上限；启动与默认请求上限为 5 秒，每会话最多两个请求。renderer 通过窄业务 API 获取核心状态和仓库预览，支持目录选择、打开与取消，不持有通用请求权限。macOS 通过本次 daemon 的独立进程组清理其 Git 子进程；Windows 的整树回收待单独实现和验收。
+P0-02 的已实现契约见 [代码级计划](implementation/p0-02-protocol.md)：`hello`、`request`、`response`、`cancel`、`error` 五类消息，P0-03 新增 `readRepositoryPreview`，当前能力包含 `getRuntimeInfo` 与有界仓库预览。Git 版本探测使用固定绝对路径、有界输出与 10 秒上限（测试可用 `COMMITSCOPE_GIT_PROBE_TIMEOUT_MS` 缩短）；启动握手上限 15 秒，默认请求上限 5 秒，每会话最多两个请求。2026-11-08 起（用户确认），启动阶段的可重试失败（握手或 Git 探测超时、启动中核心退出）在“启动中”状态下暂停 1 秒、3 秒后各重启一次（状态带 `retry`，底栏显示“核心启动较慢，正在重试（第 N/2 次）”，悬停可看上一次失败原因），仍失败才显示错误；版本不匹配、找不到核心等不重试，核心就绪后的退出也不自动重启。出错后顶部提示提供“重试”，原地启动新核心；若退出前已打开仓库，就绪后重新打开同一路径。此前 P0-01 计划中的“禁止自动重启”由此调整，失败仍不得静默。renderer 通过窄业务 API 获取核心状态和仓库预览，支持目录选择、打开与取消，不持有通用请求权限。macOS 通过本次 daemon 的独立进程组清理其 Git 子进程；Windows 的整树回收待单独实现和验收。
 
 P1-01 的会话契约见[代码级计划](implementation/p1-01-repository-sessions.md)：新增 `repositorySessions` capability，提供打开、读取会话、有界预览、显式记录查看、关闭与最近仓库六个方法。每个连接保留一个当前会话；打开时冻结 HEAD，尚不覆盖多引用范围、游标或自动刷新。稳定的 repositoryKey / worktreeId 区分对象库与 worktree，本次打开的 repoId / generation 使用随机标识并在重启后失效。server 主循环串行提交会话变更，Git 发现和历史读取仍在可取消 worker 中执行。
 

@@ -14,6 +14,8 @@ async function startFake(mode, options = {}) {
   const core = new CoreProcess(process.execPath, {
     args: [peerPath, mode],
     handshakeTimeoutMs: options.handshakeTimeoutMs ?? 1500,
+    startRetryDelaysMs: options.startRetryDelaysMs,
+    env: options.env ? { ...process.env, ...options.env } : undefined,
     transport: options.transport,
   });
   await core.start();
@@ -66,7 +68,7 @@ test("split UTF-8 handshake is accepted; duplicate hello and incompatible versio
 });
 
 test("handshake timeout and malformed JSON, invalid UTF-8, oversized, sequence, and context faults reject pending work", async () => {
-  const timedOut = await startFake("no-hello", { handshakeTimeoutMs: 40 });
+  const timedOut = await startFake("no-hello", { handshakeTimeoutMs: 40, startRetryDelaysMs: [] });
   try {
     assert.equal(timedOut.getStatus().state, "error");
     assert.match(timedOut.getStatus().message, /TIMEOUT/);
@@ -152,6 +154,70 @@ test("a throwing chunk callback cancels only its request and another pending req
     const completion = await healthy;
     assert.equal(completion.coverage.complete, true);
     assert.equal(core.getStatus().state, "ready");
+  } finally { await stopQuietly(core); }
+});
+
+test("a start that times out is retried after a pause and the error shows only if every attempt fails", async () => {
+  const temp = await mkdtemp(join(tmpdir(), "commitscope-start-retry-"));
+  const countFile = join(temp, "starts.count");
+  const states = core => {
+    const seen = [];
+    core.subscribe(status => seen.push(status.state === "starting" && status.retry ? `retry ${status.retry.attempt}/${status.retry.limit}` : status.state));
+    return seen;
+  };
+  try {
+    const recovering = new CoreProcess(process.execPath, {
+      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 150, startRetryDelaysMs: [30, 30],
+      env: { ...process.env, COMMITSCOPE_PEER_START_COUNT_FILE: countFile, COMMITSCOPE_PEER_FAIL_STARTS: "1" },
+    });
+    const recoveringStates = states(recovering);
+    try {
+      await recovering.start();
+      assert.equal(recovering.getStatus().state, "ready", "the second launch answers the handshake");
+      assert.equal((await readFile(countFile, "utf8")).trim(), "2");
+      assert.deepEqual(recoveringStates, ["starting", "retry 1/2", "ready"], "a retried start says so and never shows an error");
+      assert.deepEqual((await runtimeInfo(recovering)).coverage, { complete: true, processed: 2 });
+    } finally { await stopQuietly(recovering); }
+
+    await rm(countFile, { force: true });
+    const failing = new CoreProcess(process.execPath, {
+      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 80, startRetryDelaysMs: [20, 20],
+      env: { ...process.env, COMMITSCOPE_PEER_START_COUNT_FILE: countFile, COMMITSCOPE_PEER_FAIL_STARTS: "99" },
+    });
+    try {
+      await failing.start();
+      assert.equal(failing.getStatus().state, "error");
+      assert.match(failing.getStatus().message, /TIMEOUT/);
+      assert.equal((await readFile(countFile, "utf8")).trim(), "3", "one start plus two retries");
+    } finally { await stopQuietly(failing); }
+
+    await rm(countFile, { force: true });
+    const mismatched = new CoreProcess(process.execPath, {
+      args: [peerPath, "mismatch-version"], startRetryDelaysMs: [20, 20],
+      env: { ...process.env, COMMITSCOPE_PEER_START_COUNT_FILE: countFile },
+    });
+    try {
+      await mismatched.start();
+      assert.equal(mismatched.getStatus().state, "error");
+      assert.equal((await readFile(countFile, "utf8")).trim(), "1", "a version mismatch is not retried");
+    } finally { await stopQuietly(mismatched); }
+  } finally { await rm(temp, { recursive: true, force: true }); }
+});
+
+test("restart brings back a core that crashed after it was ready", async () => {
+  const core = await startFake("exit-on-request");
+  try {
+    const firstPid = core.getStatus().core.pid;
+    await assert.rejects(runtimeInfo(core), error => error.code === "CORE_EXITED");
+    assert.equal(core.getStatus().state, "error", "a crash after start is shown, not retried by itself");
+    await Promise.all([core.restart(), core.restart()]);
+    assert.equal(core.getStatus().state, "ready");
+    assert.notEqual(core.getStatus().core.pid, firstPid);
+    await waitForProcessExit(firstPid);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(core.getStatus().state, "ready", "the old process's exit does not end the new one");
+    await core.restart();
+    assert.equal(core.getStatus().state, "ready", "restart does nothing while the core is ready");
   } finally { await stopQuietly(core); }
 });
 
