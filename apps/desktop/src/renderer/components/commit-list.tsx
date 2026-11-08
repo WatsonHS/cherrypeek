@@ -15,6 +15,7 @@ import { createVirtualLayout, type VirtualRange } from "../lib/virtual-window.js
 import type { SelectionIntentToken } from "../lib/selection-intent.js";
 import { HistoryTimeSlider, type HistoryTimeSliderDay } from "./history-time-slider.js";
 import { HistoryDayStrip, type DayMarker } from "./history-day-strip.js";
+import type { HandoffRequest } from "../lib/handoff-prompt.js";
 import { localDateInput } from "../lib/search-date.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
@@ -59,7 +60,7 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onCancelHistoryDate, onRetryHistoryDate }: {
+export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onOpenHandoff, onCancelHistoryDate, onRetryHistoryDate }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
@@ -86,6 +87,8 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
   onScrubbingChange?(scrubbing: boolean): void;
   /** Loads the newest page when it is no longer in the window; resolves true once it is. */
   onJumpToNewest(): Promise<boolean>;
+  /** Hands the commits new since the last visit to an agent for review. */
+  onOpenHandoff?(request: HandoffRequest): void;
   onCancelHistoryDate(): Promise<void>;
   onRetryHistoryDate(): Promise<void>;
 }): React.JSX.Element {
@@ -100,6 +103,12 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     preview.newSinceLastSeenStatus === "ready" ? preview.lastSeenDividerOid : null),
   [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus]);
   const virtual = React.useMemo(() => createVirtualLayout(entries), [entries]);
+  const newSinceLastVisit = React.useMemo(() => {
+    const divider = entries.find(entry => entry.kind === "divider");
+    if (!divider) return null;
+    const index = preview.commits.findIndex(commit => `last-seen-${commit.oid}` === divider.key);
+    return index > 0 ? preview.commits.slice(0, index).map(commit => ({ oid: commit.oid, summary: commit.summary })) : null;
+  }, [entries, preview.commits]);
   const dayMarkers = React.useMemo<DayMarker[]>(() => entries.flatMap(entry =>
     entry.kind === "day" ? [{ offset: virtual.offset(entry.key) ?? 0, label: entry.label, day: entry.dayKey }] : []), [entries, virtual]);
   const latestSelectedOid = React.useRef(selectedOid);
@@ -470,7 +479,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       <div aria-hidden="true" style={{ height: range.top }} />
       {visibleEntries.map(entry => entry.kind === "day"
         ? <DayRow key={entry.key} entry={entry} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth} />
-        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} graph={entry.graph} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth} />
+        : entry.kind === "divider" ? <LastSeenDivider key={entry.key} graph={entry.graph} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth}
+          newCount={newSinceLastVisit?.length ?? 0}
+          onReview={onOpenHandoff && newSinceLastVisit ? () => onOpenHandoff({ scenario: "review-range", target: {
+            kind: "commits", commits: newSinceLastVisit, complete: preview.windowPreviousCursor === null, reason: "new",
+          } }) : undefined} />
         : <CommitRow key={entry.commit.oid} commit={entry.commit} graphWidth={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount}
           contentMinWidth={expandedContentMinWidth} onExpandGraph={() => setGraphExpanded(true)}
           refs={refIndex.get(entry.commit.oid) ?? []} headReference={headReference} headOid={headOid}
@@ -591,13 +604,21 @@ function DayRow({ entry, width, expanded, visibleLaneCount, contentMinWidth }: {
   </div>;
 }
 
-function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinWidth }: { graph: HistoryCommit["graph"]; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number }): React.JSX.Element {
+function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinWidth, newCount, onReview }: {
+  graph: HistoryCommit["graph"]; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number;
+  newCount: number;
+  onReview?(): void;
+}): React.JSX.Element {
   const lanes = expanded ? graphAboveLanes(graph) : lanesInMask(graph.above);
-  return <div role="separator" aria-label="上次看到这里" data-testid="history-divider" data-marker-kind="last-seen"
+  // A group rather than a separator: it holds the review action.
+  return <div role="group" aria-label="上次看到这里" data-testid="history-divider" data-marker-kind="last-seen"
     className="flex items-center gap-2 pr-3 pl-2 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
     <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-last-seen-bridge" />
     <span className="h-px flex-1 bg-line" />
     <span>上次看到这里</span>
+    {onReview && newCount > 0 ? <button type="button" data-testid="handoff-new-commits"
+      className="rounded-md px-1.5 py-0.5 text-[11px] text-accent-fg hover:bg-hover"
+      title={`把上面 ${newCount} 个新提交交给 Agent 审阅`} onClick={onReview}>交给 Agent 审阅这 {newCount} 个</button> : null}
     <span className="h-px flex-1 bg-line" />
   </div>;
 }

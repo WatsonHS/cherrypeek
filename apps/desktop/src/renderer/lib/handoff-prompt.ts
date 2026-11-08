@@ -1,18 +1,24 @@
 import type { HandoffFacts } from "../../../../../packages/protocol/src/generated/server-message.js";
 
 export type HandoffPromptFacts = HandoffFacts;
-export type HandoffScenario = "sync" | "review" | "explain-merge" | "cleanup" | "custom" | "stale-worktree";
+export type HandoffScenario = "review-range" | "review" | "explain-merge" | "revert" | "fix" | "cleanup" | "stale-worktree";
+
+export interface HandoffRangeCommit {
+  oid: string;
+  summary: string;
+}
 
 export type HandoffTarget =
   | { kind: "commit"; oid: string }
+  /** A batch of commits, newest first. `complete` is false when only the loaded part is listed. */
+  | { kind: "commits"; commits: HandoffRangeCommit[]; complete: boolean; reason: "new" | "toNewest" }
   | { kind: "branch"; ref: string }
   | { kind: "worktree"; id: string; stale: boolean };
 
-export interface HandoffScenarioOption {
-  id: HandoffScenario;
-  title: string;
-  disabled: boolean;
-  note?: string;
+/** One task to hand off: what to do, and to what. */
+export interface HandoffRequest {
+  scenario: HandoffScenario;
+  target: HandoffTarget;
 }
 
 export interface BuiltHandoffPrompt {
@@ -34,59 +40,77 @@ const MAX_PROMPT_BYTES = 64 * 1024;
 const MAX_TITLE_CHARS = 200;
 
 export const HANDOFF_SCENARIO_TITLES: Record<HandoffScenario, string> = {
-  sync: "同步分支到基准",
+  "review-range": "审阅这批提交",
   review: "审阅这个提交",
-  "explain-merge": "解释 merge 带入的改动",
-  cleanup: "清理已合入的分支与 worktree",
-  custom: "自定义…",
-  "stale-worktree": "核查失效 worktree 记录",
+  "explain-merge": "解释这个 merge 带入了什么",
+  revert: "撤销这个提交",
+  fix: "修复这个提交引入的问题",
+  cleanup: "清理已合入的分支",
+  "stale-worktree": "核查失效的 worktree 记录",
 };
 
-export function handoffTargetKey(target: HandoffTarget | null): string {
-  if (!target) return "none";
-  switch (target.kind) {
-    case "commit": return `commit:${target.oid}`;
-    case "branch": return `branch:${target.ref}`;
-    case "worktree": return `worktree:${target.id}:${target.stale ? "stale" : "available"}`;
-  }
+export function handoffRequestKey(request: HandoffRequest | null): string {
+  if (!request) return "none";
+  const { target } = request;
+  const subject = target.kind === "commit" ? target.oid
+    : target.kind === "commits" ? `${target.commits[0]?.oid ?? ""}..${target.commits.at(-1)?.oid ?? ""}:${target.commits.length}`
+      : target.kind === "branch" ? target.ref : `${target.id}:${target.stale ? "stale" : "available"}`;
+  return `${request.scenario}:${target.kind}:${subject}`;
 }
 
-export function handoffScenarios(facts: HandoffPromptFacts | null, target: HandoffTarget | null): HandoffScenarioOption[] {
+/** Facts the backend is asked for; a batch is described by its newest commit. */
+export function handoffFactsTarget(target: HandoffTarget): { kind: "commit"; oid: string } | Exclude<HandoffTarget, { kind: "commits" }> | null {
+  if (target.kind !== "commits") return target;
+  const newest = target.commits[0];
+  return newest ? { kind: "commit", oid: newest.oid } : null;
+}
+
+/**
+ * Whether cleanup is safe to offer: a local, merged branch with a known base that is neither the
+ * base nor checked out in this window, and a complete worktree inventory.
+ */
+export function cleanupAvailable(facts: HandoffPromptFacts | null): boolean {
   const branch = facts?.branch ?? null;
   const base = facts?.base ?? null;
-  const commit = facts?.selectedCommit ?? null;
-  const isLocalBranch = branch?.kind === "localBranch";
-  const syncAvailable = isLocalBranch && Boolean(base);
-  const cleanAvailable = Boolean(syncAvailable
+  return Boolean(branch?.kind === "localBranch" && base
     && facts?.mergeStatus === "merged"
     && facts?.checkedOutByComplete === true
-    && branch?.name !== base?.name
-    && branch?.name !== facts?.windowWorktree?.headReference);
-  const mergeAvailable = Boolean(commit && commit.parents.length >= 2);
-  const staleAvailable = target?.kind === "worktree" && target.stale && Boolean(facts?.staleWorktree);
-  return [
-    { id: "sync", title: HANDOFF_SCENARIO_TITLES.sync, disabled: !syncAvailable, note: syncAvailable ? undefined : "需要本地分支和已确定的基准" },
-    { id: "review", title: HANDOFF_SCENARIO_TITLES.review, disabled: !commit, note: commit ? undefined : "当前没有已选提交" },
-    { id: "explain-merge", title: HANDOFF_SCENARIO_TITLES["explain-merge"], disabled: !mergeAvailable, note: mergeAvailable ? undefined : "需要至少两个父提交" },
-    { id: "cleanup", title: HANDOFF_SCENARIO_TITLES.cleanup, disabled: !cleanAvailable, note: cleanAvailable ? undefined : "仅本地、非当前 HEAD/基准且 worktree 检查完整、明确已合入的分支可用" },
-    { id: "custom", title: HANDOFF_SCENARIO_TITLES.custom, disabled: false },
-    ...(target?.kind === "worktree" && target.stale
-      ? [{ id: "stale-worktree" as const, title: HANDOFF_SCENARIO_TITLES["stale-worktree"], disabled: !staleAvailable, note: staleAvailable ? undefined : "当前没有可核查的失效记录" }]
-      : []),
-  ];
+    && branch.name !== base.name
+    && branch.name !== facts?.windowWorktree?.headReference);
+}
+
+/** One sentence for the dialog: what the agent will be asked to do. */
+export function handoffSummary(request: HandoffRequest): string {
+  const { scenario, target } = request;
+  switch (scenario) {
+    case "review-range": {
+      const count = target.kind === "commits" ? target.commits.length : 0;
+      const which = target.kind === "commits" && target.reason === "new" ? "上次查看后新增的" : "从这里到最新的";
+      const more = target.kind === "commits" && !target.complete ? "（至少）" : "";
+      return `让 Agent 审阅${which}${more} ${count} 个提交：先概括这批改动，再按严重程度列出问题和修改建议。只读，不改代码。`;
+    }
+    case "review": return "让 Agent 审阅这个提交，列出问题和修改建议。只读，不改代码。";
+    case "explain-merge": return "让 Agent 解释这个 merge 相对第一父带入了哪些提交和改动。只读，不改代码。";
+    case "revert": return "让 Agent 在本窗口的工作区用 git revert 撤销这个提交，处理冲突、运行测试，不 push。";
+    case "fix": return "让 Agent 在本窗口的工作区修复这个提交引入的问题，补测试、运行测试，不 push。在下面写清问题是什么效果最好。";
+    case "cleanup": return "让 Agent 核对后删除这个已合入的本地分支，并移除只用于它的 linked worktree；有未提交改动就停下，不动远端分支。";
+    case "stale-worktree": return "让 Agent 核查这条失效的 worktree 记录，确认目录确实不再使用后才清理，不删除分支。";
+  }
 }
 
 export function buildHandoffPrompt(
   facts: HandoffPromptFacts | null,
-  scenario: HandoffScenario,
-  customRequest = "",
+  request: HandoffRequest,
+  note = "",
 ): BuiltHandoffPrompt {
-  const body = promptBody(facts, scenario, customRequest);
-  const limits = { branchCommits: 50, changedFiles: 50, mergeCommits: 50, overlapPaths: 20 };
+  const extra = note.trim();
+  // The note is the user's own text, so it may sit in the instructions.
+  const body = extra ? `${promptBody(facts, request)}\n\n补充说明（来自用户）：\n${extra}` : promptBody(facts, request);
+  const limits = { branchCommits: 50, changedFiles: 50, mergeCommits: 50, overlapPaths: 20, rangeCommits: 200 };
   let shortened = false;
 
   while (true) {
-    const records = referenceRecords(facts, limits);
+    const records = referenceRecords(facts, limits, request);
     const referenceData = JSON.stringify(records, null, 2);
     const marker = createMarker(referenceData);
     const text = [
@@ -99,35 +123,37 @@ export function buildHandoffPrompt(
     ].join("\n");
     if (utf8Length(text) <= MAX_PROMPT_BYTES) return { text, marker, referenceData, shortened };
     shortened = true;
-    if (limits.changedFiles > 0) limits.changedFiles = limits.changedFiles > 10 ? 10 : 0;
+    if (limits.rangeCommits > 50) limits.rangeCommits = 50;
+    else if (limits.changedFiles > 0) limits.changedFiles = limits.changedFiles > 10 ? 10 : 0;
     else if (limits.branchCommits > 0) limits.branchCommits = limits.branchCommits > 10 ? 10 : 0;
     else if (limits.mergeCommits > 0) limits.mergeCommits = limits.mergeCommits > 10 ? 10 : 0;
     else if (limits.overlapPaths > 0) limits.overlapPaths = 0;
+    else if (limits.rangeCommits > 10) limits.rangeCommits = 10;
     else throw new HandoffPromptError();
   }
 }
 
-function promptBody(facts: HandoffPromptFacts | null, scenario: HandoffScenario, customRequest: string): string {
+function promptBody(facts: HandoffPromptFacts | null, request: HandoffRequest): string {
   const hasCommit = Boolean(facts?.selectedCommit);
   const hasBranch = Boolean(facts?.branch);
-  const hasBase = Boolean(facts?.base);
-  const operationKnown = Boolean(facts?.operationWorktree?.available);
-  const branchBaseLine = hasBranch && hasBase
-    ? "领先 / 落后计数和两侧改动路径见参考数据；路径交集只提示风险，不代表一定冲突或没有冲突。"
-    : "本次没有同时确定浏览分支和基准；不要推断领先 / 落后数量。";
+  const windowKnown = Boolean(facts?.windowWorktree && !facts.windowWorktree.isBare && facts.windowWorktree.available);
+  const workHere = windowKnown
+    ? "先核对 W1 的当前分支、HEAD 和未提交改动；有未提交改动，或 C1 不在当前分支的历史里时，停止并询问。"
+    : "CommitScope 没有可用的工作区目录（W1）；先询问在哪个工作区操作，确认前不要改动任何目录。";
 
-  switch (scenario) {
-    case "sync":
+  switch (request.scenario) {
+    case "review-range": {
+      const range = request.target.kind === "commits" ? request.target : null;
+      const count = range?.commits.length ?? 0;
       return [
-        "请把参考数据中的本地分支 B1 同步到基准 D1。",
-        operationKnown ? "操作目录是 T1；W1 只说明 CommitScope 打开的窗口位置。" : "先定位实际检出 B1 的 worktree；未检出或无法唯一确定时先询问，不要在 W1 上执行同步。",
-        "CommitScope 观察的是本地引用，未 fetch；观察时间和时区见参考数据。",
-        branchBaseLine,
-        operationKnown
-          ? "请核对 R1、T1 所属仓库、T1 的实际 HEAD 是否为 B1 和未提交改动；事实不符时停止，不改动其他 worktree。"
-          : "在已确认的实际操作目录中核对所属仓库、HEAD 是否为 B1 和未提交改动；无法确认时停止，不改动其他 worktree。",
-        "若 D1 是远端跟踪基准，fetch 其对应 remote 后重新检查；若是本地基准，不要求 fetch。按仓库惯例 rebase 或 merge；判断不了时用 merge，不改写已推送历史。有冲突时保留两边意图，拿不准就询问；运行相关测试，不 force push 共享分支。汇报操作路径、更新后的完整 HEAD 和冲突处理情况。",
+        "请审阅 R1 中的一批提交。参考数据 RANGE 按从新到旧列出了它们（K1 最新），并给出最新与最早两个端点。只读，不修改代码、提交或分支。",
+        range?.complete
+          ? `这批共 ${count} 个提交。`
+          : `列出的 ${count} 个只是 CommitScope 已加载的部分；请用两个端点核对完整范围：从最新端点可达、但最早端点的父提交不可达的提交。`,
+        "先用几句话概括这批改动整体在做什么；再按严重程度列出正确性问题、遗漏的边界、风险和可疑改动，每条标明对应提交的完整 OID 和文件位置，给出修改建议但不要直接修改。后面的提交改掉了前面的问题时，以最新结果为准，不重复报告。",
+        "CommitScope 的观察时间和本地引用快照见参考数据；W1 只是 CommitScope 打开的目录，不代表这些提交只属于某个分支。",
       ].join("\n\n");
+    }
     case "review":
       return [
         "请审阅 R1 中的提交 C1。只读，不修改代码、提交或分支。",
@@ -143,6 +169,20 @@ function promptBody(facts: HandoffPromptFacts | null, scenario: HandoffScenario,
         "请核对 C1 的全部父 OID。对每个第 N 父（N ≥ 2）分别检查第 N 父可达、P1 不可达的提交，并按父分组报告；比较 P1 与 C1 的整体 diff，按主题概括最终合并结果，不重复累计共享提交；指出与第一父已有改动的相互影响。只有恰好两个父提交且当前 Git 支持时，才用 git show --remerge-diff 辅助评价冲突解决。Octopus 不使用该方式，也不把没有该结果解读为没有冲突。保持只读，不修改代码或分支。",
       ].join("\n\n");
     }
+    case "revert":
+      return [
+        "请撤销 R1 中的提交 C1，在 W1（CommitScope 打开的目录）中操作。",
+        workHere,
+        "用 git revert 生成新的撤销提交，不改写历史，不用 reset。若 C1 是 merge（父提交见参考数据 parents），需要指定主线父提交，默认 P1，拿不准就询问。有冲突时兼顾 C1 之后的提交，拿不准就询问。运行相关测试，不 push。",
+        "汇报新提交的完整 OID、冲突处理和测试结果。",
+      ].join("\n\n");
+    case "fix":
+      return [
+        "提交 C1 可能引入了问题，请在 W1（CommitScope 打开的目录）中修复。问题描述见下方补充说明；没有说明时，先阅读 C1 的完整改动，指出最可能的问题和依据，再询问是否按此修复。",
+        workHere,
+        "阅读 C1 的完整改动，以及之后改过同一批文件的提交；复现或确认问题后，在当前分支上用新提交做最小修复，不改写历史。补充或更新能覆盖这个问题的测试，运行相关测试，不 push。确认不了问题时，先汇报分析再询问。",
+        "汇报改了什么、新提交的完整 OID 和测试结果。",
+      ].join("\n\n");
     case "cleanup":
       return [
         "请核对并清理 R1 中的本地分支 B1。观察时间、时区和未 fetch 的本地引用快照见参考数据。",
@@ -153,15 +193,44 @@ function promptBody(facts: HandoffPromptFacts | null, scenario: HandoffScenario,
         "请核查 R1 中的失效 worktree 记录 S1。CommitScope 观察到其目录不可用；临时离线、移动和真正删除需要区分。",
         "用 git worktree list --porcelain 检查所有记录，确认 S1 不是暂时未挂载或已移动；有疑问就停止，移动场景优先核查 repair。核对 S1 的实际 HEAD；detached HEAD 也要确认其提交仍能由其他引用到达，否则停止并说明。先运行 git worktree prune --dry-run --verbose 并列出完整影响集合。只有 dry-run 集合恰好包含获准清理的 S1 时才执行；出现额外记录、没有目标或状态变化就停止，不扩大范围。不要删除分支，汇报实际结果。",
       ].join("\n\n");
-    case "custom":
-      return [
-        customRequest.trim() || "【请在此编辑你希望 Agent 做的事】",
-        "下方参考数据只包含 CommitScope 当前能提供的观察事实。未提供的字段不表示零、没有改动或不存在；动手前核对实际状态，不 force push 共享分支，拿不准时询问。",
-      ].join("\n\n");
   }
 }
 
-function referenceRecords(facts: HandoffPromptFacts | null, limits: { branchCommits: number; changedFiles: number; mergeCommits: number; overlapPaths: number }): Record<string, unknown> {
+/** Reference records each task needs; everything else stays out of its prompt. */
+const RECORDS_FOR: Record<HandoffScenario, string[]> = {
+  "review-range": ["R1", "observedAt", "W1", "RANGE"],
+  review: ["R1", "observedAt", "B1", "C1", "F2", "parents"],
+  "explain-merge": ["R1", "observedAt", "C1", "parents", "mergeGroups"],
+  revert: ["R1", "observedAt", "W1", "C1", "F2", "parents"],
+  fix: ["R1", "observedAt", "W1", "C1", "F2", "parents"],
+  cleanup: ["R1", "observedAt", "W1", "B1", "D1", "T1", "operationWorktree", "branchCommits", "mergeStatus", "checkedOutBy"],
+  "stale-worktree": ["R1", "observedAt", "W1", "S1"],
+};
+
+function referenceRecords(
+  facts: HandoffPromptFacts | null,
+  limits: { branchCommits: number; changedFiles: number; mergeCommits: number; overlapPaths: number; rangeCommits: number },
+  request: HandoffRequest,
+): Record<string, unknown> {
+  const all = allReferenceRecords(facts, limits);
+  if (request.target.kind === "commits" && request.target.commits.length) {
+    const { commits, complete } = request.target;
+    all.RANGE = {
+      newest: commits[0]!.oid,
+      oldest: commits.at(-1)!.oid,
+      commits: commits.slice(0, limits.rangeCommits).map((commit, index) => ({ id: `K${index + 1}`, oid: commit.oid, title: boundedTitle(commit.summary) })),
+      count: commits.length,
+      complete: complete && commits.length <= limits.rangeCommits,
+      truncated: !complete || commits.length > limits.rangeCommits,
+    };
+  }
+  if (!facts && !all.RANGE) return all;
+  const kept: Record<string, unknown> = {};
+  for (const key of ["contextStatus", ...RECORDS_FOR[request.scenario]]) if (all[key] !== undefined) kept[key] = all[key];
+  return kept;
+}
+
+function allReferenceRecords(facts: HandoffPromptFacts | null, limits: { branchCommits: number; changedFiles: number; mergeCommits: number; overlapPaths: number }): Record<string, unknown> {
   if (!facts) return { contextStatus: "No repository snapshot facts are available." };
   const records: Record<string, unknown> = {
     R1: { kind: "repository", path: facts.repository.worktreePath ?? facts.repository.path, commonDir: facts.repository.commonDir },

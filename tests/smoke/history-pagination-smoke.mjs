@@ -105,6 +105,14 @@ try {
   await page.getByTestId("history-marker").first().waitFor({ state: "visible" });
   assert.equal(await page.getByTestId("history-marker").count(), 1, "the fast-forward adds one marked commit");
   assert.equal(await page.getByTestId("history-divider").count(), 1, "the consecutive new prefix has one divider");
+  // The new commits can go to an agent for review straight from the divider.
+  await page.getByTestId("handoff-new-commits").click();
+  const handoff = page.getByTestId("handoff-dialog");
+  await handoff.waitFor({ state: "visible" });
+  assert.equal(await handoff.getAttribute("data-scenario"), "review-range");
+  assert.match(await page.locator("#handoff-title").innerText(), /审阅这批提交 · 1 个/u);
+  await page.getByTestId("handoff-close").click();
+  await handoff.waitFor({ state: "hidden" });
   assert.deepEqual(await snapshotTree(repository), repositoryAfterExternalCommit, "refresh must not write to the viewed repository");
   await page.screenshot({ path: resolve(screenshotDir, "p1-03-history-refresh.png") });
 

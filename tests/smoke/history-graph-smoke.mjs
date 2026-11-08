@@ -322,7 +322,7 @@ async function assertBridgeAlignment(targetPage, testId) {
     for (const bridge of elements) {
       const mask = Number(bridge.getAttribute("data-graph-above-mask"));
       if (!mask) continue;
-      const container = bridge.closest('[role="presentation"], [role="separator"]');
+      const container = bridge.closest('[role="presentation"], [data-testid="history-divider"]');
       const next = container?.nextElementSibling;
       const initialBottom = bridge.getBoundingClientRect().bottom;
       for (let lane = 0; lane < 6; lane += 1) {
@@ -348,7 +348,7 @@ async function assertBridgeAlignment(targetPage, testId) {
         previousX = start.x;
         let cursor = next;
         while (cursor) {
-          const bridgeContinuation = cursor.matches('[role="separator"]')
+          const bridgeContinuation = cursor.matches('[data-testid="history-divider"]')
             ? cursor.querySelector('[data-testid="graph-day-bridge"], [data-testid="graph-last-seen-bridge"]') : null;
           if (bridgeContinuation) {
             start = findPathPoint(bridgeContinuation, expectedX, true);

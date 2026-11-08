@@ -218,7 +218,6 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .topbar-repository { width: 100px; flex-basis: 100px; padding-inline: 4px; }
   .topbar-scope-picker { width: 110px; flex-basis: 110px; padding-inline: 4px; }
   .topbar-search-controls { flex-basis: 112px; }
-  .topbar-handoff,
   .topbar-refresh { width: 28px; height: 28px; padding: 0; }
   .topbar-updates-label { display: none; }
   .topbar-divider { margin-inline: -2px; }

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cloud, ExternalLink, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Tag } from "lucide-react";
+import { ChevronDown, Cloud, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Tag } from "lucide-react";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
@@ -12,7 +12,7 @@ import { cn } from "../lib/utils.js";
 import { PathField } from "./path-field.js";
 import { UpdatesPopover } from "./updates-popover.js";
 import { ActivityStatsPopover } from "./activity-stats.js";
-import type { HandoffTarget } from "./handoff-dialog.js";
+import type { HandoffRequest } from "./handoff-dialog.js";
 import type { ActivityStats, RefSnapshotDiff, RepositoryObservation, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { SearchControls } from "./search-controls.js";
 import { RecentList, storeStatusText, type RecentState } from "./recent-repositories.js";
@@ -45,7 +45,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onLoadRefDiff(): void;
   onCancelRefDiff(): void;
   onObserve(): void;
-  onOpenHandoff(target: HandoffTarget | null): void;
+  onOpenHandoff(request: HandoffRequest): void;
   activityStats: ActivityStats | null;
   activityLoading: boolean;
   activityError: string | null;
@@ -75,8 +75,6 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <ShortcutGuide />
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
-    <Button variant="soft" size="sm" className="topbar-handoff shrink-0" data-testid="handoff-prompt" title="交给 Agent" aria-label="交给 Agent"
-      onClick={() => onOpenHandoff(null)}><ExternalLink className="size-3.5" /><span className="topbar-action-label">交给 Agent</span></Button>
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
       className="topbar-refresh shrink-0" onClick={() => { void actions.refresh(); }} title="刷新仓库历史" aria-label="刷新仓库历史">
       <RefreshCw className={cn("size-3.5", preview.refreshing && "animate-spin motion-reduce:animate-none")} strokeWidth={1.75} />
@@ -250,7 +248,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   onOpenChange(open: boolean): void;
   onChange(scope: RepositoryScope): void;
   onLoadNavigation(): void;
-  onOpenHandoff(target: HandoffTarget | null): void;
+  onOpenHandoff(request: HandoffRequest): void;
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
   onRefresh(): Promise<void>;
@@ -325,8 +323,9 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
             </span>
             </>, sameScope(scope, { worktree: item.id }), !item.available)}</div>
             {!item.available || item.lockedReason !== null || item.prunableReason !== null
-              ? <Button variant="ghost" size="icon-sm" aria-label={`为失效 worktree ${repositoryName(item.path)} 准备交接`} title="检查失效 worktree"
-                onClick={() => { onOpenChange(false); onOpenHandoff({ kind: "worktree", id: item.id, stale: true }); }}><ExternalLink className="size-3.5" /></Button> : null}
+              ? <Button variant="ghost" size="sm" data-testid="handoff-stale-worktree" className="h-7 shrink-0 px-2 text-xs"
+                aria-label={`交给 Agent 核查失效 worktree ${repositoryName(item.path)}`} title="交给 Agent 核查这条失效记录"
+                onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "stale-worktree", target: { kind: "worktree", id: item.id, stale: true } }); }}>核查</Button> : null}
           </div>)}
         </div>
         {GROUPS.map(({ kind, title, Icon }) => {
@@ -357,8 +356,10 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                 {merged === "unavailable" ? <span className="text-[11px] text-fg3">状态不可用</span> : null}
                 <code className="shrink-0 font-mono text-xs text-fg3">{shortOid(ref.peeledOid ?? ref.oid)}</code>
                 </>, sameScope(scope, { ref: ref.name }))}</div>
-                <Button variant="ghost" size="icon-sm" aria-label={`为分支 ${shortRefName(ref.name)} 准备交接`} title="交给 Agent"
-                  onClick={() => { onOpenChange(false); onOpenHandoff({ kind: "branch", ref: ref.name }); }}><ExternalLink className="size-3.5" /></Button>
+                {kind === "localBranch" && merged === "merged" && !isHead && ref.name !== navigation?.defaultBase?.name
+                  ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
+                    aria-label={`交给 Agent 清理已合入的分支 ${shortRefName(ref.name)}`} title="交给 Agent 核对后删除这个已合入的分支"
+                    onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); }}>清理</Button> : null}
                 {merged === "unavailable" ? <button type="button" aria-label={`重新计算 ${shortRefName(ref.name)} 的合入状态`}
                   className="ml-2 self-start px-2 text-[11px] text-fg3 underline" onClick={() => onLoadMergeStatus([ref.name])}>重试</button> : null}
               </div>;

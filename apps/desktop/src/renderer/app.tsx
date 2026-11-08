@@ -5,7 +5,8 @@ import type { ActivityStats, HandoffFacts, RefSnapshotDiff, RepositoryObservatio
 import type { RepositoryScope } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { GetHandoffFactsParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryNavigation } from "../../../../packages/protocol/src/repository-session.js";
-import type { HandoffTarget } from "./components/handoff-dialog.js";
+import type { HandoffRequest } from "./components/handoff-dialog.js";
+import { handoffFactsTarget } from "./lib/handoff-prompt.js";
 import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
 import { CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
@@ -194,7 +195,7 @@ export function App(): React.JSX.Element {
   const refDiffIntent = React.useRef(0);
   const observationIntent = React.useRef(0);
   const [handoffOpen, setHandoffOpen] = React.useState(false);
-  const [handoffTarget, setHandoffTarget] = React.useState<HandoffTarget | null>(null);
+  const [handoffRequest, setHandoffRequest] = React.useState<HandoffRequest | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
@@ -370,12 +371,13 @@ export function App(): React.JSX.Element {
     }
     setRefDiffLoading(false);
   }, [view.session]);
-  const openHandoff = React.useCallback((target: HandoffTarget | null) => {
-    setHandoffTarget(target);
+  const openHandoff = React.useCallback((request: HandoffRequest) => {
+    setHandoffRequest(request);
     setHandoffOpen(true);
   }, []);
-  const loadHandoffFacts = React.useCallback(async (target: HandoffTarget | null, _intent: number): Promise<HandoffFacts | null> => {
+  const loadHandoffFacts = React.useCallback(async (request: HandoffRequest, _intent: number): Promise<HandoffFacts | null> => {
     if (!view.session) return null;
+    const target = handoffFactsTarget(request.target);
     const params: GetHandoffFactsParams = {
       branchRef: target?.kind === "branch" ? target.ref : null,
       selectedOid: target?.kind === "commit" ? target.oid : null,
@@ -860,7 +862,7 @@ export function App(): React.JSX.Element {
             activityDays={historyActivity?.days ?? null}
             activityDaysPartial={historyActivity ? !historyActivity.coverage.complete : false}
             activityDaysTruncated={historyActivity?.daysTruncated ?? false}
-            onLocateHistoryDate={locateHistoryDate} onLocateHistoryTime={locateDateTimestamp} onScrubbingChange={setHistoryScrubbing} onJumpToNewest={jumpToNewest} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
+            onLocateHistoryDate={locateHistoryDate} onLocateHistoryTime={locateDateTimestamp} onScrubbingChange={setHistoryScrubbing} onJumpToNewest={jumpToNewest} onOpenHandoff={openHandoff} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
@@ -895,7 +897,7 @@ export function App(): React.JSX.Element {
             }} />
         </HistorySplitView>
       </div>
-      : <OpenScreen preview={view} actions={actions} recent={recent} onOpenHandoff={() => openHandoff(null)} />}
+      : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}
       previewStatus={searchView.active ? searchView.window
         ? searchView.window.coverage.complete ? `搜索最终结果 · ${searchView.window.matchedCount} 条` : `搜索部分结果 · ${searchView.window.matchedCount} 条`
@@ -909,7 +911,7 @@ export function App(): React.JSX.Element {
           await searchStore.retry();
         }
       }} />
-    <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} target={handoffTarget} sessionKey={detailSessionKey}
+    <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} request={handoffRequest} sessionKey={detailSessionKey}
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />
   </div>;

@@ -105,6 +105,27 @@ try {
   await containing.getByText("main", { exact: true }).waitFor({ state: "visible" });
   await containing.getByText("origin/main", { exact: true }).waitFor({ state: "visible" });
 
+  // 交给 Agent: the commit's menu lists the tasks for a merge; the dialog names the commit and copies a prompt with its full OID.
+  const selectedMergeOid = await page.locator('[data-testid="commit-row"][aria-selected="true"]').getAttribute("data-oid");
+  await page.getByTestId("handoff-commit").click();
+  await page.getByTestId("handoff-menu").waitFor({ state: "visible" });
+  for (const key of ["review", "explain-merge", "revert", "fix"]) await page.getByTestId(`handoff-menu-${key}`).waitFor({ state: "visible" });
+  await page.getByTestId("handoff-menu-explain-merge").click();
+  const handoff = page.getByTestId("handoff-dialog");
+  await handoff.waitFor({ state: "visible" });
+  assert.equal(await handoff.getAttribute("data-scenario"), "explain-merge");
+  await page.getByTestId("handoff-subject").waitFor({ state: "visible", timeout: 20_000 });
+  assert.match(await page.getByTestId("handoff-subject").innerText(), new RegExp(selectedMergeOid.slice(0, 8)), "the dialog names the merge");
+  assert.equal(await page.getByTestId("handoff-preview").count(), 0, "the full prompt is folded away until asked for");
+  await page.getByTestId("handoff-copy").click();
+  await page.getByTestId("handoff-copy-status").filter({ hasText: "已复制" }).waitFor({ state: "visible" });
+  const copiedPrompt = await app.evaluate(({ clipboard }) => clipboard.readText());
+  assert.match(copiedPrompt, /请解释 R1 中 merge 提交 C1/u);
+  assert.ok(copiedPrompt.includes(selectedMergeOid), "the copied prompt names the merge by its full OID");
+  await page.screenshot({ path: resolve(screenshotDirectory, "handoff-explain-merge.png") });
+  await page.getByTestId("handoff-close").click();
+  await handoff.waitFor({ state: "hidden" });
+
   // Switch the selected OID rapidly, then require detail, file baseline and merge data to identify the final selection.
   await list.evaluate(element => { element.scrollTop = 0; });
   const headRow = page.locator(`[data-testid="commit-row"][data-oid="${fixture.head}"]`);

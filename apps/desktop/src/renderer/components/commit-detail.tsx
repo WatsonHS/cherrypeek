@@ -4,7 +4,8 @@ import type { BranchesContainingResult, ChangedFilesPage, CommitDetails, CommitI
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
 import type { CommitDetailView } from "../lib/commit-detail-store.js";
-import type { HandoffTarget } from "./handoff-dialog.js";
+import type { HandoffRequest } from "./handoff-dialog.js";
+import { CommitHandoffMenu } from "./handoff-menu.js";
 import { identityTime, identityTimeTitle, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { refsByTarget, RefTags } from "./commit-list.js";
@@ -33,7 +34,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   canMovePrevious?: boolean;
   canMoveNext?: boolean;
   onLocateInHistory?(): void;
-  onOpenHandoff?(target: HandoffTarget): void;
+  onOpenHandoff?(request: HandoffRequest): void;
   selectedTab?: string;
   onTabChange?(tab: string): void;
 }): React.JSX.Element {
@@ -76,7 +77,10 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
         <div className="flex-1" />
         {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory}>在历史中定位</Button> : null}
-        <Button variant="soft" size="sm" data-testid="handoff-commit" onClick={() => onOpenHandoff?.({ kind: "commit", oid: commit.oid })}>交给 Agent</Button>
+        {onOpenHandoff ? <CommitHandoffMenu oid={commit.oid} isMerge={isMerge} onOpenHandoff={onOpenHandoff}
+          toNewest={!commitsOverride && index > 0
+            ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
+            : null} /> : null}
         <CopyOidButton oid={commit.oid} />
         <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
           onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
@@ -153,8 +157,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
               </dl>
             </Section>
             <ChangeOverviewSection detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} />
-            {isMerge ? <MergeSection detail={detail} activeDetails={activeDetails} refs={oldDetailContext ? shownDetails?.refs ?? [] : preview.refs} onLoadMerge={onLoadMerge} onRetryMerge={onRetryMerge}
-              onOpenHandoff={() => onOpenHandoff?.({ kind: "commit", oid: commit.oid })} /> : null}
+            {isMerge ? <MergeSection detail={detail} activeDetails={activeDetails} refs={oldDetailContext ? shownDetails?.refs ?? [] : preview.refs} onLoadMerge={onLoadMerge} onRetryMerge={onRetryMerge} /> : null}
           </div>
         </TabsContent>
         <TabsContent value="changes"><ChangesPanel detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} onToggleDiff={onToggleDiff} /></TabsContent>
@@ -367,13 +370,12 @@ function ParentSelector({ details, value, disabled, testId, onChange }: {
   </label>;
 }
 
-function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge, onOpenHandoff }: {
+function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge }: {
   detail: CommitDetailView;
   activeDetails: CommitDetails | null;
   refs: RefInfo[];
   onLoadMerge(parentIndex: number, offset: number): void;
   onRetryMerge(): void;
-  onOpenHandoff(): void;
 }): React.JSX.Element {
   const page: MergeCommitsPage | null = detail.merge.value;
   const requestedParent = detail.mergeParentIndex;
@@ -384,7 +386,6 @@ function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge, 
   const mergeParentRef = mergeParentOid ? refsByOid.get(mergeParentOid)?.[0] : undefined;
   const visibleAuthors = page?.authors.slice(0, 24) ?? [];
   return <Section title="Merge 带入">
-    <Button variant="outline" size="sm" data-testid="handoff-merge" className="self-start" onClick={onOpenHandoff}>交给 Agent</Button>
     {activeDetails && mergeParents.length === 1 ? <div className="text-xs text-fg3">比较分组 <span className="text-fg">父提交 2 · {shortOid(mergeParents[0]!)}{mergeParentRef ? ` · ${shortRefName(mergeParentRef.name)}` : ""}</span></div> : activeDetails && mergeParents.length > 1 ? <label className="flex items-center gap-2 text-xs text-fg3">比较分组
       <select data-testid="merge-parent-selector" aria-label="Merge 父提交分组" className="max-w-[320px] rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-fg" value={parent}
         onChange={event => onLoadMerge(Number(event.target.value), 0)}>
