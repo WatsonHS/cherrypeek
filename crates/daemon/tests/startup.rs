@@ -14,6 +14,9 @@ use std::{
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(7);
+/// The daemon gives up on a missing hello after its own 5 s. Waiting for that leaves room for a
+/// slow daemon start while the whole suite runs in parallel on a busy machine.
+const HELLO_TIMEOUT_WAIT: Duration = Duration::from_secs(20);
 
 struct ChildGuard(Child);
 
@@ -34,13 +37,20 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(path: Option<&Path>) -> Self {
+        Self::spawn_with_probe_timeout(path, None)
+    }
+
+    /// `probe_timeout_ms` shortens the daemon's 10 s Git probe limit. Only the probe-timeout test
+    /// needs that: a short limit elsewhere makes the handshake probe fail on a busy machine.
+    fn spawn_with_probe_timeout(path: Option<&Path>, probe_timeout_ms: Option<u64>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_commitscope-daemon"));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Keep the probe-timeout test within the receive wait; the default is 10 s.
-            .env("COMMITSCOPE_GIT_PROBE_TIMEOUT_MS", "2000");
+            .stderr(Stdio::null());
+        if let Some(milliseconds) = probe_timeout_ms {
+            command.env("COMMITSCOPE_GIT_PROBE_TIMEOUT_MS", milliseconds.to_string());
+        }
         if let Some(path) = path {
             command.env("PATH", path);
         }
@@ -88,9 +98,16 @@ impl Daemon {
         input.flush().expect("flush raw client bytes");
     }
 
+    #[track_caller]
     fn recv(&self) -> Value {
+        self.recv_within(WAIT)
+    }
+
+    /// Like `recv`, for a frame that only comes after a fixed wait inside the daemon.
+    #[track_caller]
+    fn recv_within(&self, timeout: Duration) -> Value {
         self.output
-            .recv_timeout(WAIT)
+            .recv_timeout(timeout)
             .expect("daemon output deadline")
             .expect("daemon emitted valid JSON")
     }
@@ -518,14 +535,19 @@ fn mismatch_unhandshaken_request_and_repeated_hello_are_rejected() {
 
 #[test]
 fn missing_hello_times_out_and_duplicate_active_request_id_is_fatal() {
+    let started = Instant::now();
     let mut timed_out = Daemon::spawn(None);
-    assert_eq!(timed_out.recv()["code"], "TIMEOUT");
+    assert_eq!(timed_out.recv_within(HELLO_TIMEOUT_WAIT)["code"], "TIMEOUT");
+    assert!(
+        started.elapsed() >= Duration::from_millis(4_500),
+        "the daemon waits about 5 s for hello before giving up"
+    );
     timed_out.wait_exit(WAIT);
 
     let (directory, pids_file) = controlled_git_dir();
     let mut daemon = Daemon::spawn(Some(&directory));
     daemon.send(&hello());
-    daemon.recv();
+    assert_eq!(daemon.recv()["type"], "hello");
     daemon.send(&request("duplicate"));
     assert_eq!(daemon.recv()["sequence"], 0);
     let pids = await_pids(&pids_file, 1);
@@ -621,9 +643,10 @@ fn cancellation_kills_actual_git_and_busy_is_bounded_to_two_requests() {
 #[test]
 fn git_probe_timeout_is_reported_and_child_is_reaped() {
     let (directory, pids_file) = controlled_git_dir();
-    let mut daemon = Daemon::spawn(Some(&directory));
+    // 4 s: the hung probe still fails within the receive wait, and the handshake probe has room.
+    let mut daemon = Daemon::spawn_with_probe_timeout(Some(&directory), Some(4_000));
     daemon.send(&hello());
-    daemon.recv();
+    assert_eq!(daemon.recv()["type"], "hello");
     daemon.send(&request("timeout"));
     assert_eq!(daemon.recv()["sequence"], 0);
     let pids = await_pids(&pids_file, 1);
