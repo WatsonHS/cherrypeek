@@ -104,6 +104,14 @@ export type SessionApi = Pick<RepositorySessionApi,
   "getRepositoryNavigation" | "selectRepositoryScope" | "getRefMergeStatus" | "cancelRefMergeStatus" |
   "getMetadataIndexStatus" | "controlMetadataIndex">;
 
+/**
+ * Commit details and search take priority in the core and cancel a running merge-status query.
+ * Such an interruption is retried (the scope picker asks again once loading clears) a few times,
+ * with growing pauses, before it is shown as an error.
+ */
+const MERGE_STATUS_RETRIES = 4;
+const MERGE_STATUS_RETRY_MS = 150;
+
 function emptyView(revision: number, state: RepositoryViewState = "idle"): RepositoryView {
   return {
     revision, state, session: null, repository: null, refs: [], refsTruncated: false,
@@ -133,6 +141,7 @@ export class RepositorySessionStore {
   private openIntent = 0;
   private navigationOperation = 0;
   private mergeStatusOperation = 0;
+  private mergeStatusInterruptions = 0;
   private metadataIndexStatusOperation = 0;
   private metadataIndexControlOperation = 0;
   private scopePending?: Promise<ScopeSwitchResult | undefined>;
@@ -233,9 +242,20 @@ export class RepositorySessionStore {
     const result = await settle(this.api.getRefMergeStatus(names));
     if (operation !== this.mergeStatusOperation || !sameSession(this.view.session, session)) return;
     if (!result.ok) {
-      this.update({ ...this.view, mergeStatusLoading: false, mergeStatusError: result.error });
+      const interrupted = result.error.code === "CANCELLED" || result.error.code === "BUSY";
+      if (interrupted && this.mergeStatusInterruptions < MERGE_STATUS_RETRIES) {
+        this.mergeStatusInterruptions += 1;
+        await new Promise(resolve => setTimeout(resolve, MERGE_STATUS_RETRY_MS * this.mergeStatusInterruptions));
+        if (operation !== this.mergeStatusOperation || !sameSession(this.view.session, session)) return;
+        this.update({ ...this.view, mergeStatusLoading: false });
+        return;
+      }
+      this.mergeStatusInterruptions = 0;
+      this.update({ ...this.view, mergeStatusLoading: false,
+        mergeStatusError: interrupted ? { code: result.error.code, message: "读取暂时繁忙，请稍后重试" } : result.error });
       return;
     }
+    this.mergeStatusInterruptions = 0;
     const statuses = { ...this.view.mergeStatuses };
     for (const item of result.value.statuses) statuses[item.name] = item.status;
     this.update({ ...this.view, mergeStatuses: statuses, mergeStatusLoading: false, mergeStatusError: null });
@@ -243,6 +263,7 @@ export class RepositorySessionStore {
 
   async cancelRefMergeStatus(): Promise<void> {
     ++this.mergeStatusOperation;
+    this.mergeStatusInterruptions = 0;
     const { session } = this.view;
     const pending = settle(this.api.cancelRefMergeStatus());
     if (session) await pending;

@@ -822,6 +822,43 @@ test("failed scope switch clears stale navigation and merge loading state", asyn
   assert.deepEqual(store.getView().mergeStatuses, {});
 });
 
+test("a merge-status query interrupted by another read is retried instead of reported", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const merged = ok({ defaultBase: null, statuses: [{ name: "refs/heads/main", oid: "a".repeat(40), status: "merged" }] });
+
+  const first = store.loadRefMergeStatus(["refs/heads/main"]);
+  await fake.answer("getRefMergeStatus", err("CANCELLED", "分支合入状态查询已取消"));
+  assert.equal(store.getView().mergeStatusLoading, true, "the picker keeps showing progress during the short pause");
+  assert.equal(store.getView().mergeStatusError, null);
+  await first;
+  assert.equal(store.getView().mergeStatusLoading, false, "loading clears so the picker asks again");
+  assert.equal(store.getView().mergeStatusError, null, "commit details cancelling the query is not a failure");
+
+  const second = store.loadRefMergeStatus(["refs/heads/main"]);
+  await fake.answer("getRefMergeStatus", merged);
+  await second;
+  assert.equal(store.getView().mergeStatuses["refs/heads/main"], "merged");
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const interrupted = store.loadRefMergeStatus(["refs/heads/other"]);
+    await fake.answer("getRefMergeStatus", err(attempt % 2 ? "BUSY" : "CANCELLED"));
+    await interrupted;
+    assert.equal(store.getView().mergeStatusError, null, `interruption ${attempt + 1} is retried`);
+  }
+  const exhausted = store.loadRefMergeStatus(["refs/heads/other"]);
+  await fake.answer("getRefMergeStatus", err("CANCELLED"));
+  await exhausted;
+  assert.equal(store.getView().mergeStatusLoading, false);
+  assert.equal(store.getView().mergeStatusError?.message, "读取暂时繁忙，请稍后重试", "endless interruptions end in an error the user can retry");
+
+  const failing = store.loadRefMergeStatus(["refs/heads/other"]);
+  await fake.answer("getRefMergeStatus", err("REPOSITORY_ERROR", "读取失败"));
+  await failing;
+  assert.equal(store.getView().mergeStatusError?.message, "读取失败", "other failures are shown at once");
+});
+
 test("scope response retains the latest user selection made while it was pending", async () => {
   const fake = fakeApi();
   const originalPage = makeHistoryPage(makeSession("a"), { commits: [
