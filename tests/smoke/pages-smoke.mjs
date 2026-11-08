@@ -77,7 +77,8 @@ try {
   await page.getByTestId("commit-row").first().waitFor({ timeout: 40_000 });
   const capabilities = (await page.evaluate(() => window.commitScope.getCoreStatus())).core.capabilities;
   const has = name => capabilities.includes(name);
-  if (standIn) assert.ok(["workspaceStatus", "fileBrowsing", "blame"].every(has), "the stand-in declares the new capabilities");
+  assert.ok(["workspaceStatus", "fileBrowsing", "diffFullContext", "blame"].every(has), "the core declares the P4-09 to P4-12 capabilities");
+  assert.equal(new Set(capabilities).size, capabilities.length, "capabilities are not repeated");
   const current = async () => page.getByTestId("page-switch").locator("[aria-current='page']").getAttribute("data-testid");
   const scope = async () => (await page.getByTestId("search-scope").first().textContent())?.trim();
 

@@ -341,6 +341,10 @@ impl CoreReady {
                 Capability::ActivityStats,
                 Capability::RepositoryObservation,
                 Capability::HandoffFacts,
+                Capability::WorkspaceStatus,
+                Capability::FileBrowsing,
+                Capability::DiffFullContext,
+                Capability::Blame,
             ],
         }
     }

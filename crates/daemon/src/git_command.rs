@@ -20,6 +20,9 @@ const STREAM_BLOCK_BYTES: usize = 64 * 1024;
 
 pub struct ReadOnlyGit {
     executable: PathBuf,
+    /// Working-tree reads (P4-09) honour the user's global and system Git configuration so filters such
+    /// as Git LFS behave as in a terminal. Everything else ignores it.
+    user_config: bool,
 }
 
 pub struct CommandOutput {
@@ -61,7 +64,20 @@ impl ReadOnlyGit {
                 "Git executable path is not absolute".into(),
             ));
         }
-        Ok(Self { executable })
+        Ok(Self {
+            executable,
+            user_config: false,
+        })
+    }
+
+    /// The same executable, reading the user's global and system configuration. fsmonitor, external
+    /// diff, hooks, lazy fetch and network transports stay disabled by the fixed arguments below.
+    #[must_use]
+    pub fn with_user_config(&self) -> Self {
+        Self {
+            executable: self.executable.clone(),
+            user_config: true,
+        }
     }
 
     pub fn run(
@@ -306,10 +322,14 @@ impl ReadOnlyGit {
         command
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", empty_global_config_path())
-            .env("GIT_ATTR_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0");
+        if !self.user_config {
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", empty_global_config_path())
+                .env("GIT_ATTR_NOSYSTEM", "1");
+        }
+        command
             .env("LC_ALL", "C")
             .env("LANG", "C")
             .stdin(if has_input {
@@ -670,11 +690,7 @@ mod tests {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            let write_result = child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes());
+            let write_result = child.stdin.take().unwrap().write_all(input.as_bytes());
             let output = child.wait_with_output().unwrap();
             assert!(
                 write_result.is_ok(),

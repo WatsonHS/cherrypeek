@@ -894,7 +894,7 @@ pub fn read_commit_metadata(
     )
 }
 
-fn read_commits(
+pub(crate) fn read_commits(
     git: &ReadOnlyGit,
     path: &Path,
     oids: &[String],

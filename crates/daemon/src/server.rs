@@ -2,12 +2,14 @@ use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
     EmptyParams, ErrorCode, GetActivityStatsParams, GetCommitParams, GetHandoffFactsParams,
-    ListChangedFilesParams, ListSearchPathsParams, LocateCommitParams, LocateHistoryDateParams,
-    MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION, ReadDiffParams,
-    ReadHistoryPageParams, ReadMergeCommitsParams, ReadRepositoryPreviewParams,
-    RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope, ResponseData,
-    SearchCommitsParams, SearchIdentitiesParams, SearchPage, SelectRepositoryScopeParams,
-    ServerMessage,
+    ListChangedFilesParams, ListSearchPathsParams, ListTreeParams, LocateCommitParams,
+    LocateHistoryDateParams, MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION,
+    ReadBlameParams, ReadDiffParams, ReadFileChangeParams, ReadFileContentParams,
+    ReadFileHistoryParams, ReadHistoryPageParams, ReadMergeCommitsParams,
+    ReadRepositoryPreviewParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
+    ReadWorkspaceStatusParams, RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope,
+    ResponseData, SearchCommitsParams, SearchIdentitiesParams, SearchPage,
+    SelectRepositoryScopeParams, ServerMessage,
 };
 use serde_json::Value;
 use std::{
@@ -66,6 +68,14 @@ enum RequestOperation {
     ReadMergeCommits(ReadMergeCommitsParams),
     BranchesContaining(BranchesContainingParams),
     ReadDiff(ReadDiffParams),
+    ReadWorkspaceStatus(ReadWorkspaceStatusParams),
+    ReadWorkspaceDiff(ReadWorkspaceDiffParams),
+    ReadWorkspaceFile(ReadWorkspaceFileParams),
+    ListTree(ListTreeParams),
+    ReadFileContent(ReadFileContentParams),
+    ReadFileHistory(ReadFileHistoryParams),
+    ReadFileChange(ReadFileChangeParams),
+    ReadBlame(ReadBlameParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -517,9 +527,115 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ReadMergeCommits(_)
             | RequestOperation::BranchesContaining(_)
             | RequestOperation::ReadDiff(_)
+            | RequestOperation::ReadWorkspaceStatus(_)
+            | RequestOperation::ReadWorkspaceDiff(_)
+            | RequestOperation::ReadWorkspaceFile(_)
+            | RequestOperation::ListTree(_)
+            | RequestOperation::ReadFileContent(_)
+            | RequestOperation::ReadFileHistory(_)
+            | RequestOperation::ReadFileChange(_)
+            | RequestOperation::ReadBlame(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
+}
+
+/// Blame streams several chunks: each is sent as soon as it is ready, the last one carries `done`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_blame_worker(
+    workers: &mut Vec<JoinHandle<()>>,
+    sender: SyncSender<OutFrame>,
+    shutdown: Arc<AtomicBool>,
+    requests: ActiveRequests,
+    request_id: String,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    git_path: Option<std::path::PathBuf>,
+    session: Arc<session::RepositorySession>,
+    params: ReadBlameParams,
+) {
+    workers.push(thread::spawn(move || {
+        let Some(git_path) = git_path else {
+            send_terminal_error(
+                &sender,
+                &shutdown,
+                Some(request_id.clone()),
+                repo_id,
+                generation,
+                ErrorCode::GitUnavailable,
+                "Git executable was not found".into(),
+                false,
+            );
+            remove_request(&requests, &request_id, &cancelled);
+            return;
+        };
+        let mut sequence = 0_u32;
+        let mut processed = 0_u32;
+        let mut oversized = false;
+        let result = {
+            let mut emit = |chunk: commitscope_core::BlameChunk, done: bool| {
+                processed += chunk.blocks.len() as u32;
+                let message = ServerMessage::Response {
+                    request_id: request_id.clone(),
+                    repo_id: repo_id.clone(),
+                    generation: generation.clone(),
+                    sequence,
+                    done,
+                    coverage: Coverage {
+                        complete: done,
+                        processed,
+                    },
+                    next_cursor: None,
+                    data: ResponseData::BlameChunk { chunk },
+                };
+                if serde_json::to_vec(&message)
+                    .map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES)
+                {
+                    oversized = true;
+                    return false;
+                }
+                sequence += 1;
+                send_task_message(&sender, &shutdown, &cancelled, &message)
+            };
+            crate::blame::read_blame(
+                &git_path,
+                &session,
+                &params,
+                &cancelled,
+                std::time::Instant::now() + crate::blame::BLAME_TIMEOUT,
+                &mut emit,
+            )
+        };
+        if let Err(error) = result {
+            if oversized {
+                send_terminal_error(
+                    &sender,
+                    &shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    ErrorCode::ResourceLimit,
+                    "Blame chunk exceeds the 512 KiB target".into(),
+                    false,
+                );
+            } else if error.code == ErrorCode::Cancelled || cancelled.load(Ordering::Acquire) {
+                finish_cancelled(&sender, &shutdown, &request_id, repo_id, generation);
+            } else {
+                send_terminal_error(
+                    &sender,
+                    &shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    error.code,
+                    error.message,
+                    error.retryable,
+                );
+            }
+        }
+        remove_request(&requests, &request_id, &cancelled);
+    }));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1087,6 +1203,163 @@ fn dispatch_request(
                         crate::details::read_file_diff(git, session, &params, cancelled, deadline)?;
                     Ok((ResponseData::FileDiff { diff }, 1))
                 },
+            );
+        }
+        RequestOperation::ReadWorkspaceStatus(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let status =
+                        crate::workspace::read_status(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::WorkspaceStatus { status }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadWorkspaceDiff(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let diff =
+                        crate::workspace::read_diff(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::WorkspaceDiff { diff }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadWorkspaceFile(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let _ = (git, cancelled, deadline);
+                    let file = crate::workspace::read_file(session, &params)?;
+                    Ok((ResponseData::WorkspaceFile { file }, 1))
+                },
+            );
+        }
+        RequestOperation::ListTree(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let page = crate::files::list_tree(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::TreePage { page }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadFileContent(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let content = crate::files::read_file_content(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::FileContent { content }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadFileHistory(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let page = crate::files::read_file_history(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::FileHistory { page }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadFileChange(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let diff =
+                        crate::files::read_file_change(git, session, &params, cancelled, deadline)?;
+                    Ok((ResponseData::FileDiff { diff }, 1))
+                },
+            );
+        }
+        RequestOperation::ReadBlame(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_blame_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                params,
             );
         }
         RequestOperation::RefreshRepository(params) => {
@@ -1941,6 +2214,14 @@ fn validate_request(
         | "readMergeCommits"
         | "branchesContaining"
         | "readDiff"
+        | "readWorkspaceStatus"
+        | "readWorkspaceDiff"
+        | "readWorkspaceFile"
+        | "listTree"
+        | "readFileContent"
+        | "readFileHistory"
+        | "readFileChange"
+        | "readBlame"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -2126,6 +2407,87 @@ fn validate_request(
                 "readDiff" => serde_json::from_value::<ReadDiffParams>(params.clone())
                     .map(RequestOperation::ReadDiff)
                     .map_err(|_| (ErrorCode::InvalidRequest, "readDiff params 无效".into())),
+                "readWorkspaceStatus" => {
+                    serde_json::from_value::<ReadWorkspaceStatusParams>(params.clone())
+                        .ok()
+                        .filter(|params| (1..=2000).contains(&params.max_entries))
+                        .map(RequestOperation::ReadWorkspaceStatus)
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readWorkspaceStatus params 无效".into(),
+                            )
+                        })
+                }
+                "readWorkspaceDiff" => {
+                    serde_json::from_value::<ReadWorkspaceDiffParams>(params.clone())
+                        .map(RequestOperation::ReadWorkspaceDiff)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readWorkspaceDiff params 无效".into(),
+                            )
+                        })
+                }
+                "readWorkspaceFile" => {
+                    serde_json::from_value::<ReadWorkspaceFileParams>(params.clone())
+                        .ok()
+                        .filter(|params| (1..=5000).contains(&params.max_lines))
+                        .map(RequestOperation::ReadWorkspaceFile)
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readWorkspaceFile params 无效".into(),
+                            )
+                        })
+                }
+                "listTree" => serde_json::from_value::<ListTreeParams>(params.clone())
+                    .ok()
+                    .filter(|params| (1..=500).contains(&params.limit))
+                    .map(RequestOperation::ListTree)
+                    .ok_or_else(|| (ErrorCode::InvalidRequest, "listTree params 无效".into())),
+                "readFileContent" => {
+                    serde_json::from_value::<ReadFileContentParams>(params.clone())
+                        .ok()
+                        .filter(|params| (1..=5000).contains(&params.max_lines))
+                        .map(RequestOperation::ReadFileContent)
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readFileContent params 无效".into(),
+                            )
+                        })
+                }
+                "readFileHistory" => {
+                    serde_json::from_value::<ReadFileHistoryParams>(params.clone())
+                        .ok()
+                        .filter(|params| {
+                            (1..=200).contains(&params.page_size)
+                                && params.message.chars().count() <= 4096
+                                && params
+                                    .cursor
+                                    .as_ref()
+                                    .is_none_or(|cursor| cursor.len() <= 512)
+                        })
+                        .map(RequestOperation::ReadFileHistory)
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "readFileHistory params 无效".into(),
+                            )
+                        })
+                }
+                "readFileChange" => serde_json::from_value::<ReadFileChangeParams>(params.clone())
+                    .map(RequestOperation::ReadFileChange)
+                    .map_err(|_| {
+                        (
+                            ErrorCode::InvalidRequest,
+                            "readFileChange params 无效".into(),
+                        )
+                    }),
+                "readBlame" => serde_json::from_value::<ReadBlameParams>(params.clone())
+                    .map(RequestOperation::ReadBlame)
+                    .map_err(|_| (ErrorCode::InvalidRequest, "readBlame params 无效".into())),
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
@@ -2168,6 +2530,14 @@ fn validate_request(
         | "readMergeCommits"
         | "branchesContaining"
         | "readDiff"
+        | "readWorkspaceStatus"
+        | "readWorkspaceDiff"
+        | "readWorkspaceFile"
+        | "listTree"
+        | "readFileContent"
+        | "readFileHistory"
+        | "readFileChange"
+        | "readBlame"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"

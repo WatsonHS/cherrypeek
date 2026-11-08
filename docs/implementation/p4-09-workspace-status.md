@@ -1,8 +1,8 @@
 # P4-09：工作区状态与改动
 
-日期：2026-11-09。状态：接口已定义，main / preload / renderer 已按接口接入；daemon 实现待做。daemon 在 `CoreReady.capabilities` 里声明 `workspaceStatus` 之前，界面显示“占位 · P4-09”，不显示示例文件。
+日期：2026-11-09。状态：接口、main / preload / renderer 与 daemon 均已实现，核心声明 `workspaceStatus`。核心未声明该能力时（旧核心），界面仍显示“占位 · P4-09”，不显示示例文件。
 
-分工（2026-11-09 用户确认）：Claude 定义接口并实现 main、preload、renderer；Codex 按本文实现 daemon。产品口径见 [PRODUCT](../PRODUCT.md)「工作区状态与改动」，界面见 [DESIGN](../DESIGN.md) 第 11 节。
+分工：Claude 定义接口并实现 main、preload、renderer（2026-11-09 用户确认）；daemon 原定由 Codex 实现，2026-11-09 用户改为由 Claude 一并实现（`crates/daemon/src/workspace.rs`）。产品口径见 [PRODUCT](../PRODUCT.md)「工作区状态与改动」，界面见 [DESIGN](../DESIGN.md) 第 11 节。
 
 ## 能力与方法
 
@@ -72,21 +72,25 @@ type WorkspaceFile = {
 
 - 同一路径只出现一次；同时有已暂存和未暂存改动时两个字段都有值。`totalPaths` 按路径去重，忽略的文件不列出、不计数。
 - 只有一次完整、成功的读取且没有任何条目时，renderer 才显示“干净”；`complete = false` 时角标显示 `totalPaths+`。
+- 除 `maxEntries` 外，条目的 JSON 累计到约 400 KiB 时也停止并设 `complete = false`：daemon 拒绝超过 512 KiB 的响应，路径很长时 2,000 项可能放不下。
 - `readWorkspaceDiff` 的 `pathHex` / `oldPathHex` 必须对应最近一次状态里的条目；文件不在对应组里时返回 `MISSING_OBJECT`。冲突条目不提供 diff，用 `readWorkspaceFile` 读带冲突标记的内容。
 - `readWorkspaceFile` 读工作区里的文件本身：不跟随符号链接（返回 `symlink` 和目标）；路径必须在工作区内，否则返回 `INVALID_REQUEST`；超过 1 MiB 返回 `tooLarge` 且不读内容；含 NUL 的前 8 KiB 判为 `binary`。
 - bare 仓库调用任一方法返回 `INVALID_REQUEST`（renderer 不会对 bare 发请求）。
 
-## daemon 要求（Codex）
+## daemon（已实现）
 
 - 全部是只读查询：`--no-optional-locks`（等同 `GIT_OPTIONAL_LOCKS=0`），不刷新 index、不写对象、不运行 hook。始终禁用 `core.fsmonitor`（`-c core.fsmonitor=false`，它可以是外部命令），diff 禁用外部 diff 和 textconv，参数数组调用，路径用 `--literal-pathspecs` 加 `--`。
 - 状态：`git status --porcelain=v2 -z --untracked-files=all --ignored=no`，加两次 `diff --numstat -z`（`--cached` 与工作区）补增删数。从 git dir 里的 `MERGE_HEAD`、`rebase-merge/`、`rebase-apply/`、`CHERRY_PICK_HEAD`、`REVERT_HEAD`、`BISECT_LOG` 判断 `operation`。
 - 过滤器（2026-11-09 用户决定）：工作区一侧的比较照常运行仓库配置的 clean / smudge / process 过滤器（例如 Git LFS），使状态和未暂存 diff 与终端里的 `git status` / `git diff` 一致，不额外标注。这是只读边界的一个明确例外：打开别人提供的目录时，会执行其 `.git/config` 里配置的过滤器命令。fsmonitor 不在此例外内，仍然禁用；外部 diff、textconv 也仍然禁用。
-- 可取消，迟到结果不覆盖新请求；单次查询沿用 15 秒截止。大仓库（如 Flutter）上要测一次完整状态读取的耗时和整树内存。
-- 完成后在 `CoreReady.capabilities` 里加入 `workspaceStatus`。
+- 为此工作区的三个方法读取用户的全局与系统 Git 配置（`git lfs install` 把过滤器写在全局配置里）；其余读取仍忽略它们。固定参数照旧：`core.fsmonitor=false`、`diff.external=`、hooks 指向空目录、禁止网络与补拉、`--no-optional-locks`。diff 另外固定 `diff.suppressBlankEmpty=false`、`diff.noprefix=false`、`--unified`、`--diff-algorithm=myers`，免得用户配置改变 patch 形状。
+- 实现细节：状态用 `status --porcelain=v2 -z --branch --untracked-files=all --ignored=no --find-renames`，`headReference` / `headOid` 取自 `--branch` 头；输出上限 64 MiB，超出返回 `RESOURCE_LIMIT`。已跟踪的改动超过 5,000 个路径时不再跑两次 `--numstat`，增删数为 null。`readWorkspaceDiff` 先对该路径重跑一次状态确认条目仍在对应组里，再按 HEAD / index 的 blob 大小与 LFS 指针判断种类，二进制取自 `--numstat`。`readWorkspaceFile` 拒绝含 `..`、`.`、空段、`.git` 段的路径，父目录经符号链接逃出工作区时返回 `INVALID_REQUEST`，读文件用 `O_NOFOLLOW`。
+- 与终端一致的一个现象：大小变了、但经 clean 过滤后内容相同的文件，`git status` 仍报“修改”（Git 不为大小不同的文件跑过滤器），而 diff 为空。
+- 可取消，迟到结果不覆盖新请求；单次查询沿用 15 秒截止。
+- 实测（2026-11-09，本机 `~/Development/flutter`，15,361 个跟踪文件、2 个改动路径）：`readWorkspaceStatus` 中位 327 ms（5 次 475 / 309 / 305 / 358 / 327 ms），单独 `git status` 192 ms；daemon 进程树含 Git 子进程空闲 12.2 MiB、峰值 27.1 MiB。单点实测，不是预算验收；边构建边重读的开销仍待测。
 
 ## main / preload / renderer（已实现）
 
 - preload 暴露 `readWorkspaceStatus`、`readWorkspaceDiff`、`readWorkspaceFile`、`cancelWorkspace`，以及 `onWorkspaceChanged` 变化提示。main 对状态和内容各用一个请求通道，新的请求取代同通道的旧请求。
 - main 用 `fs.watch` 递归监听当前工作区目录，作为“可能有变化”的线索，800 ms 去抖后通知 renderer；不依赖它判断干净与否。
-- renderer 的工作区 store 在打开仓库、窗口聚焦、收到变化提示、进入工作区页和手动刷新时重新读取。收到变化提示后、新结果到达前，角标保留上次数字并改为空心。
+- renderer 的工作区 store 在打开仓库、窗口聚焦、收到变化提示、进入工作区页和手动刷新时重新读取；切换浏览范围不触发读取（2026-11-09 修正：此前每次切换都读，和首页、导航同时发出时超过 main 的 2 个并发上限）。收到变化提示后、新结果到达前，角标保留上次数字并改为空心。
 - 变化提示只在窗口可见时触发读取；窗口隐藏时只标记过期，重新显示或聚焦时再读。由提示触发的读取之间至少间隔 3 秒或上次读取耗时的 10 倍（最多 60 秒）；提示触发、但读到的结果和上次一样时，间隔翻倍，直到 60 秒，以免构建往被忽略的目录写文件时一直重读。手动刷新、聚焦和进入页面会清掉这段退避。大仓库上边构建边测一次的任务留到 daemon 实现之后。

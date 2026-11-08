@@ -101,6 +101,17 @@ impl SessionStore {
         Ok(root)
     }
 
+    /// Blame results (P4-12), shared by all repositories: a result depends only on the commit and path.
+    pub fn blame_cache_root(&self, repository: &RepositoryInfo) -> Result<PathBuf, ()> {
+        let data_dir = self.data_dir.as_deref().ok_or(())?;
+        let checked = safe_data_dir(data_dir, repository)?;
+        let root = ensure_safe_directory(&checked.join("blame-cache-v1"))?;
+        if safe_data_dir(&root, repository)? != root {
+            return Err(());
+        }
+        Ok(root)
+    }
+
     pub fn from_env() -> Self {
         match env::var_os(DATA_DIR_ENV) {
             None => Self {

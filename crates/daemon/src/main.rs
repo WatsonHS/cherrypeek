@@ -1,4 +1,6 @@
+mod blame;
 mod details;
+mod files;
 mod framing;
 mod git_command;
 mod graph;
@@ -13,6 +15,7 @@ mod server;
 mod session;
 mod session_store;
 mod updates;
+mod workspace;
 
 fn main() {
     if let Err(error) = server::run() {

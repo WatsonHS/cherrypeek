@@ -570,7 +570,8 @@ export function App(): React.JSX.Element {
   React.useEffect(() => {
     workspaceStore.bind(workspaceRepo, workspaceSupported, Boolean(view.repository?.isBare));
   }, [workspaceStore, workspaceRepo, workspaceSupported, view.repository?.isBare]);
-  React.useEffect(() => { void workspaceStore.readStatus(); }, [workspaceStore, view.session?.generation]);
+  // The working tree does not depend on the browsing scope: read it when a repository opens, not on every scope switch.
+  React.useEffect(() => { void workspaceStore.readStatus(); }, [workspaceStore, view.session?.repoId]);
   React.useEffect(() => window.commitScope.onWorkspaceChanged(change => {
     if (change.repoId === store.getView().session?.repoId) workspaceStore.markChanged();
   }), [store, workspaceStore]);

@@ -316,7 +316,11 @@ fn handshake_and_runtime_info_are_real_two_chunk_response() {
             "commitDetails",
             "activityStats",
             "repositoryObservation",
-            "handoffFacts"
+            "handoffFacts",
+            "workspaceStatus",
+            "fileBrowsing",
+            "diffFullContext",
+            "blame"
         ])
     );
     assert_eq!(handshake["core"]["git"]["available"], true);

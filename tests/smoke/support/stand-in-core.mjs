@@ -1,8 +1,8 @@
 // Test stand-in for the core process, used only by tests/smoke/pages-smoke.mjs --stand-in.
 // It forwards every message to the real daemon and answers the P4-09 to P4-12 methods
 // (workspace, files page, blame) itself from the git CLI, so the renderer flows can be exercised
-// before the daemon implements them. It is not an implementation of those methods and its answers
-// are not acceptance evidence for P4-09 to P4-12; the daemon must be verified against git on its own.
+// independently of the daemon's implementation. Its answers are not acceptance evidence for
+// P4-09 to P4-12; `pnpm test:smoke:pages` runs the same flows against the real daemon.
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, lstatSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -34,7 +34,9 @@ readline.createInterface({ input: real.stdout }).on("line", line => {
   try {
     const message = JSON.parse(line);
     if (message.type === "hello") {
-      message.core.capabilities.push("workspaceStatus", "fileBrowsing", "diffFullContext", "blame");
+      for (const name of ["workspaceStatus", "fileBrowsing", "diffFullContext", "blame"]) {
+        if (!message.core.capabilities.includes(name)) message.core.capabilities.push(name);
+      }
       message.core.pid = process.pid;
       out(message);
       return;

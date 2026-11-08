@@ -110,6 +110,8 @@ export type SessionApi = Pick<RepositorySessionApi,
  */
 const MERGE_STATUS_RETRIES = 4;
 const MERGE_STATUS_RETRY_MS = 150;
+const NAVIGATION_BUSY_RETRIES = 4;
+const NAVIGATION_BUSY_RETRY_MS = 150;
 
 function emptyView(revision: number, state: RepositoryViewState = "idle"): RepositoryView {
   return {
@@ -222,7 +224,14 @@ export class RepositorySessionStore {
     if (!session || this.view.state !== "ready" || this.view.navigationLoading || this.view.opening !== null || this.view.refreshing || this.view.scopeSwitching) return;
     const operation = ++this.navigationOperation;
     this.update({ ...this.view, navigationLoading: true, navigationError: null });
-    const result = await settle(this.api.getRepositoryNavigation());
+    let result = await settle(this.api.getRepositoryNavigation());
+    // The app asks once per session generation; a read that only found the core's request slots full
+    // (for example while the first page and the workspace status are in flight) is asked again shortly.
+    for (let attempt = 1; !result.ok && result.error.code === "BUSY" && attempt <= NAVIGATION_BUSY_RETRIES; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, NAVIGATION_BUSY_RETRY_MS * attempt));
+      if (operation !== this.navigationOperation || !sameSession(this.view.session, session)) return;
+      result = await settle(this.api.getRepositoryNavigation());
+    }
     if (operation !== this.navigationOperation || !sameSession(this.view.session, session)) return;
     if (!result.ok) {
       this.update({ ...this.view, navigationLoading: false, navigationError: result.error });

@@ -851,6 +851,26 @@ test("failed scope switch clears stale navigation and merge loading state", asyn
   assert.deepEqual(store.getView().mergeStatuses, {});
 });
 
+test("navigation that finds the core busy is asked again instead of left empty", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  await openReady(fake, store, "a");
+  const navData = { refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 1 };
+  const loading = store.loadNavigation();
+  await fake.answer("getRepositoryNavigation", err("BUSY", "读取暂时繁忙，请稍后重试"));
+  assert.equal(store.getView().navigationLoading, true, "still loading during the short pause");
+  assert.equal(store.getView().navigationError, null);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await fake.answer("getRepositoryNavigation", ok(navData));
+  await loading;
+  assert.deepEqual(store.getView().navigation, navData);
+
+  const failing = store.loadNavigation();
+  await fake.answer("getRepositoryNavigation", err("REPOSITORY_ERROR", "读取失败"));
+  await failing;
+  assert.equal(store.getView().navigationError?.message, "读取失败", "other failures are shown at once");
+});
+
 test("a merge-status query interrupted by another read is retried instead of reported", async () => {
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);

@@ -20,10 +20,15 @@ const DIFF_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PATH_LIMIT: usize = 16 * 1024;
 const MERGE_COMMIT_LIMIT: usize = 10_000;
 const MERGE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
-const FILE_DIFF_BLOB_LIMIT: u64 = 2 * 1024 * 1024;
-const FILE_DIFF_PATCH_LIMIT: usize = 128 * 1024;
-const FILE_DIFF_LINE_LIMIT: usize = 2_000;
-const FILE_DIFF_LINE_BYTES: usize = 32 * 1024;
+pub(crate) const FILE_DIFF_BLOB_LIMIT: u64 = 2 * 1024 * 1024;
+pub(crate) const FILE_DIFF_PATCH_LIMIT: usize = 128 * 1024;
+pub(crate) const FILE_DIFF_LINE_LIMIT: usize = 2_000;
+pub(crate) const FILE_DIFF_LINE_BYTES: usize = 32 * 1024;
+/// Whole-file diffs (P4-11): the new side may have at most this many lines, and the patch must fit the response.
+pub(crate) const FULL_FILE_LINE_LIMIT: usize = 5_000;
+pub(crate) const FULL_FILE_PATCH_LIMIT: usize = 400 * 1024;
+/// Enough context lines to cover any file within the whole-file limit.
+pub(crate) const FULL_FILE_CONTEXT: usize = 100_000;
 
 #[derive(Debug)]
 pub struct DetailError {
@@ -816,44 +821,16 @@ pub fn read_file_diff(
             &file,
             old_blob.as_ref().map(|blob| blob.oid.as_str()),
             new_blob.as_ref().map(|blob| blob.oid.as_str()),
+            params.full_file,
         )?;
-        let mut stream = git
-            .stream_lines(
-                Path::new(&session.discovered.info.path),
-                &args,
-                FILE_DIFF_LINE_BYTES,
-            )
-            .map_err(from_git)?;
-        let mut lines = 0usize;
-        let mut bytes = 0usize;
-        loop {
-            match stream.next_line(cancelled, deadline) {
-                Ok(Some(line)) => {
-                    let decoded = String::from_utf8_lossy(&line);
-                    let line_bytes = decoded.len().saturating_add(1);
-                    if lines == FILE_DIFF_LINE_LIMIT
-                        || bytes.saturating_add(line_bytes) > FILE_DIFF_PATCH_LIMIT
-                    {
-                        truncated = true;
-                        break;
-                    }
-                    if std::str::from_utf8(&line).is_err() {
-                        text_lossy = true;
-                    }
-                    patch.push_str(&decoded);
-                    patch.push('\n');
-                    lines += 1;
-                    bytes += line_bytes;
-                }
-                Ok(None) => break,
-                Err(GitFailure::ResourceLimit) => {
-                    truncated = true;
-                    break;
-                }
-                Err(error) => return Err(from_git(error)),
-            }
-        }
-        drop(stream);
+        (patch, truncated, text_lossy) = collect_patch(
+            &git,
+            Path::new(&session.discovered.info.path),
+            &args,
+            params.full_file,
+            cancelled,
+            deadline,
+        )?;
     }
     repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
         .map_err(from_preview)?;
@@ -871,7 +848,97 @@ pub fn read_file_diff(
     })
 }
 
-fn has_lfs_pointer(
+/// Bytes a character takes inside a JSON string: control characters, quotes and backslashes are escaped.
+pub(crate) fn json_char_len(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        character if (character as u32) < 0x20 => 6,
+        character => character.len_utf8(),
+    }
+}
+
+/// Bytes a string takes inside a JSON string, so response budgets hold for escape-heavy text.
+pub(crate) fn json_text_len(text: &str) -> usize {
+    text.chars().map(json_char_len).sum()
+}
+
+/// Streams one file's patch within the response limits. A normal diff is cut at the limit and marked
+/// truncated; a whole-file diff that does not fit fails with RESOURCE_LIMIT so the caller can fall back.
+pub(crate) fn collect_patch(
+    git: &ReadOnlyGit,
+    cwd: &Path,
+    args: &[std::ffi::OsString],
+    full_file: bool,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> DetailResult<(String, bool, bool)> {
+    let too_large = || {
+        detail_error(
+            ErrorCode::ResourceLimit,
+            "The whole file is over the full-file diff limit",
+            false,
+        )
+    };
+    let mut stream = git
+        .stream_lines(cwd, args, FILE_DIFF_LINE_BYTES)
+        .map_err(from_git)?;
+    let (line_limit, byte_limit) = if full_file {
+        (FULL_FILE_LINE_LIMIT * 2, FULL_FILE_PATCH_LIMIT)
+    } else {
+        (FILE_DIFF_LINE_LIMIT, FILE_DIFF_PATCH_LIMIT)
+    };
+    let mut patch = String::new();
+    let mut truncated = false;
+    let mut text_lossy = false;
+    let mut lines = 0usize;
+    let mut encoded = 0usize;
+    let mut new_side_lines = 0usize;
+    let mut old_side_lines = 0usize;
+    // File headers ("--- a/x", "+++ b/x") come before the first hunk; after it every line is content.
+    let mut in_hunk = false;
+    loop {
+        match stream.next_line(cancelled, deadline) {
+            Ok(Some(line)) => {
+                let decoded = String::from_utf8_lossy(&line);
+                let line_bytes = json_text_len(&decoded).saturating_add(1);
+                in_hunk |= line.starts_with(b"@@");
+                if in_hunk && matches!(line.first(), Some(b' ' | b'+')) {
+                    new_side_lines += 1;
+                }
+                if in_hunk && matches!(line.first(), Some(b' ' | b'-')) {
+                    old_side_lines += 1;
+                }
+                let over = lines == line_limit
+                    || encoded.saturating_add(line_bytes) > byte_limit
+                    || (full_file && new_side_lines.max(old_side_lines) > FULL_FILE_LINE_LIMIT);
+                if over && full_file {
+                    return Err(too_large());
+                }
+                if over {
+                    truncated = true;
+                    break;
+                }
+                if std::str::from_utf8(&line).is_err() {
+                    text_lossy = true;
+                }
+                patch.push_str(&decoded);
+                patch.push('\n');
+                lines += 1;
+                encoded += line_bytes;
+            }
+            Ok(None) => break,
+            Err(GitFailure::ResourceLimit) if full_file => return Err(too_large()),
+            Err(GitFailure::ResourceLimit) => {
+                truncated = true;
+                break;
+            }
+            Err(error) => return Err(from_git(error)),
+        }
+    }
+    Ok((patch, truncated, text_lossy))
+}
+
+pub(crate) fn has_lfs_pointer(
     git: &ReadOnlyGit,
     session: &session::RepositorySession,
     blob: Option<&BlobInfo>,
@@ -886,12 +953,12 @@ fn has_lfs_pointer(
     )?))
 }
 
-struct BlobInfo {
-    oid: String,
-    size: u64,
+pub(crate) struct BlobInfo {
+    pub(crate) oid: String,
+    pub(crate) size: u64,
 }
 
-fn blob_info(
+pub(crate) fn blob_info(
     git: &ReadOnlyGit,
     session: &session::RepositorySession,
     oid: &str,
@@ -940,7 +1007,7 @@ fn blob_info(
     })
 }
 
-fn read_small_blob(
+pub(crate) fn read_small_blob(
     git: &ReadOnlyGit,
     session: &session::RepositorySession,
     oid: &str,
@@ -963,7 +1030,7 @@ fn read_small_blob(
     Ok(output.stdout)
 }
 
-fn is_lfs_pointer(bytes: &[u8]) -> bool {
+pub(crate) fn is_lfs_pointer(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
@@ -984,7 +1051,13 @@ fn file_diff_args(
     file: &ChangedFile,
     old_blob: Option<&str>,
     new_blob: Option<&str>,
+    full_file: bool,
 ) -> DetailResult<Vec<std::ffi::OsString>> {
+    let context = if full_file {
+        format!("--unified={FULL_FILE_CONTEXT}")
+    } else {
+        "--unified=3".to_owned()
+    };
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut args = vec![
         string_arg("-c"),
@@ -999,7 +1072,7 @@ fn file_diff_args(
             string_arg("--no-textconv"),
             string_arg("--no-color"),
             string_arg("--text"),
-            string_arg("--unified=3"),
+            string_arg(&context),
             string_arg("--diff-algorithm=myers"),
             string_arg("--indent-heuristic"),
         ]);
@@ -1018,7 +1091,7 @@ fn file_diff_args(
         string_arg("--no-textconv"),
         string_arg("--no-color"),
         string_arg("--text"),
-        string_arg("--unified=3"),
+        string_arg(&context),
         string_arg("--diff-algorithm=myers"),
         string_arg("--indent-heuristic"),
         string_arg(format!("-O{null_device}")),
@@ -1042,7 +1115,7 @@ fn file_diff_args(
     Ok(args)
 }
 
-fn raw_path_arg(raw_hex: &str) -> DetailResult<std::ffi::OsString> {
+pub(crate) fn raw_path_arg(raw_hex: &str) -> DetailResult<std::ffi::OsString> {
     let bytes = hex_decode(raw_hex)
         .map_err(|_| detail_error(ErrorCode::GitError, "Invalid raw repository path", false))?;
     #[cfg(unix)]
@@ -1064,7 +1137,7 @@ fn raw_path_arg(raw_hex: &str) -> DetailResult<std::ffi::OsString> {
     }
 }
 
-fn validate_path_hex(value: Option<&str>) -> DetailResult<()> {
+pub(crate) fn validate_path_hex(value: Option<&str>) -> DetailResult<()> {
     if value.is_some_and(|value| {
         value.is_empty()
             || value.len() > PATH_LIMIT * 2
@@ -1081,7 +1154,7 @@ fn validate_path_hex(value: Option<&str>) -> DetailResult<()> {
     }
 }
 
-fn trim_line(bytes: &[u8]) -> &[u8] {
+pub(crate) fn trim_line(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
 
@@ -1097,7 +1170,7 @@ struct RawEntry {
     similarity: Option<u8>,
 }
 
-fn read_diff(
+pub(crate) fn read_diff(
     executable: &Path,
     repository_path: &str,
     oid: &str,
@@ -1784,7 +1857,7 @@ fn build_overview(files: &[ChangedFile]) -> DetailResult<commitscope_core::Chang
     })
 }
 
-fn parse_status(code: &str) -> DetailResult<(ChangedFileStatus, Option<u8>)> {
+pub(crate) fn parse_status(code: &str) -> DetailResult<(ChangedFileStatus, Option<u8>)> {
     let status = code
         .as_bytes()
         .first()
@@ -1809,7 +1882,7 @@ fn parse_status(code: &str) -> DetailResult<(ChangedFileStatus, Option<u8>)> {
     Ok((status, similarity))
 }
 
-fn parse_numstat(bytes: &[u8]) -> DetailResult<Option<u64>> {
+pub(crate) fn parse_numstat(bytes: &[u8]) -> DetailResult<Option<u64>> {
     if bytes == b"-" {
         Ok(None)
     } else {
@@ -1827,7 +1900,7 @@ fn parse_numstat(bytes: &[u8]) -> DetailResult<Option<u64>> {
         Ok(Some(value))
     }
 }
-fn git_path(bytes: Vec<u8>) -> GitPath {
+pub(crate) fn git_path(bytes: Vec<u8>) -> GitPath {
     let display = String::from_utf8_lossy(&bytes).into_owned();
     let text_lossy = std::str::from_utf8(&bytes).is_err();
     GitPath {
@@ -1836,7 +1909,7 @@ fn git_path(bytes: Vec<u8>) -> GitPath {
         text_lossy,
     }
 }
-fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
+pub(crate) fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
     if !value.len().is_multiple_of(2) {
         return Err(());
     }
@@ -1845,7 +1918,7 @@ fn hex_decode(value: &str) -> Result<Vec<u8>, ()> {
         .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(|_| ()))
         .collect()
 }
-fn validate_oid(oid: &str, length: usize) -> DetailResult<()> {
+pub(crate) fn validate_oid(oid: &str, length: usize) -> DetailResult<()> {
     if oid.len() != length || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
         Err(detail_error(
             ErrorCode::InvalidRequest,
@@ -1856,21 +1929,21 @@ fn validate_oid(oid: &str, length: usize) -> DetailResult<()> {
         Ok(())
     }
 }
-fn now_unix_ms() -> u64 {
+pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
             duration.as_millis().min(u128::from(u64::MAX)) as u64
         })
 }
-fn from_preview(error: repository::PreviewError) -> DetailError {
+pub(crate) fn from_preview(error: repository::PreviewError) -> DetailError {
     DetailError {
         code: error.code,
         message: error.message,
         retryable: error.retryable,
     }
 }
-fn from_git(error: GitFailure) -> DetailError {
+pub(crate) fn from_git(error: GitFailure) -> DetailError {
     match error {
         GitFailure::Cancelled => detail_error(ErrorCode::Cancelled, "Request was cancelled", false),
         GitFailure::Timeout => detail_error(ErrorCode::Timeout, "Git operation timed out", true),
@@ -1883,7 +1956,7 @@ fn from_git(error: GitFailure) -> DetailError {
         GitFailure::CommandFailed(message) => detail_error(ErrorCode::GitError, &message, false),
     }
 }
-fn git_output_error(stderr: &[u8]) -> DetailError {
+pub(crate) fn git_output_error(stderr: &[u8]) -> DetailError {
     let message = String::from_utf8_lossy(stderr)
         .chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -1899,7 +1972,7 @@ fn git_output_error(stderr: &[u8]) -> DetailError {
         detail_error(ErrorCode::GitError, &message, false)
     }
 }
-fn detail_error(code: ErrorCode, message: &str, retryable: bool) -> DetailError {
+pub(crate) fn detail_error(code: ErrorCode, message: &str, retryable: bool) -> DetailError {
     DetailError {
         code,
         message: message.to_owned(),
@@ -2061,6 +2134,7 @@ mod tests {
             &file,
             Some(&old_blob),
             Some(&new_blob),
+            false,
         )
         .unwrap();
         let output = run_stream(&git, &path, args);
@@ -2091,7 +2165,7 @@ mod tests {
             None,
             Some(blob.clone()),
         );
-        let args = file_diff_args(&root, None, &file, None, Some(&blob)).unwrap();
+        let args = file_diff_args(&root, None, &file, None, Some(&blob), false).unwrap();
         let output = run_stream(&git, &path, args);
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("first line"));
@@ -2107,8 +2181,15 @@ mod tests {
             Some(blob.clone()),
             None,
         );
-        let args =
-            file_diff_args(&deleted_commit, Some(&parent), &deleted, Some(&blob), None).unwrap();
+        let args = file_diff_args(
+            &deleted_commit,
+            Some(&parent),
+            &deleted,
+            Some(&blob),
+            None,
+            false,
+        )
+        .unwrap();
         let output = run_stream(&git, &path, args);
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("-first line"));
