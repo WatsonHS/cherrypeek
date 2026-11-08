@@ -161,6 +161,7 @@ export class RepositorySessionController {
 
     const operation = ++this.operation;
     ++this.pageIntent;
+    this.abortSupersededForTransition("仓库打开请求已被更新请求取代", true);
     await this.cancelPassiveRequestsForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "仓库打开请求已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
@@ -376,6 +377,7 @@ export class RepositorySessionController {
     if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能刷新", true);
     const operation = ++this.operation;
     ++this.pageIntent;
+    this.abortSupersededForTransition("刷新已取代进行中的读取", false);
     await this.cancelPassiveRequestsForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "刷新已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
@@ -447,6 +449,7 @@ export class RepositorySessionController {
     }
     const operation = ++this.operation;
     ++this.pageIntent;
+    this.abortSupersededForTransition("范围切换已取代进行中的读取", false);
     await this.cancelPassiveRequestsForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("CANCELLED", "范围切换已被更新操作取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
@@ -955,6 +958,26 @@ export class RepositorySessionController {
     }
   }
 
+  /**
+   * Tells the foreground requests a transition replaces to stop at once. The transition still
+   * drains them, after passive reads, before sending its own request; this only keeps a replaced
+   * open, refresh, page read, search or commit detail from running on while passive reads drain.
+   */
+  private abortSupersededForTransition(reason: string, includingOpen: boolean): void {
+    if (includingOpen) this.activeOpen?.abort.abort(new Error(reason));
+    this.activeRefresh?.abort.abort(new Error(reason));
+    this.activeHistoryRead?.abort.abort(new Error(reason));
+    // Like cancelSearch / cancelCommitDetails: a result that still arrives is stale.
+    if (this.activeSearchRequest) {
+      ++this.searchIntent;
+      this.activeSearchRequest.abort.abort(new Error(reason));
+    }
+    if (this.activeCommitDetailRequest) {
+      ++this.commitDetailsIntent;
+      this.activeCommitDetailRequest.abort.abort(new Error(reason));
+    }
+  }
+
   private async cancelPassiveRequestsForTransition(): Promise<void> {
     await Promise.all([
       this.cancelActivityStats(),
@@ -1207,6 +1230,7 @@ export class RepositorySessionController {
   async close(): Promise<{ closed: true }> {
     const operation = ++this.operation;
     ++this.pageIntent;
+    this.abortSupersededForTransition("仓库会话正在关闭", true);
     await this.cancelPassiveRequestsForTransition();
     if (operation !== this.operation) throw new ProtocolClientError("STALE_CONTEXT", "仓库会话已被更新请求取代", true);
     if (this.activeSearchRequest) await this.cancelSearch();
