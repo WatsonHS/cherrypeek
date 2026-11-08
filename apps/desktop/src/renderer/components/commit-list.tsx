@@ -345,7 +345,7 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
     && preview.opening === null && !preview.pageLoading && !preview.refreshing && !preview.scopeSwitching
     && !preview.pageError;
 
-  return <nav aria-label="提交列表" className="relative flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col overflow-hidden border-r border-line">
+  return <nav aria-label="提交列表" className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     {preview.error && preview.repository ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>

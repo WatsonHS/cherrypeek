@@ -99,8 +99,7 @@ try {
     .waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await mergePage.getByTestId("merge-commit-row").count(), 1, "the second octopus parent has an independent group");
 
-  const includeButton = page.getByTestId("branches-containing-button");
-  await includeButton.click();
+  assert.equal(await page.getByTestId("branches-containing-button").count(), 0);
   const containing = page.getByTestId("branches-containing-result");
   await containing.waitFor({ state: "visible", timeout: 20_000 });
   await containing.getByText("main", { exact: true }).waitFor({ state: "visible" });

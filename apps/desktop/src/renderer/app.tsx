@@ -10,6 +10,7 @@ import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol
 import { CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
 import { SearchResultList } from "./components/search-result-list.js";
+import { HistorySplitView } from "./components/history-split-view.js";
 import { OpenScreen } from "./components/open-screen.js";
 import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
@@ -204,6 +205,7 @@ export function App(): React.JSX.Element {
   const cancelMergeStatus = React.useCallback(() => store.cancelRefMergeStatus(), [store]);
   const loadSearchIdentities = React.useCallback((field: SearchTimeField, text: string) => { void searchStore.loadIdentities(field, text); }, [searchStore]);
   const loadSearchPaths = React.useCallback((text: string) => { void searchStore.loadPaths(text); }, [searchStore]);
+  const loadContainingBranches = React.useCallback(() => { void detailStore.loadContaining(); }, [detailStore]);
   const currentSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
   const displayedQuery = historyLocation ? DEFAULT_SEARCH_QUERY : searchView.query;
   const displayedQueryRef = React.useRef(displayedQuery);
@@ -819,8 +821,7 @@ export function App(): React.JSX.Element {
             {locationReturn?.partial ? `返回已发现 ${locationReturn.matchedCount} 个结果` : `返回 ${locationReturn?.matchedCount ?? 0} 个结果`}
           </Button>
         </div> : null}
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {searchView.active
+        <HistorySplitView sidebar={searchView.active
             ? <SearchResultList view={searchView} onSelect={selectDisplayedCommit} onAnchor={setSearchAnchor}
               onNext={loadSearchNext} onPrevious={loadSearchPrevious} onRetry={retrySearch} />
             : <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit}
@@ -834,12 +835,12 @@ export function App(): React.JSX.Element {
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
-            onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />}
+            onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />}>
           <CommitDetail preview={view} detail={detailView} onRetryDetails={() => detailStore.retryDetails()}
             onRetryFiles={() => detailStore.retryFiles()} onLoadFiles={(parentIndex, offset) => detailStore.loadFiles(parentIndex, offset)}
             onRetryMerge={() => detailStore.retryMerge()} onLoadMerge={(parentIndex, offset) => detailStore.loadMerge(parentIndex, offset)}
             onToggleDiff={(file, parentIndex) => { void detailStore.toggleDiff(file, parentIndex); }}
-            onLoadContaining={() => detailStore.loadContaining()} onRetryContaining={() => detailStore.retryContaining()}
+            onLoadContaining={loadContainingBranches} onRetryContaining={() => detailStore.retryContaining()}
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
             selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
@@ -863,7 +864,7 @@ export function App(): React.JSX.Element {
                 if (oid) selectIfCurrent(oid, intent);
               }
             }} />
-        </div>
+        </HistorySplitView>
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} onOpenHandoff={() => openHandoff(null)} />}
     <StatusBar status={status} preview={statusView}

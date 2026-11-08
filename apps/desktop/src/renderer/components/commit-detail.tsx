@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, ChevronDown, ChevronUp, Copy } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Copy, LoaderCircle } from "lucide-react";
 import type { BranchesContainingResult, ChangedFilesPage, CommitDetails, CommitIdentity, CommitSummary, GitPath, MergeCommitsPage, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
@@ -50,6 +50,14 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   const byOid = React.useMemo(() => new Map(commits.map(item => [item.oid, item])), [commits]);
   const repository = preview.repository;
   const otherWorktrees = !oldSelection && activeDetails ? activeDetails.worktrees.filter(worktree => !worktree.isCurrent && worktree.headOid === commit?.oid) : [];
+  const canAutoLoadContaining = Boolean(commit && repository && activeDetails && detail.details.state === "ready" && selectedTab === "overview" &&
+    detail.files.state !== "loading" && detail.merge.state !== "loading" && detail.diff.state !== "loading" && detail.containing.state === "idle");
+
+  React.useEffect(() => {
+    if (!canAutoLoadContaining) return;
+    const timer = window.setTimeout(onLoadContaining, 150);
+    return () => window.clearTimeout(timer);
+  }, [canAutoLoadContaining, detail.sessionKey, detail.oid, selectedTab, onLoadContaining]);
 
   if (!commit || !repository) {
     return <section aria-label="提交详情" className="flex min-w-0 flex-1 items-center justify-center bg-panel">
@@ -121,7 +129,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
             <Section title="位置与引用">
               {shownDetails ? <p className="m-0 text-xs text-fg3">引用与 worktree 按 {new Date(shownDetails.observedAtUnixMs).toLocaleString()} 的快照记录。</p>
                 : <p className="m-0 text-xs text-fg3">读取当前范围详情后显示引用与 worktree 快照。</p>}
-              <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] gap-x-3.5 gap-y-2.5 text-[13px]">
+              <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-x-3.5 gap-y-2.5 text-[13px]">
                 {shownDetails ? <><dt className="text-fg3">引用</dt><dd className="m-0 flex min-w-0 flex-wrap gap-1.5">
                   {shownDetails.refs.length ? <RefTags refs={shownDetails.refs} headReference={oldDetailContext ? null : repository.headReference} size="default" limit={12} /> : <span className="text-fg2">没有引用直接指向它</span>}
                   {shownDetails.refsTruncated ? <span className="text-xs text-fg3">引用列表已截断</span> : null}
@@ -135,12 +143,12 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
                   {shownDetails.worktrees.length ? shownDetails.worktrees.map(worktree => <span key={worktree.id} title={worktree.path}>{repositoryName(worktree.path)}{worktree.isDetached ? " · detached HEAD" : ""}{worktree.available ? "" : " · 不可用"}</span>) : "无工作树记录"}
                   {shownDetails.worktreesTruncated ? <span className="text-xs text-fg3">工作树列表已截断</span> : null}
                 </dd></> : null}
-                <dt className="text-fg3">包含它的分支</dt><dd className="m-0 flex flex-col items-start gap-1.5">
+                <dt className="text-fg3">包含它的分支</dt><dd className="m-0 min-w-0">
                   {detail.containing.value ? <ContainingBranches result={detail.containing.value} /> : null}
                   {detail.containing.error ? <ErrorLine message={detail.containing.error.message} onRetry={onRetryContaining} label="重试计算" /> : null}
-                  <Button data-testid="branches-containing-button" variant="outline" size="sm" disabled={!activeDetails || detail.containing.state === "loading"} onClick={onLoadContaining}>
-                    {detail.containing.state === "loading" ? "正在计算…" : detail.containing.value ? "重新计算" : "按需计算"}
-                  </Button>
+                  {detail.containing.state === "loading" ? <span role="status" className="inline-flex items-center gap-1.5 text-xs text-fg3">
+                    <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取包含分支…
+                  </span> : null}
                 </dd>
               </dl>
             </Section>
@@ -405,8 +413,9 @@ function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge, 
 }
 
 function ContainingBranches({ result }: { result: BranchesContainingResult }): React.JSX.Element {
-  return <div data-testid="branches-containing-result" className="flex flex-col gap-1 text-xs text-fg2">
-    {result.branches.length ? result.branches.map(ref => <span key={`${ref.kind}:${ref.name}`}>{shortRefName(ref.name)}</span>)
+  return <div data-testid="branches-containing-result" className="flex min-w-0 flex-wrap items-baseline gap-1.5 text-xs text-fg2">
+    {result.branches.length ? result.branches.map(ref => <Badge key={`${ref.kind}:${ref.name}`} title={ref.name}
+      className="h-auto min-h-[22px] max-w-full whitespace-normal break-all py-1 leading-tight">{shortRefName(ref.name)}</Badge>)
       : <span>{result.complete ? "没有已确认包含它的分支" : "当前没有已确认的分支；结果不完整"}</span>}
     {!result.complete || result.refsTruncated || result.boundaryLimited ? <span className="text-fg3">结果不完整{result.boundaryLimited ? " · 浅边界限制" : ""}{result.refsTruncated ? " · 引用列表已截断" : ""}</span> : null}
     <span className="text-fg3">引用快照 {new Date(result.observedAtUnixMs).toLocaleString()}</span>

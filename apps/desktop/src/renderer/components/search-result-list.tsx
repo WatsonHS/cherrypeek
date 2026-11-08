@@ -68,7 +68,7 @@ export function SearchResultList({ view, onSelect, onAnchor, onNext, onPrevious,
   const partialNote = !window?.coverage.complete
     ? state === "paused" ? "部分结果 · 索引已暂停" : state === "cancelled" ? "部分结果 · 索引已取消" : state === "failed" || state === "unavailable" ? "部分结果 · 索引当前不可用" : "部分结果 · 索引仍在构建"
     : null;
-  return <nav aria-label="搜索结果" data-testid="search-results" className="flex min-h-0 min-w-[320px] flex-[0_1_400px] flex-col overflow-hidden border-r border-line">
+  return <nav aria-label="搜索结果" data-testid="search-results" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     <div className="flex min-h-[46px] shrink-0 flex-col justify-center gap-0.5 px-3 text-xs text-fg3">
       <span data-testid="search-status" aria-live="polite">{status}</span>
       {partialNote ? <span>{partialNote}</span> : null}
