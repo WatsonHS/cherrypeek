@@ -296,6 +296,8 @@ pub enum Capability {
     ActivityStats,
     RepositoryObservation,
     HandoffFacts,
+    /// P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.
+    WorkspaceStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -404,6 +406,9 @@ pub enum RequestParams {
     RecordRepositoryView(EmptyParams),
     CloseRepository(EmptyParams),
     ListRecentRepositories(EmptyParams),
+    ReadWorkspaceStatus(ReadWorkspaceStatusParams),
+    ReadWorkspaceDiff(ReadWorkspaceDiffParams),
+    ReadWorkspaceFile(ReadWorkspaceFileParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1123,6 +1128,188 @@ pub struct FileDiff {
     pub new_size: Option<u64>,
 }
 
+/// P4-09: the working tree of the window's own directory, independent of the browsing scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadWorkspaceStatusParams {
+    #[schemars(range(min = 1, max = 2000))]
+    pub max_entries: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceSide {
+    /// HEAD → index.
+    Staged,
+    /// Index → working tree.
+    Unstaged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadWorkspaceDiffParams {
+    pub side: WorkspaceSide,
+    #[schemars(length(min = 2, max = 32768))]
+    pub path_hex: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullablePathHexSchema")]
+    pub old_path_hex: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadWorkspaceFileParams {
+    #[schemars(length(min = 2, max = 32768))]
+    pub path_hex: String,
+    #[schemars(range(min = 1, max = 5000))]
+    pub max_lines: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceOperation {
+    None,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceConflict {
+    BothModified,
+    BothAdded,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+    DeletedByUs,
+    DeletedByThem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceChange {
+    pub status: ChangedFileStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub additions: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub deletions: Option<u64>,
+    pub binary: bool,
+    pub gitlink: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceEntry {
+    pub path: GitPath,
+    /// Source path when Git reports a rename or copy.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub original_path: Option<GitPath>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorkspaceChange>")]
+    pub staged: Option<WorkspaceChange>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorkspaceChange>")]
+    pub unstaged: Option<WorkspaceChange>,
+    pub untracked: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub untracked_size: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableSchema<WorkspaceConflict>")]
+    pub conflict: Option<WorkspaceConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceStatus {
+    pub observed_at_unix_ms: u64,
+    /// HEAD when the status was read; it may differ from the HEAD the session opened with.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub head_reference: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub head_oid: Option<String>,
+    pub operation: WorkspaceOperation,
+    #[schemars(length(max = 2000))]
+    pub entries: Vec<WorkspaceEntry>,
+    /// False when more paths changed than `max_entries`; `total_paths` is then a lower bound.
+    pub complete: bool,
+    pub total_paths: u32,
+    pub conflict_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceDiff {
+    pub side: WorkspaceSide,
+    pub path: GitPath,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub old_path: Option<GitPath>,
+    pub kind: FileDiffKind,
+    #[schemars(length(max = 131072))]
+    pub patch: String,
+    pub truncated: bool,
+    pub text_lossy: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub old_size: Option<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub new_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceFileKind {
+    Text,
+    Binary,
+    TooLarge,
+    Symlink,
+    Missing,
+    NotFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceFile {
+    pub path: GitPath,
+    pub kind: WorkspaceFileKind,
+    #[schemars(length(max = 262144))]
+    pub text: String,
+    pub lines: u32,
+    pub truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableNonnegativeIntegerSchema")]
+    pub size: Option<u64>,
+    pub text_lossy: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableGitPathSchema")]
+    pub symlink_target: Option<GitPath>,
+}
+
 struct NullableU8Schema;
 
 impl JsonSchema for NullableU8Schema {
@@ -1352,6 +1539,12 @@ pub enum ResponseData {
     BranchesContaining { result: BranchesContainingResult },
     #[serde(rename = "fileDiff")]
     FileDiff { diff: FileDiff },
+    #[serde(rename = "workspaceStatus")]
+    WorkspaceStatus { status: WorkspaceStatus },
+    #[serde(rename = "workspaceDiff")]
+    WorkspaceDiff { diff: WorkspaceDiff },
+    #[serde(rename = "workspaceFile")]
+    WorkspaceFile { file: WorkspaceFile },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]

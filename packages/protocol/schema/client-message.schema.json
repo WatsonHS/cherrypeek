@@ -357,6 +357,73 @@
       ],
       "type": "object"
     },
+    "ReadWorkspaceDiffParams": {
+      "additionalProperties": false,
+      "properties": {
+        "oldPathHex": {
+          "anyOf": [
+            {
+              "maxLength": 32768,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pathHex": {
+          "maxLength": 32768,
+          "minLength": 2,
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/definitions/WorkspaceSide"
+        }
+      },
+      "required": [
+        "side",
+        "pathHex",
+        "oldPathHex"
+      ],
+      "type": "object"
+    },
+    "ReadWorkspaceFileParams": {
+      "additionalProperties": false,
+      "properties": {
+        "maxLines": {
+          "format": "uint16",
+          "maximum": 5000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pathHex": {
+          "maxLength": 32768,
+          "minLength": 2,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pathHex",
+        "maxLines"
+      ],
+      "type": "object"
+    },
+    "ReadWorkspaceStatusParams": {
+      "additionalProperties": false,
+      "description": "P4-09: the working tree of the window's own directory, independent of the browsing scope.",
+      "properties": {
+        "maxEntries": {
+          "format": "uint16",
+          "maximum": 2000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxEntries"
+      ],
+      "type": "object"
+    },
     "RefMergeStatusParams": {
       "additionalProperties": false,
       "properties": {
@@ -516,6 +583,15 @@
         },
         {
           "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/ReadWorkspaceStatusParams"
+        },
+        {
+          "$ref": "#/definitions/ReadWorkspaceDiffParams"
+        },
+        {
+          "$ref": "#/definitions/ReadWorkspaceFileParams"
         }
       ]
     },
@@ -729,6 +805,20 @@
         "pageSize"
       ],
       "type": "object"
+    },
+    "WorkspaceSide": {
+      "oneOf": [
+        {
+          "const": "staged",
+          "description": "HEAD → index.",
+          "type": "string"
+        },
+        {
+          "const": "unstaged",
+          "description": "Index → working tree.",
+          "type": "string"
+        }
+      ]
     }
   },
   "oneOf": [

@@ -196,7 +196,7 @@ export class ProtocolTransport {
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "locateHistoryDate" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
       method !== "getActivityStats" && method !== "observeRepository" && method !== "diffRefSnapshots" && method !== "getHandoffFacts" &&
-      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) {
+      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "selectRepositoryScope"].includes(method)) {
@@ -619,10 +619,26 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.oldPathHex === null || typeof params.oldPathHex === "string" && params.oldPathHex.length > 0 && params.oldPathHex.length <= 32 * 1024 && params.oldPathHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(params.oldPathHex)) &&
     (params.newPathHex === null || typeof params.newPathHex === "string" && params.newPathHex.length > 0 && params.newPathHex.length <= 32 * 1024 && params.newPathHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(params.newPathHex)) &&
     (params.oldPathHex !== null || params.newPathHex !== null)) return true;
+  if (method === "readWorkspaceStatus" && isRecord(params) && hasExactKeys(params, ["maxEntries"]) &&
+    Number.isInteger(params.maxEntries) && (params.maxEntries as number) >= 1 && (params.maxEntries as number) <= 2000) return true;
+  if (method === "readWorkspaceDiff" && isRecord(params) && hasExactKeys(params, ["oldPathHex", "pathHex", "side"]) &&
+    (params.side === "staged" || params.side === "unstaged") && validPathHex(params.pathHex) &&
+    (params.oldPathHex === null || validPathHex(params.oldPathHex))) return true;
+  if (method === "readWorkspaceFile" && isRecord(params) && hasExactKeys(params, ["maxLines", "pathHex"]) && validPathHex(params.pathHex) &&
+    Number.isInteger(params.maxLines) && (params.maxLines as number) >= 1 && (params.maxLines as number) <= 5000) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   return false;
+}
+
+/** P4-09 workspace reads: session methods that can be cancelled and drained. */
+const WORKSPACE_METHODS = ["readWorkspaceStatus", "readWorkspaceDiff", "readWorkspaceFile"];
+
+/** A repository-relative path as hex of its raw bytes: non-empty, even length, no NUL byte. */
+function validPathHex(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0 && value.length <= 32 * 1024 && value.length % 2 === 0 &&
+    /^[0-9a-fA-F]+$/.test(value) && !Buffer.from(value, "hex").includes(0);
 }
 
 function isSearchQuery(value: unknown): boolean {
@@ -660,7 +676,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff"].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS].includes(method)) return "session";
   return undefined;
 }
 

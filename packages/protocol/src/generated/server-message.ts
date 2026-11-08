@@ -26,19 +26,22 @@ export type ServerMessage =
       type: "error";
     };
 export type Capability =
-  | "getRuntimeInfo"
-  | "readRepositoryPreview"
-  | "repositorySessions"
-  | "historyPagination"
-  | "historyNewSinceLastSeen"
-  | "repositoryScopes"
-  | "metadataIndex"
-  | "metadataSearch"
-  | "historyGraph"
-  | "commitDetails"
-  | "activityStats"
-  | "repositoryObservation"
-  | "handoffFacts";
+  | (
+      | "getRuntimeInfo"
+      | "readRepositoryPreview"
+      | "repositorySessions"
+      | "historyPagination"
+      | "historyNewSinceLastSeen"
+      | "repositoryScopes"
+      | "metadataIndex"
+      | "metadataSearch"
+      | "historyGraph"
+      | "commitDetails"
+      | "activityStats"
+      | "repositoryObservation"
+      | "handoffFacts"
+    )
+  | "workspaceStatus";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -96,6 +99,18 @@ export type ResponseData =
   | {
       diff: FileDiff;
       section: "fileDiff";
+    }
+  | {
+      section: "workspaceStatus";
+      status: WorkspaceStatus;
+    }
+  | {
+      diff: WorkspaceDiff;
+      section: "workspaceDiff";
+    }
+  | {
+      file: WorkspaceFile;
+      section: "workspaceFile";
     }
   | {
       git: GitInfo;
@@ -199,6 +214,11 @@ export type RepositoryScope =
 export type CommitUpdateReason = "scopeUnavailable" | "noLongerReachable";
 export type CommitUpdateState = "unaffected" | "affected" | "unknown";
 export type FileDiffKind = "text" | "binary" | "gitlink" | "lfs" | "tooLarge";
+export type WorkspaceConflict =
+  "bothModified" | "bothAdded" | "bothDeleted" | "addedByUs" | "addedByThem" | "deletedByUs" | "deletedByThem";
+export type WorkspaceOperation = "none" | "merge" | "rebase" | "cherryPick" | "revert" | "bisect";
+export type WorkspaceSide = "staged" | "unstaged";
+export type WorkspaceFileKind = "text" | "binary" | "tooLarge" | "symlink" | "missing" | "notFile";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
@@ -960,6 +980,65 @@ export interface FileDiff {
   parentIndex: number | null;
   parentOid: string | null;
   patch: string;
+  textLossy: boolean;
+  truncated: boolean;
+}
+export interface WorkspaceStatus {
+  /**
+   * False when more paths changed than `max_entries`; `total_paths` is then a lower bound.
+   */
+  complete: boolean;
+  conflictCount: number;
+  /**
+   * @maxItems 2000
+   */
+  entries: WorkspaceEntry[];
+  headOid: string | null;
+  /**
+   * HEAD when the status was read; it may differ from the HEAD the session opened with.
+   */
+  headReference: string | null;
+  observedAtUnixMs: number;
+  operation: WorkspaceOperation;
+  totalPaths: number;
+}
+export interface WorkspaceEntry {
+  conflict: WorkspaceConflict | null;
+  /**
+   * Source path when Git reports a rename or copy.
+   */
+  originalPath: GitPath | null;
+  path: GitPath;
+  staged: WorkspaceChange | null;
+  unstaged: WorkspaceChange | null;
+  untracked: boolean;
+  untrackedSize: number | null;
+}
+export interface WorkspaceChange {
+  additions: number | null;
+  binary: boolean;
+  deletions: number | null;
+  gitlink: boolean;
+  status: ChangedFileStatus;
+}
+export interface WorkspaceDiff {
+  kind: FileDiffKind;
+  newSize: number | null;
+  oldPath: GitPath | null;
+  oldSize: number | null;
+  patch: string;
+  path: GitPath;
+  side: WorkspaceSide;
+  textLossy: boolean;
+  truncated: boolean;
+}
+export interface WorkspaceFile {
+  kind: WorkspaceFileKind;
+  lines: number;
+  path: GitPath;
+  size: number | null;
+  symlinkTarget: GitPath | null;
+  text: string;
   textLossy: boolean;
   truncated: boolean;
 }

@@ -1,19 +1,22 @@
 /* Generated from Rust protocol types. Do not edit by hand. */
 
 export type Capability =
-  | "getRuntimeInfo"
-  | "readRepositoryPreview"
-  | "repositorySessions"
-  | "historyPagination"
-  | "historyNewSinceLastSeen"
-  | "repositoryScopes"
-  | "metadataIndex"
-  | "metadataSearch"
-  | "historyGraph"
-  | "commitDetails"
-  | "activityStats"
-  | "repositoryObservation"
-  | "handoffFacts";
+  | (
+      | "getRuntimeInfo"
+      | "readRepositoryPreview"
+      | "repositorySessions"
+      | "historyPagination"
+      | "historyNewSinceLastSeen"
+      | "repositoryScopes"
+      | "metadataIndex"
+      | "metadataSearch"
+      | "historyGraph"
+      | "commitDetails"
+      | "activityStats"
+      | "repositoryObservation"
+      | "handoffFacts"
+    )
+  | "workspaceStatus";
 
 export interface CoreReady {
   capabilities: Capability[];

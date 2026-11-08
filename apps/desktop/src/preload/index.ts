@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { CommitScopeApi, CoreStatus } from "../../../../packages/protocol/src/core-status.js";
-import type { RepositoryObservationEvent } from "../../../../packages/protocol/src/repository-session.js";
+import type { RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
 
 const api: CommitScopeApi = {
   getCoreStatus: () => ipcRenderer.invoke("commitscope:core:get-status") as Promise<CoreStatus>,
@@ -53,6 +53,15 @@ const api: CommitScopeApi = {
   branchesContaining: params => ipcRenderer.invoke("commitscope:details:branches", params),
   readDiff: params => ipcRenderer.invoke("commitscope:details:diff", params),
   cancelCommitDetails: () => ipcRenderer.invoke("commitscope:details:cancel"),
+  readWorkspaceStatus: params => ipcRenderer.invoke("commitscope:workspace:status", params),
+  readWorkspaceDiff: params => ipcRenderer.invoke("commitscope:workspace:diff", params),
+  readWorkspaceFile: params => ipcRenderer.invoke("commitscope:workspace:file", params),
+  cancelWorkspace: () => ipcRenderer.invoke("commitscope:workspace:cancel"),
+  onWorkspaceChanged(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, change: WorkspaceChangeEvent) => listener(change);
+    ipcRenderer.on("commitscope:workspace:changed", wrapped);
+    return () => ipcRenderer.removeListener("commitscope:workspace:changed", wrapped);
+  },
 };
 
 contextBridge.exposeInMainWorld("commitScope", api);

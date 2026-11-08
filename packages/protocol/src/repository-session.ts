@@ -22,6 +22,9 @@ import type {
   MergeCommitsPage,
   BranchesContainingResult,
   FileDiff,
+  WorkspaceDiff,
+  WorkspaceFile,
+  WorkspaceStatus,
   RepositoryScope,
   RepositoryNavigation,
   RefMergeStatusResult,
@@ -31,7 +34,8 @@ import type {
 import type { MetadataIndexAction } from "./generated/client-message.js";
 import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField,
   ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetActivityStatsParams, GetHandoffFactsParams,
-  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
+  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
+  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
@@ -44,6 +48,7 @@ export type { CommitDetails, ChangedFilesPage, ChangedFile, ChangeOverview, Merg
 export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTimeField, SearchPathFilter, SearchPathKind, ListSearchPathsParams } from "./generated/client-message.js";
 export type { GetActivityStatsParams, GetHandoffFactsParams } from "./generated/client-message.js";
 export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
+export type { ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams, WorkspaceSide } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -99,6 +104,10 @@ export interface RefreshedRepository {
   page: HistoryPage;
 }
 
+export interface WorkspaceChangeEvent {
+  repoId: string;
+}
+
 export interface RepositoryObservationEvent {
   repoId: string;
   browsingGeneration: string;
@@ -141,4 +150,11 @@ export interface RepositorySessionApi {
   branchesContaining(params: BranchesContainingParams): Promise<RepositorySessionResult<BranchesContainingResult>>;
   readDiff(params: ReadDiffParams): Promise<RepositorySessionResult<FileDiff>>;
   cancelCommitDetails(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  /** P4-09: the window's working tree. Fails with UNKNOWN_METHOD until the core declares `workspaceStatus`. */
+  readWorkspaceStatus(params: ReadWorkspaceStatusParams): Promise<RepositorySessionResult<WorkspaceStatus>>;
+  readWorkspaceDiff(params: ReadWorkspaceDiffParams): Promise<RepositorySessionResult<WorkspaceDiff>>;
+  readWorkspaceFile(params: ReadWorkspaceFileParams): Promise<RepositorySessionResult<WorkspaceFile>>;
+  cancelWorkspace(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  /** A hint that files in the working tree changed; the status must be re-read to know what changed. */
+  onWorkspaceChanged(listener: (change: WorkspaceChangeEvent) => void): () => void;
 }

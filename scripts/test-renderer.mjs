@@ -24,6 +24,7 @@ try {
       "diff-model": resolve(root, "apps/desktop/src/renderer/lib/diff-model.ts"),
       "diff-display": resolve(root, "apps/desktop/src/renderer/lib/diff-display.ts"),
       "workspace-indicator": resolve(root, "apps/desktop/src/renderer/lib/workspace-indicator.ts"),
+      "workspace-store": resolve(root, "apps/desktop/src/renderer/lib/workspace-store.ts"),
     },
     outdir: buildDir,
     bundle: true,

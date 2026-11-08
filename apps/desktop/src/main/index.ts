@@ -57,6 +57,11 @@ const IPC_HISTORY_LOCATE = "commitscope:history:locate-commit";
 const IPC_HISTORY_LOCATE_DATE = "commitscope:history:locate-date";
 const IPC_HISTORY_CANCEL = "commitscope:history:cancel-read";
 const IPC_HISTORY_REFRESH = "commitscope:history:refresh";
+const IPC_WORKSPACE_STATUS = "commitscope:workspace:status";
+const IPC_WORKSPACE_DIFF = "commitscope:workspace:diff";
+const IPC_WORKSPACE_FILE = "commitscope:workspace:file";
+const IPC_WORKSPACE_CANCEL = "commitscope:workspace:cancel";
+const IPC_WORKSPACE_CHANGED = "commitscope:workspace:changed";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
@@ -67,6 +72,7 @@ let quitting = false;
 let repositoryWatchers: FSWatcher[] = [];
 let observationTimer: ReturnType<typeof setTimeout> | undefined;
 let observationFallback: ReturnType<typeof setInterval> | undefined;
+let workspaceChangeTimer: ReturnType<typeof setTimeout> | undefined;
 
 function isTrustedMainFrame(event: IpcMainInvokeEvent): boolean {
   return Boolean(window && !window.isDestroyed() && event.sender === window.webContents &&
@@ -278,6 +284,22 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.cancelHandoffFacts());
   });
+  ipcMain.handle(IPC_WORKSPACE_STATUS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readWorkspaceStatus(params));
+  });
+  ipcMain.handle(IPC_WORKSPACE_DIFF, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readWorkspaceDiff(params));
+  });
+  ipcMain.handle(IPC_WORKSPACE_FILE, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.readWorkspaceFile(params));
+  });
+  ipcMain.handle(IPC_WORKSPACE_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelWorkspace());
+  });
 }
 
 function broadcastRepositoryObservation(event: RepositoryObservationEvent): void {
@@ -295,10 +317,52 @@ function configureRepositoryObservation(sessionInfo: RepositorySessionInfo): voi
       repositoryWatchers.push(watch(path, () => scheduleRepositoryObservation()));
     } catch { /* Git metadata may be absent or inaccessible; focus and visible polling remain. */ }
   }
+  configureWorkspaceWatch(sessionInfo);
   observationFallback = setInterval(() => {
     if (window && !window.isDestroyed() && window.isVisible()) void observeAndBroadcast();
   }, 5_000);
   scheduleRepositoryObservation();
+}
+
+/** Git metadata that changes what `git status` reports: staging, HEAD moves and in-progress operations. */
+const WORKSPACE_GIT_FILES = new Set(["index", "HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_LOG"]);
+
+/**
+ * Watches the window's working tree as a hint that its status may have changed (P4-09).
+ * The hint only triggers a re-read in the renderer; it never decides whether the tree is clean.
+ */
+function configureWorkspaceWatch(sessionInfo: RepositorySessionInfo): void {
+  const worktree = sessionInfo.repository.worktreePath;
+  if (sessionInfo.repository.isBare || !worktree) return;
+  const notify = () => {
+    if (workspaceChangeTimer) clearTimeout(workspaceChangeTimer);
+    workspaceChangeTimer = setTimeout(() => {
+      workspaceChangeTimer = undefined;
+      if (window && !window.isDestroyed()) window.webContents.send(IPC_WORKSPACE_CHANGED, { repoId: sessionInfo.repoId });
+    }, 800);
+  };
+  const gitDirName = ".git";
+  try {
+    repositoryWatchers.push(watch(worktree, { recursive: true }, (_event, filename) => {
+      const name = typeof filename === "string" ? filename.replaceAll("\\", "/") : null;
+      if (name === null) { notify(); return; }
+      if (name === gitDirName || name.startsWith(`${gitDirName}/`)) {
+        const inner = name.slice(gitDirName.length + 1);
+        if (WORKSPACE_GIT_FILES.has(inner) || inner.startsWith("rebase-merge") || inner.startsWith("rebase-apply")) notify();
+        return;
+      }
+      notify();
+    }));
+  } catch { /* Watching is a hint; focus and manual refresh still re-read the status. */ }
+  // A linked worktree keeps its index and HEAD outside the directory.
+  const worktreeGitDir = sessionInfo.repository.gitDir;
+  if (!resolve(worktreeGitDir).startsWith(resolve(worktree))) {
+    try {
+      repositoryWatchers.push(watch(worktreeGitDir, (_event, filename) => {
+        if (typeof filename !== "string" || WORKSPACE_GIT_FILES.has(filename) || filename.startsWith("rebase-")) notify();
+      }));
+    } catch { /* see above */ }
+  }
 }
 
 function collectDirectories(path: string, output: Set<string>): void {
@@ -334,6 +398,8 @@ function clearRepositoryObservation(): void {
   observationTimer = undefined;
   if (observationFallback) clearInterval(observationFallback);
   observationFallback = undefined;
+  if (workspaceChangeTimer) clearTimeout(workspaceChangeTimer);
+  workspaceChangeTimer = undefined;
 }
 
 async function sessionResult<T>(action: () => Promise<T>): Promise<RepositorySessionResult<T>> {

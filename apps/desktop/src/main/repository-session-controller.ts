@@ -6,6 +6,9 @@ import type {
   MergeCommitsPage,
   BranchesContainingResult,
   FileDiff,
+  WorkspaceDiff,
+  WorkspaceFile,
+  WorkspaceStatus,
   HistoryCommit,
   RefInfo,
   RepositoryInfo,
@@ -19,7 +22,8 @@ import type {
   HandoffFacts,
 } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
-  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "../../../../packages/protocol/src/generated/client-message.js";
+  GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
+  ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   HistoryDateLocation,
@@ -149,6 +153,9 @@ export class RepositorySessionController {
   private commitDetailsIntent = 0;
   private activeCommitDetailRequest?: ActiveCommitDetailRequest;
   private currentCommitDetails?: { session: RepositorySessionInfo; details: CommitDetails };
+  /** P4-09: the file list and the shown file's diff or content each have one channel; a new read replaces the old one. */
+  private readonly workspaceIntent: Record<WorkspaceChannel, number> = { status: 0, content: 0 };
+  private readonly activeWorkspace: Partial<Record<WorkspaceChannel, ActiveWorkspaceRequest>> = {};
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
@@ -793,6 +800,102 @@ export class RepositorySessionController {
     return this.runCommitDetailsRequest("diff", session, signal => this.readFileDiff(session, params, details, signal));
   }
 
+  async readWorkspaceStatus(input: unknown): Promise<WorkspaceStatus> {
+    const params = validateWorkspaceStatusParams(input);
+    const session = this.requireWorkspaceCapability();
+    return this.runWorkspaceRequest("status", session, signal => this.readWorkspaceSection(session, "readWorkspaceStatus", params, signal,
+      data => data.section === "workspaceStatus" ? data.status : undefined,
+      status => {
+        const shownConflicts = status.entries.filter(entry => entry.conflict !== null).length;
+        return status.entries.length <= params.maxEntries && status.totalPaths >= status.entries.length &&
+          (status.complete ? status.totalPaths === status.entries.length && status.conflictCount === shownConflicts : status.conflictCount >= shownConflicts);
+      }));
+  }
+
+  async readWorkspaceDiff(input: unknown): Promise<WorkspaceDiff> {
+    const params = validateWorkspaceDiffParams(input);
+    const session = this.requireWorkspaceCapability();
+    return this.runWorkspaceRequest("content", session, signal => this.readWorkspaceSection(session, "readWorkspaceDiff", params, signal,
+      data => data.section === "workspaceDiff" ? data.diff : undefined,
+      diff => diff.side === params.side && diff.path.rawHex.toLowerCase() === params.pathHex.toLowerCase()));
+  }
+
+  async readWorkspaceFile(input: unknown): Promise<WorkspaceFile> {
+    const params = validateWorkspaceFileParams(input);
+    const session = this.requireWorkspaceCapability();
+    return this.runWorkspaceRequest("content", session, signal => this.readWorkspaceSection(session, "readWorkspaceFile", params, signal,
+      data => data.section === "workspaceFile" ? data.file : undefined,
+      file => file.path.rawHex.toLowerCase() === params.pathHex.toLowerCase() && file.lines <= params.maxLines &&
+        (file.kind === "text" || file.text === "")));
+  }
+
+  async cancelWorkspace(): Promise<{ cancelled: boolean }> {
+    let cancelled = false;
+    for (const channel of ["status", "content"] as const) {
+      ++this.workspaceIntent[channel];
+      const active = this.activeWorkspace[channel];
+      if (!active) continue;
+      cancelled = true;
+      active.abort.abort(new Error("工作区读取已取消"));
+      await active.done.catch(() => undefined);
+      if (this.activeWorkspace[channel] === active) delete this.activeWorkspace[channel];
+    }
+    return { cancelled };
+  }
+
+  private requireWorkspaceCapability(): RepositorySessionInfo {
+    const session = this.requireCurrent();
+    this.requireCapability("workspaceStatus");
+    if (session.repository.isBare) throw new ProtocolClientError("INVALID_REQUEST", "bare 仓库没有工作区");
+    return session;
+  }
+
+  private async runWorkspaceRequest<T>(channel: WorkspaceChannel, session: RepositorySessionInfo, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库正在更新，暂不能读取工作区", true);
+    const intent = ++this.workspaceIntent[channel];
+    const previous = this.activeWorkspace[channel];
+    if (previous) {
+      previous.abort.abort(new Error("工作区读取已被新的读取取代"));
+      await previous.done.catch(() => undefined);
+    }
+    if (intent !== this.workspaceIntent[channel]) throw new ProtocolClientError("CANCELLED", "工作区读取已被新的读取取代", true);
+    this.ensureCurrent(session);
+    const abort = new AbortController();
+    const active: ActiveWorkspaceRequest = { abort, done: Promise.resolve(undefined) };
+    const done = read(abort.signal);
+    active.done = done;
+    this.activeWorkspace[channel] = active;
+    try {
+      const result = await done;
+      if (intent !== this.workspaceIntent[channel]) throw new ProtocolClientError("CANCELLED", "工作区读取已被新的读取取代", true);
+      this.ensureCurrent(session);
+      return result;
+    } finally {
+      if (this.activeWorkspace[channel] === active) delete this.activeWorkspace[channel];
+    }
+  }
+
+  /** One terminal chunk with the expected section; the schema validators in the transport have already checked its shape. */
+  private async readWorkspaceSection<T>(session: RepositorySessionInfo, method: string, params: object, signal: AbortSignal,
+    pick: (data: ServerResponseMessage["data"]) => T | undefined, consistent: (value: T) => boolean): Promise<T> {
+    let value: T | undefined;
+    const completion = await this.core.request(method, params, contextOf(session), {
+      timeoutMs: SESSION_TIMEOUT_MS,
+      signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        this.ensureCurrent(session);
+        const picked = pick(chunk.data);
+        if (value !== undefined || picked === undefined || !chunk.done) throw invalidSessionResponse("工作区响应无效");
+        value = picked;
+      },
+    });
+    this.ensureCurrent(session);
+    if (value === undefined || !completion.coverage.complete || completion.coverage.processed !== 1 || completion.nextCursor !== null ||
+      !consistent(value)) throw invalidSessionResponse("工作区响应不完整或不一致");
+    return value;
+  }
+
   async cancelCommitDetails(): Promise<{ cancelled: boolean }> {
     ++this.commitDetailsIntent;
     const active = this.activeCommitDetailRequest;
@@ -990,6 +1093,7 @@ export class RepositorySessionController {
 
   private async cancelPassiveRequestsForTransition(): Promise<void> {
     await Promise.all([
+      this.cancelWorkspace(),
       this.cancelActivityStats(),
       this.cancelRepositoryObservation(),
       this.cancelRefSnapshotDiff(),
@@ -1621,7 +1725,8 @@ export class RepositorySessionController {
         ? "核心不支持元数据索引，请更新核心版本" : capability === "metadataSearch"
           ? "核心不支持元数据搜索，请更新核心版本" : capability === "historyGraph"
             ? "核心不支持历史图布局，请更新核心版本" : capability === "commitDetails"
-              ? "核心不支持提交详情，请更新核心版本" : "核心不支持只读范围导航，请更新核心版本");
+              ? "核心不支持提交详情，请更新核心版本" : capability === "workspaceStatus"
+                ? "核心还不能读取工作区（P4-09 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -2167,6 +2272,41 @@ function maskHasLane(mask: number, lane: number): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type WorkspaceChannel = "status" | "content";
+
+interface ActiveWorkspaceRequest {
+  abort: AbortController;
+  done: Promise<unknown>;
+}
+
+function workspacePathHex(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 32 * 1024 && value.length % 2 === 0 && /^[0-9a-fA-F]+$/u.test(value) &&
+    !Buffer.from(value, "hex").includes(0);
+}
+
+function validateWorkspaceStatusParams(value: unknown): ReadWorkspaceStatusParams {
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !Number.isInteger(value.maxEntries) || (value.maxEntries as number) < 1 || (value.maxEntries as number) > 2000) {
+    throw new ProtocolClientError("INVALID_REQUEST", "工作区读取参数无效");
+  }
+  return { maxEntries: value.maxEntries as number };
+}
+
+function validateWorkspaceDiffParams(value: unknown): ReadWorkspaceDiffParams {
+  if (!isRecord(value) || Object.keys(value).length !== 3 || (value.side !== "staged" && value.side !== "unstaged") || !workspacePathHex(value.pathHex) ||
+    !(value.oldPathHex === null || workspacePathHex(value.oldPathHex))) {
+    throw new ProtocolClientError("INVALID_REQUEST", "工作区 diff 参数无效");
+  }
+  return { side: value.side, pathHex: value.pathHex, oldPathHex: value.oldPathHex };
+}
+
+function validateWorkspaceFileParams(value: unknown): ReadWorkspaceFileParams {
+  if (!isRecord(value) || Object.keys(value).length !== 2 || !workspacePathHex(value.pathHex) || !Number.isInteger(value.maxLines) ||
+    (value.maxLines as number) < 1 || (value.maxLines as number) > 5000) {
+    throw new ProtocolClientError("INVALID_REQUEST", "工作区文件参数无效");
+  }
+  return { pathHex: value.pathHex, maxLines: value.maxLines as number };
 }
 
 function invalidSessionResponse(message: string): ProtocolClientError {

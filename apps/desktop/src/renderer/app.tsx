@@ -21,7 +21,8 @@ import { PageSearchBox } from "./components/search-controls.js";
 import { WorkspacePage } from "./components/workspace-page.js";
 import { useDiffDisplayShortcuts } from "./components/diff-view.js";
 import { FilesPage } from "./components/files-page.js";
-import { workspaceBadge, workspaceBranchLabel, type WorkspaceIndicator } from "./lib/workspace-indicator.js";
+import { workspaceBadge, workspaceBranchLabel } from "./lib/workspace-indicator.js";
+import { WorkspaceStore, workspaceIndicatorFor } from "./lib/workspace-store.js";
 import { cn } from "./lib/utils.js";
 import { errorTitle } from "./lib/errors.js";
 import { repositoryName } from "./lib/format.js";
@@ -173,10 +174,12 @@ export function App(): React.JSX.Element {
   const store = React.useMemo(() => new RepositorySessionStore(window.commitScope), []);
   const searchStore = React.useMemo(() => new MetadataSearchStore(window.commitScope), []);
   const detailStore = React.useMemo(() => new CommitDetailStore(window.commitScope), []);
+  const workspaceStore = React.useMemo(() => new WorkspaceStore(window.commitScope), []);
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   const searchView = React.useSyncExternalStore(searchStore.subscribe, searchStore.getView);
   const detailView = React.useSyncExternalStore(detailStore.subscribe, detailStore.getView);
+  const workspaceView = React.useSyncExternalStore(workspaceStore.subscribe, workspaceStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
@@ -205,6 +208,7 @@ export function App(): React.JSX.Element {
   const [handoffRequest, setHandoffRequest] = React.useState<HandoffRequest | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
   const [page, setPage] = React.useState<AppPage>("commits");
+  const [workspaceFilter, setWorkspaceFilter] = React.useState("");
   const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
@@ -547,6 +551,23 @@ export function App(): React.JSX.Element {
     && !hasSearchCriteria(displayedQuery) ? activityStats.value : null;
 
   useViewRecording(store, view);
+  // P4-09: the working tree of this window's directory, read whenever it may have changed.
+  const workspaceSupported = ready && status.core.capabilities.includes("workspaceStatus");
+  const workspaceRepo = view.session?.repoId ?? null;
+  React.useEffect(() => {
+    workspaceStore.bind(workspaceRepo, workspaceSupported, Boolean(view.repository?.isBare));
+  }, [workspaceStore, workspaceRepo, workspaceSupported, view.repository?.isBare]);
+  React.useEffect(() => { void workspaceStore.readStatus(); }, [workspaceStore, view.session?.generation]);
+  React.useEffect(() => window.commitScope.onWorkspaceChanged(change => {
+    if (change.repoId === store.getView().session?.repoId) workspaceStore.markChanged();
+  }), [store, workspaceStore]);
+  React.useEffect(() => {
+    const onFocus = () => { if (document.visibilityState === "visible") void workspaceStore.readStatus(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [workspaceStore]);
+  React.useEffect(() => { if (page === "workspace") void workspaceStore.readStatus(); }, [page, workspaceStore]);
+  React.useEffect(() => () => workspaceStore.dispose(), [workspaceStore]);
   useDiffDisplayShortcuts(false);
   useLaunchRepository(ready, store);
 
@@ -836,11 +857,11 @@ export function App(): React.JSX.Element {
         activityStats={activityStats?.key === activityKey ? activityStats.value : null} activityLoading={activityLoading} activityError={activityError}
         onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
         onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff}
-        page={page} onPageChange={changePage} workspace={workspaceBadge(workspaceIndicator(view.repository), view.repository, workspaceBranch)}
+        page={page} onPageChange={changePage} workspace={workspaceBadge(workspaceIndicatorFor(workspaceView), view.repository, workspaceBranch)}
         workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
         pageSearch={page === "workspace"
-          ? <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value="" onChange={() => undefined} disabled
-            title="工作区状态尚未接入（占位 · P4-09）" />
+          ? <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value={workspaceFilter} onChange={setWorkspaceFilter}
+            disabled={!workspaceView.supported} title={workspaceView.supported ? "按路径过滤左栏，不重新读取工作区（⌘F）" : "工作区状态尚未接入（占位 · P4-09）"} />
           : <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
             title="文件内容尚未接入（占位 · P4-10）" />} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
@@ -929,7 +950,10 @@ export function App(): React.JSX.Element {
         </HistorySplitView>
       </div>
       {page === "files" ? <FilesPage /> : null}
-      {page === "workspace" ? <WorkspacePage repository={view.repository} /> : null}
+      {page === "workspace" ? <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
+        onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
+        onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
+        onRetryContent={() => workspaceStore.retryContent()} /> : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}
@@ -949,12 +973,6 @@ export function App(): React.JSX.Element {
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />
   </div>;
-}
-
-/** Until the core reads the working tree (P4-09), the top bar only knows whether there is one. */
-function workspaceIndicator(repository: RepositoryView["repository"]): WorkspaceIndicator {
-  if (repository?.isBare) return { state: "bare" };
-  return { state: "unavailable", reason: "工作区状态尚未接入（占位 · P4-09）" };
 }
 
 function describeScope(scope: RepositoryScope | null, navigation: RepositoryNavigation | null): string {

@@ -148,22 +148,31 @@
       "type": "object"
     },
     "Capability": {
-      "enum": [
-        "getRuntimeInfo",
-        "readRepositoryPreview",
-        "repositorySessions",
-        "historyPagination",
-        "historyNewSinceLastSeen",
-        "repositoryScopes",
-        "metadataIndex",
-        "metadataSearch",
-        "historyGraph",
-        "commitDetails",
-        "activityStats",
-        "repositoryObservation",
-        "handoffFacts"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "getRuntimeInfo",
+            "readRepositoryPreview",
+            "repositorySessions",
+            "historyPagination",
+            "historyNewSinceLastSeen",
+            "repositoryScopes",
+            "metadataIndex",
+            "metadataSearch",
+            "historyGraph",
+            "commitDetails",
+            "activityStats",
+            "repositoryObservation",
+            "handoffFacts"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "workspaceStatus",
+          "description": "P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.",
+          "type": "string"
+        }
+      ]
     },
     "ChangeCounts": {
       "additionalProperties": false,
@@ -2401,6 +2410,57 @@
         {
           "additionalProperties": false,
           "properties": {
+            "section": {
+              "const": "workspaceStatus",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/WorkspaceStatus"
+            }
+          },
+          "required": [
+            "section",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "diff": {
+              "$ref": "#/definitions/WorkspaceDiff"
+            },
+            "section": {
+              "const": "workspaceDiff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "diff"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "$ref": "#/definitions/WorkspaceFile"
+            },
+            "section": {
+              "const": "workspaceFile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "file"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -2917,6 +2977,360 @@
       "required": [
         "key",
         "value"
+      ],
+      "type": "object"
+    },
+    "WorkspaceChange": {
+      "additionalProperties": false,
+      "properties": {
+        "additions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "deletions": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gitlink": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/definitions/ChangedFileStatus"
+        }
+      },
+      "required": [
+        "status",
+        "additions",
+        "deletions",
+        "binary",
+        "gitlink"
+      ],
+      "type": "object"
+    },
+    "WorkspaceConflict": {
+      "enum": [
+        "bothModified",
+        "bothAdded",
+        "bothDeleted",
+        "addedByUs",
+        "addedByThem",
+        "deletedByUs",
+        "deletedByThem"
+      ],
+      "type": "string"
+    },
+    "WorkspaceDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/FileDiffKind"
+        },
+        "newSize": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldSize": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "patch": {
+          "maxLength": 131072,
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "side": {
+          "$ref": "#/definitions/WorkspaceSide"
+        },
+        "textLossy": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "side",
+        "path",
+        "oldPath",
+        "kind",
+        "patch",
+        "truncated",
+        "textLossy",
+        "oldSize",
+        "newSize"
+      ],
+      "type": "object"
+    },
+    "WorkspaceEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "conflict": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkspaceConflict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "originalPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Source path when Git reports a rename or copy."
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "staged": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkspaceChange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unstaged": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WorkspaceChange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "untracked": {
+          "type": "boolean"
+        },
+        "untrackedSize": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "originalPath",
+        "staged",
+        "unstaged",
+        "untracked",
+        "untrackedSize",
+        "conflict"
+      ],
+      "type": "object"
+    },
+    "WorkspaceFile": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/WorkspaceFileKind"
+        },
+        "lines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symlinkTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "maxLength": 262144,
+          "type": "string"
+        },
+        "textLossy": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "text",
+        "lines",
+        "truncated",
+        "size",
+        "textLossy",
+        "symlinkTarget"
+      ],
+      "type": "object"
+    },
+    "WorkspaceFileKind": {
+      "enum": [
+        "text",
+        "binary",
+        "tooLarge",
+        "symlink",
+        "missing",
+        "notFile"
+      ],
+      "type": "string"
+    },
+    "WorkspaceOperation": {
+      "enum": [
+        "none",
+        "merge",
+        "rebase",
+        "cherryPick",
+        "revert",
+        "bisect"
+      ],
+      "type": "string"
+    },
+    "WorkspaceSide": {
+      "oneOf": [
+        {
+          "const": "staged",
+          "description": "HEAD → index.",
+          "type": "string"
+        },
+        {
+          "const": "unstaged",
+          "description": "Index → working tree.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkspaceStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "description": "False when more paths changed than `max_entries`; `total_paths` is then a lower bound.",
+          "type": "boolean"
+        },
+        "conflictCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/WorkspaceEntry"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "headOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headReference": {
+          "description": "HEAD when the status was read; it may differ from the HEAD the session opened with.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "$ref": "#/definitions/WorkspaceOperation"
+        },
+        "totalPaths": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "observedAtUnixMs",
+        "headReference",
+        "headOid",
+        "operation",
+        "entries",
+        "complete",
+        "totalPaths",
+        "conflictCount"
       ],
       "type": "object"
     },

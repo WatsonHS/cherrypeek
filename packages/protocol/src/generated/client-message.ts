@@ -37,7 +37,10 @@ export type RequestParams =
   | ReadDiffParams
   | ListSearchPathsParams
   | GetActivityStatsParams
-  | GetHandoffFactsParams;
+  | GetHandoffFactsParams
+  | ReadWorkspaceStatusParams
+  | ReadWorkspaceDiffParams
+  | ReadWorkspaceFileParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -49,6 +52,7 @@ export type RepositoryScope =
 export type MetadataIndexAction = "pause" | "resume" | "cancel" | "rebuild";
 export type SearchPathKind = "file" | "directory";
 export type SearchTimeField = "author" | "committer";
+export type WorkspaceSide = "staged" | "unstaged";
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -175,4 +179,19 @@ export interface GetHandoffFactsParams {
   operationWorktreeId: string | null;
   selectedOid: string | null;
   staleWorktreeId: string | null;
+}
+/**
+ * P4-09: the working tree of the window's own directory, independent of the browsing scope.
+ */
+export interface ReadWorkspaceStatusParams {
+  maxEntries: number;
+}
+export interface ReadWorkspaceDiffParams {
+  oldPathHex: string | null;
+  pathHex: string;
+  side: WorkspaceSide;
+}
+export interface ReadWorkspaceFileParams {
+  maxLines: number;
+  pathHex: string;
 }

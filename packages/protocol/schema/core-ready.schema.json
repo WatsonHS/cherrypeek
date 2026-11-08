@@ -3,22 +3,31 @@
   "additionalProperties": false,
   "definitions": {
     "Capability": {
-      "enum": [
-        "getRuntimeInfo",
-        "readRepositoryPreview",
-        "repositorySessions",
-        "historyPagination",
-        "historyNewSinceLastSeen",
-        "repositoryScopes",
-        "metadataIndex",
-        "metadataSearch",
-        "historyGraph",
-        "commitDetails",
-        "activityStats",
-        "repositoryObservation",
-        "handoffFacts"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "getRuntimeInfo",
+            "readRepositoryPreview",
+            "repositorySessions",
+            "historyPagination",
+            "historyNewSinceLastSeen",
+            "repositoryScopes",
+            "metadataIndex",
+            "metadataSearch",
+            "historyGraph",
+            "commitDetails",
+            "activityStats",
+            "repositoryObservation",
+            "handoffFacts"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "workspaceStatus",
+          "description": "P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.",
+          "type": "string"
+        }
+      ]
     },
     "GitInfo": {
       "additionalProperties": false,
