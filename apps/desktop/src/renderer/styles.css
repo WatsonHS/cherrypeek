@@ -199,27 +199,59 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   -webkit-app-region: no-drag;
 }
 
-@media (max-width: 1250px) {
+/*
+ * Top bar shrink order (docs/DESIGN.md section 11): the search box narrows first, then the activity
+ * numbers and the refresh label go; below 1100px the page switch keeps only icons and badges, search
+ * collapses into a button and the shortcut guide becomes "⋯"; narrower still, names truncate.
+ * Repository, page switch, scope, the updates notice and refresh always stay visible.
+ */
+.topbar-search-toggle { display: none; }
+
+@media (max-width: 1319px) {
   .topbar-repository { width: clamp(100px, 15vw, 180px); flex: 0 1 clamp(100px, 15vw, 180px); }
   .topbar-repository > span { max-width: 100%; }
-  .topbar-scope-picker { width: clamp(110px, 18vw, 200px); flex: 0 1 clamp(110px, 18vw, 200px); }
+  .topbar-scope-picker { width: clamp(110px, 16vw, 200px); flex: 0 1 clamp(110px, 16vw, 200px); }
   .topbar-worktree-meta,
-  .topbar-action-label { display: none; }
-  .topbar-search-controls { flex: 1 1 170px; }
+  .topbar-action-label,
+  .topbar-activity-count { display: none; }
+  .topbar-search-controls { flex: 0 1 214px; }
   .topbar-search-controls > label { min-width: 0; }
   .topbar-updates-label { max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-refresh { width: 30px; padding: 0; }
   .topbar-busy-copy { display: none; }
   .topbar-cancel-button { width: 28px; height: 28px; padding: 0; }
   .topbar-cancel-label { font-size: 0; }
   .topbar-cancel-label::after { content: "×"; font-size: 16px; }
 }
 
+@media (max-width: 1099px) {
+  .page-switch-item { padding-inline: 9px; gap: 4px; }
+  .page-switch-label,
+  .page-switch-branch,
+  .topbar-shortcut-icon { display: none; }
+  .topbar-more-icon { display: inline-block; }
+  .topbar-search[data-expanded="false"] > .topbar-search-body { display: none; }
+  .topbar-search[data-expanded="false"] > .topbar-search-toggle { display: inline-flex; }
+  .topbar-search[data-expanded="true"] > .topbar-search-toggle { display: none; }
+  .topbar-search[data-expanded="true"] > .topbar-search-body {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    z-index: 20;
+    width: min(420px, calc(100vw - 32px));
+    padding: 0 4px;
+    border-radius: 10px;
+    background: var(--bg);
+    box-shadow: var(--shadow-pop);
+  }
+  .topbar-search[data-expanded="true"] .topbar-search-controls { flex: 1 1 auto; }
+  .topbar-activity { gap: 0; padding-inline: 4px; }
+}
+
 @media (max-width: 900px) {
   .topbar-repository { width: 100px; flex-basis: 100px; padding-inline: 4px; }
   .topbar-scope-picker { width: 110px; flex-basis: 110px; padding-inline: 4px; }
-  .topbar-search-controls { flex-basis: 112px; }
   .topbar-refresh { width: 28px; height: 28px; padding: 0; }
-  .topbar-updates-label { display: none; }
+  .topbar-updates-label { max-width: 64px; }
   .topbar-divider { margin-inline: -2px; }
-  .topbar-activity { gap: 0; padding-inline: 3px; }
 }

@@ -2,9 +2,20 @@ import * as React from "react";
 import { LoaderCircle } from "lucide-react";
 import type { ActivityStats, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchQuery, SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
-import { localCalendarRange } from "../lib/search-date.js";
+import { localCalendarRange, localDateInput } from "../lib/search-date.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
+
+/** Counts for today and the six days before it, oldest first, from the per-day activity. */
+export function recentDays(stats: ActivityStats | null, now = new Date()): { counts: number[]; today: number; week: number } {
+  const byDay = new Map((stats?.days ?? []).map(day => [day.day, day.count]));
+  const counts: number[] = [];
+  for (let offset = 6; offset >= 0; offset -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+    counts.push(byDay.get(localDateInput(date)) ?? 0);
+  }
+  return { counts, today: counts.at(-1) ?? 0, week: counts.reduce((sum, count) => sum + count, 0) };
+}
 
 export function ActivityStatsPopover({ query, stats, loading, error, onLoad, onQueryChange, onAddAuthor }: {
   query: SearchQuery;
@@ -23,13 +34,22 @@ export function ActivityStatsPopover({ query, stats, loading, error, onLoad, onQ
   const countLabel = stats
     ? `${stats.coverage.complete ? "当前筛选匹配提交" : "当前筛选部分统计，已找到提交"}：${total}`
     : "当前范围活动统计";
+  const recent = recentDays(stats);
+  const approx = stats && !stats.coverage.complete ? "~" : "";
+  const recentLabel = stats ? `今天 ${approx}${recent.today} 个提交，近 7 天 ${approx}${recent.week} 个` : null;
+  const maxDay = Math.max(1, ...recent.counts);
   return <Popover open={open} onOpenChange={setOpen}>
     <PopoverTrigger asChild><button type="button" aria-busy={loading}
-      title={`${loading ? `${loadingLabel}；` : ""}${countLabel}`}
-      aria-label={`${countLabel}${loading ? `；${loadingLabel}` : ""}`} data-testid="activity-trigger"
-      className="topbar-activity flex h-8 shrink-0 items-center gap-1 rounded-lg px-1.5 text-xs text-fg2 hover:bg-hover">
-      <span className="text-[11px]">活动</span>
-      {stats || !loading ? <span data-testid="activity-total" className="font-mono tabular-nums">{total ?? "—"}</span> : null}
+      title={`${loading ? `${loadingLabel}；` : ""}${recentLabel ? `近期活动：${recentLabel}；` : ""}${countLabel}`}
+      aria-label={`近期活动：${recentLabel ? `${recentLabel}；` : ""}${countLabel}${loading ? `；${loadingLabel}` : ""}`} data-testid="activity-trigger"
+      className="topbar-activity flex h-8 shrink-0 items-center gap-2 rounded-lg px-2 text-[12.5px] whitespace-nowrap text-fg2 hover:bg-hover">
+      <span aria-hidden="true" data-testid="activity-bars" className="flex h-3.5 items-end gap-0.5">
+        {recent.counts.map((count, index) => <span key={index} className={index === recent.counts.length - 1 ? "w-1 rounded-[1px] bg-accent" : "w-1 rounded-[1px] bg-line2"}
+          style={{ height: `${stats ? Math.max(2, Math.round((count / maxDay) * 14)) : 2}px` }} />)}
+      </span>
+      {stats || !loading ? <span data-testid="activity-total" className="topbar-activity-count tabular-nums">{stats
+        ? <>今天 <b className="font-semibold text-fg">{approx}{recent.today}</b> · 7 天 <b className="font-semibold text-fg">{approx}{recent.week}</b></>
+        : "—"}</span> : null}
       {loading ? <span role="status" className="inline-flex shrink-0 items-center gap-1 text-[10px] text-fg3">
         <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" aria-hidden="true" />{stats ? "更新中…" : "统计中…"}
       </span> : null}

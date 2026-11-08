@@ -15,7 +15,14 @@ import { HistorySplitView } from "./components/history-split-view.js";
 import { OpenScreen } from "./components/open-screen.js";
 import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
-import { TopBar } from "./components/top-bar.js";
+import { FOCUS_SEARCH_EVENT, TopBar } from "./components/top-bar.js";
+import type { AppPage } from "./components/page-switch.js";
+import { PageSearchBox } from "./components/search-controls.js";
+import { WorkspacePage } from "./components/workspace-page.js";
+import { useDiffDisplayShortcuts } from "./components/diff-view.js";
+import { FilesPage } from "./components/files-page.js";
+import { workspaceBadge, workspaceBranchLabel, type WorkspaceIndicator } from "./lib/workspace-indicator.js";
+import { cn } from "./lib/utils.js";
 import { errorTitle } from "./lib/errors.js";
 import { repositoryName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
@@ -197,6 +204,7 @@ export function App(): React.JSX.Element {
   const [handoffOpen, setHandoffOpen] = React.useState(false);
   const [handoffRequest, setHandoffRequest] = React.useState<HandoffRequest | null>(null);
   const [detailTab, setDetailTab] = React.useState("overview");
+  const [page, setPage] = React.useState<AppPage>("commits");
   const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
@@ -539,6 +547,7 @@ export function App(): React.JSX.Element {
     && !hasSearchCriteria(displayedQuery) ? activityStats.value : null;
 
   useViewRecording(store, view);
+  useDiffDisplayShortcuts(false);
   useLaunchRepository(ready, store);
 
   // Restarting the core drops the repository session; reopen what was on screen once it is back.
@@ -719,8 +728,19 @@ export function App(): React.JSX.Element {
     }),
   };
 
-  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab });
-  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab };
+  const workspaceUnavailable = !view.repository || view.repository.isBare;
+  const filesAvailable = Boolean(view.repository?.headOid);
+  const workspaceBranch = view.repository ? workspaceBranchLabel(view.session?.scope, view.repository, view.navigation) : null;
+  const changePage = React.useCallback((next: AppPage) => {
+    if (next === "workspace" && workspaceUnavailable) return;
+    if (next === "files" && !filesAvailable) return;
+    setPage(next);
+  }, [filesAvailable, workspaceUnavailable]);
+  React.useEffect(() => {
+    if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
+  }, [page, workspaceUnavailable, filesAvailable]);
+  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage });
+  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage };
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
@@ -730,8 +750,8 @@ export function App(): React.JSX.Element {
       const key = event.key.toLowerCase();
       if (event.code === "KeyF" && !event.altKey) {
         event.preventDefault();
-        const focus = () => requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[data-testid="search-input"]')?.focus());
-        if (actions.historyLocation) void actions.returnToSearch().then(focus);
+        const focus = () => window.dispatchEvent(new Event(FOCUS_SEARCH_EVENT));
+        if (actions.page === "commits" && actions.historyLocation) void actions.returnToSearch().then(focus);
         else focus();
       } else if (key === "[" && !event.altKey && actions.historyLocation) {
         event.preventDefault();
@@ -739,12 +759,13 @@ export function App(): React.JSX.Element {
       } else if (key === "]" && !event.altKey && actions.searchView.active && actions.searchView.selectedOid) {
         event.preventDefault();
         void actions.locateSelectedInHistory(actions.searchView.selectedOid);
-      } else if (event.code === "Digit1" && !event.altKey) {
+      } else if (/^Digit[123]$/u.test(event.code) && !event.altKey && !event.shiftKey) {
+        // ⌘1 / ⌘2 / ⌘3 switch pages; with ⌥ they switch the tabs inside the page.
         event.preventDefault();
-        actions.setDetailTab("overview");
-      } else if (event.code === "Digit2" && !event.altKey) {
+        actions.changePage(event.code === "Digit1" ? "commits" : event.code === "Digit2" ? "files" : "workspace");
+      } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "commits") {
         event.preventDefault();
-        actions.setDetailTab("changes");
+        actions.setDetailTab(event.code === "Digit1" ? "overview" : "changes");
       } else if (event.code === "KeyR" && event.altKey) {
         event.preventDefault();
         void actions.refresh();
@@ -814,7 +835,14 @@ export function App(): React.JSX.Element {
         observation={observation} refDiff={refDiff} refDiffLoading={refDiffLoading} refDiffError={refDiffError} onLoadRefDiff={loadRefDiff} onCancelRefDiff={cancelRefDiff} onObserve={observeNow}
         activityStats={activityStats?.key === activityKey ? activityStats.value : null} activityLoading={activityLoading} activityError={activityError}
         onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
-        onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} />
+        onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff}
+        page={page} onPageChange={changePage} workspace={workspaceBadge(workspaceIndicator(view.repository), view.repository, workspaceBranch)}
+        workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
+        pageSearch={page === "workspace"
+          ? <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value="" onChange={() => undefined} disabled
+            title="工作区状态尚未接入（占位 · P4-09）" />
+          : <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
+            title="文件内容尚未接入（占位 · P4-10）" />} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {status.state === "error" || alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {status.state === "error" ? <div className="flex items-center gap-2">
@@ -837,7 +865,10 @@ export function App(): React.JSX.Element {
       </div> : null}
     </div> : null}
     {view.repository
-      ? <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      ? <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* Pages stay mounted while hidden so each keeps its own selection, filters and scroll position. */}
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "commits" && "invisible absolute inset-0")}
+        inert={page !== "commits"} data-testid="commits-page">
         {historyLocation ? <div role="status" data-testid="history-location-banner" className="flex flex-wrap items-center gap-2 border-b border-line bg-bg px-4 py-2 text-xs text-fg2">
           <span className="min-w-0 flex-1" aria-live="polite">
             {historyLocation.loading ? "正在当前历史快照中定位…" : historyLocation.error ? `定位失败：${historyLocation.error}` : historyLocation.cancelled
@@ -897,6 +928,9 @@ export function App(): React.JSX.Element {
             }} />
         </HistorySplitView>
       </div>
+      {page === "files" ? <FilesPage /> : null}
+      {page === "workspace" ? <WorkspacePage repository={view.repository} /> : null}
+      </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}
       previewStatus={searchView.active ? searchView.window
@@ -915,6 +949,12 @@ export function App(): React.JSX.Element {
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />
   </div>;
+}
+
+/** Until the core reads the working tree (P4-09), the top bar only knows whether there is one. */
+function workspaceIndicator(repository: RepositoryView["repository"]): WorkspaceIndicator {
+  if (repository?.isBare) return { state: "bare" };
+  return { state: "unavailable", reason: "工作区状态尚未接入（占位 · P4-09）" };
 }
 
 function describeScope(scope: RepositoryScope | null, navigation: RepositoryNavigation | null): string {

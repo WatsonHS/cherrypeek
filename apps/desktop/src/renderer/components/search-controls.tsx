@@ -7,6 +7,44 @@ import { inputDateRange, localDateInput, presetDateRange } from "../lib/search-d
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
+/** The scope written inside the search box, so one box can mean different searches on different pages. */
+export function SearchScopeChip({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <span aria-hidden="true" data-testid="search-scope" className="search-scope inline-flex h-[22px] max-w-[132px] shrink-0 items-center truncate rounded-[5px] bg-panel px-[7px] text-xs whitespace-nowrap text-fg2 shadow-[inset_0_0_0_1px_var(--line)]">
+    <span className="truncate">{children}</span>
+  </span>;
+}
+
+function SearchKeyHint(): React.JSX.Element {
+  return <span aria-hidden="true" className="search-key-hint shrink-0 text-[11.5px] text-fg3">{/Mac|iPhone|iPad/u.test(navigator.platform) ? "⌘F" : "Ctrl+F"}</span>;
+}
+
+/** The search box of the files and workspace pages: same look, a page-specific scope and behaviour. */
+export function PageSearchBox({ scope, label, placeholder, value, onChange, disabled, title, trailing }: {
+  scope: string;
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange(value: string): void;
+  disabled?: boolean;
+  title?: string;
+  /** Replaces the shortcut hint, e.g. a "1 / 8" match counter. */
+  trailing?: React.ReactNode;
+}): React.JSX.Element {
+  return <div className="topbar-search-controls flex min-w-0 flex-[0_1_300px] items-center">
+    <label className="flex h-[34px] min-w-0 flex-1 items-center gap-[7px] rounded-lg bg-sunken pr-2 pl-2.5 text-fg3" title={title ?? `${label}（⌘F）`}>
+      <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+      <SearchScopeChip>{scope}</SearchScopeChip>
+      <span className="sr-only">{label}</span>
+      <input data-testid="page-search-input" aria-label={label} value={value} placeholder={placeholder} disabled={disabled}
+        onChange={event => onChange(event.currentTarget.value)}
+        className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-fg3 disabled:cursor-not-allowed" />
+      {trailing ?? (value ? null : <SearchKeyHint />)}
+      {value ? <button type="button" aria-label="清空" onClick={() => onChange("")}
+        className="flex size-5 shrink-0 items-center justify-center rounded text-fg3 hover:bg-hover"><X className="size-3.5" /></button> : null}
+    </label>
+  </div>;
+}
+
 export function SearchControls({ view, sessionKey, onQueryChange, onComposition, onLoadIdentities, onLoadPaths }: {
   view: SearchView;
   sessionKey: string;
@@ -31,11 +69,12 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
     setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false); setPathVisible(false);
     onQueryChange({ ...query, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
   };
-  return <div className="topbar-search-controls flex min-w-0 flex-[1_1_220px] items-center gap-1">
-    <label className="flex h-[34px] min-w-0 flex-1 items-center gap-2 rounded-lg bg-sunken px-2.5 text-fg3" title="搜索完整提交消息、身份、OID 和日期">
+  return <div className="topbar-search-controls flex min-w-0 flex-[0_1_300px] items-center gap-1">
+    <label className="flex h-[34px] min-w-0 flex-1 items-center gap-[7px] rounded-lg bg-sunken pr-2 pl-2.5 text-fg3" title="搜索完整提交消息；作者、OID、日期和路径在右侧筛选里（⌘F）">
       <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+      <SearchScopeChip>提交消息</SearchScopeChip>
       <span className="sr-only">搜索提交消息</span>
-      <input data-testid="search-input" aria-label="搜索提交消息" value={query.message} placeholder="搜索提交消息"
+      <input data-testid="search-input" aria-label="搜索提交消息" value={query.message} placeholder="搜索"
         onChange={event => onQueryChange({ ...query, message: event.currentTarget.value }, composingRef.current)}
         onCompositionStart={() => { composingRef.current = true; setComposing(true); onComposition(true); }} onCompositionEnd={event => {
           composingRef.current = false;
@@ -44,7 +83,8 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
           onComposition(false);
         }} className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-fg3" />
       {query.message || view.active ? <button type="button" data-testid="search-clear" aria-label="清空搜索并返回历史" title="清空搜索并返回历史"
-        onClick={clear} className="flex size-5 shrink-0 items-center justify-center rounded text-fg3 hover:bg-hover"><X className="size-3.5" /></button> : null}
+        onClick={clear} className="flex size-5 shrink-0 items-center justify-center rounded text-fg3 hover:bg-hover"><X className="size-3.5" /></button>
+        : <SearchKeyHint />}
     </label>
     <Popover open={filterOpen} onOpenChange={setFilterOpen}>
       <PopoverTrigger asChild><Button variant={filterOpen ? "soft" : "ghost"} size="icon" aria-label="筛选搜索条件"

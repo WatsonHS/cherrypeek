@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Cloud, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Tag } from "lucide-react";
+import { ChevronDown, Cloud, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
@@ -15,6 +15,8 @@ import { ActivityStatsPopover } from "./activity-stats.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
 import type { ActivityStats, RefSnapshotDiff, RepositoryObservation, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { SearchControls } from "./search-controls.js";
+import { PageSwitch, type AppPage } from "./page-switch.js";
+import type { WorkspaceBadge } from "../lib/workspace-indicator.js";
 import { RecentList, storeStatusText, type RecentState } from "./recent-repositories.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
@@ -22,7 +24,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
   searchView, activityQuery, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths, observation, refDiff, refDiffLoading, refDiffError,
-  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor }: {
+  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
+  page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch }: {
   preview: RepositoryView;
   actions: RepositoryActions;
   recent: RecentState;
@@ -51,27 +54,37 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   activityError: string | null;
   onLoadActivity(): void;
   onActivityAuthor(identity: SearchIdentity): void;
+  page: AppPage;
+  onPageChange(page: AppPage): void;
+  workspace: WorkspaceBadge;
+  workspaceBranch: string | null;
+  filesAvailable: boolean;
+  /** The search box of the files and workspace pages; the commits page uses the metadata search. */
+  pageSearch: React.ReactNode;
 }): React.JSX.Element | null {
   const [scopeOpen, setScopeOpen] = React.useState(false);
   const repository = preview.repository;
   if (!repository) return null;
   const busy = preview.state === "loading" || preview.opening !== null || preview.scopeSwitching || preview.refreshing;
-  return <header className="window-toolbar flex h-[52px] min-h-[52px] max-h-[52px] flex-nowrap items-center gap-1 overflow-hidden border-b border-line py-2">
+  return <header className="window-toolbar relative flex h-[52px] min-h-[52px] max-h-[52px] flex-nowrap items-center gap-1 overflow-hidden border-b border-line py-2">
     {/* Two labelled blocks: which repository (and worktree) this window shows, and which history it browses. */}
     <RepositorySwitcher repository={repository} session={preview.session} record={preview.record} actions={actions}
       recent={recent} onRefreshRecent={onRefreshRecent} loading={busy}
       navigation={preview.navigation} navigationLoading={preview.navigationLoading} navigationError={preview.navigationError?.message ?? null}
       onLoadNavigation={onLoadNavigation} />
     <span aria-hidden="true" className="topbar-divider h-6 w-px shrink-0 bg-line" />
-    <ScopePicker preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
+    <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} />
+    <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
       onOpenHandoff={onOpenHandoff}
       onLoadMergeStatus={onLoadMergeStatus} onCancelMergeStatus={onCancelMergeStatus} onRefresh={actions.refresh} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="min-w-0 flex-1 basis-0" />
     <ActivityStatsPopover query={activityQuery} stats={activityStats} loading={activityLoading} error={activityError}
       onLoad={onLoadActivity} onQueryChange={onSearchQueryChange} onAddAuthor={onActivityAuthor} />
-    <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
-      onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} />
+    <TopBarSearch label={page === "commits" ? "搜索提交消息" : page === "files" ? "在文件页搜索" : "过滤改动的文件"}>
+      {page === "commits" ? <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
+        onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} /> : pageSearch}
+    </TopBarSearch>
     <ShortcutGuide />
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
@@ -90,18 +103,56 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   </header>;
 }
 
+/** Fires when ⌘F asks for the search box; narrow windows expand it first. */
+export const FOCUS_SEARCH_EVENT = "commitscope:focus-search";
+
+/**
+ * The search slot. Below 1100px it collapses into an icon button (CSS in styles.css);
+ * the button or ⌘F expands it over the right end of the top bar, Esc or leaving it empty collapses it.
+ */
+function TopBarSearch({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
+  const [expanded, setExpanded] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const focusInput = React.useCallback(() => {
+    setExpanded(true);
+    requestAnimationFrame(() => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input")?.focus());
+  }, []);
+  React.useEffect(() => {
+    window.addEventListener(FOCUS_SEARCH_EVENT, focusInput);
+    return () => window.removeEventListener(FOCUS_SEARCH_EVENT, focusInput);
+  }, [focusInput]);
+  const collapseIfEmpty = () => {
+    const input = rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input");
+    if (!input?.value) setExpanded(false);
+  };
+  return <div ref={rootRef} className="topbar-search contents" data-expanded={expanded ? "true" : "false"}
+    onKeyDown={event => { if (event.key === "Escape" && expanded) { setExpanded(false); (event.target as HTMLElement).blur(); } }}
+    onBlur={event => { if (!rootRef.current?.contains(event.relatedTarget as Node | null) && !document.querySelector("[data-slot='popover-content'][data-state='open']")) collapseIfEmpty(); }}>
+    <Button variant="ghost" size="icon" className="topbar-search-toggle" aria-label={label} title={`${label}（⌘F）`} onClick={focusInput}>
+      <Search className="size-4" strokeWidth={1.75} />
+    </Button>
+    <div className="topbar-search-body flex min-w-0 items-center">{children}</div>
+  </div>;
+}
+
 function ShortcutGuide(): React.JSX.Element {
-  const modifier = /Mac|iPhone|iPad/u.test(navigator.platform) ? "⌘" : "Ctrl+";
-  const refreshKey = modifier === "⌘" ? "⌥⌘R" : "Ctrl+Alt+R";
+  const mac = /Mac|iPhone|iPad/u.test(navigator.platform);
+  const modifier = mac ? "⌘" : "Ctrl+";
+  const altModifier = mac ? "⌥⌘" : "Ctrl+Alt+";
+  const refreshKey = mac ? "⌥⌘R" : "Ctrl+Alt+R";
   return <Popover>
-    <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="快捷键说明" data-testid="shortcut-guide-trigger"><Keyboard className="size-4" strokeWidth={1.75} /></Button></PopoverTrigger>
+    <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="快捷键说明" title="快捷键说明" data-testid="shortcut-guide-trigger">
+      <Keyboard className="topbar-shortcut-icon size-4" strokeWidth={1.75} />
+      <Ellipsis className="topbar-more-icon hidden size-4" strokeWidth={1.75} />
+    </Button></PopoverTrigger>
     <PopoverContent align="end" className="w-[300px] p-3" data-testid="shortcut-guide">
       <h2 className="m-0 mb-2 text-[13px] font-semibold">快捷键</h2>
       <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
         <dt className="text-fg2">聚焦搜索</dt><dd className="m-0 font-mono text-fg3">{modifier}F</dd>
         <dt className="text-fg2">从搜索结果在历史中定位</dt><dd className="m-0 font-mono text-fg3">{modifier}]</dd>
         <dt className="text-fg2">返回搜索结果</dt><dd className="m-0 font-mono text-fg3">{modifier}[</dd>
-        <dt className="text-fg2">切换详情：概览 / 文件</dt><dd className="m-0 font-mono text-fg3">{modifier}1 / 2</dd>
+        <dt className="text-fg2">切换页面：提交 / 文件 / 工作区</dt><dd className="m-0 font-mono text-fg3">{modifier}1 / 2 / 3</dd>
+        <dt className="text-fg2">切换标签页：概览 / 文件改动</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
         <dt className="text-fg2">刷新仓库历史</dt><dd className="m-0 font-mono text-fg3">{refreshKey}</dd>
         <dt className="text-fg2">切换浏览范围</dt><dd className="m-0 text-fg3">顶部范围选择器</dd>
         <dt className="text-fg2">历史列表中上下选择提交</dt><dd className="m-0 font-mono text-fg3">↑ / ↓</dd>
@@ -242,7 +293,7 @@ function sameScope(left: RepositoryScope | undefined, right: RepositoryScope): b
   return false;
 }
 
-function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled }: {
+function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
   preview: RepositoryView;
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -253,6 +304,8 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   onCancelMergeStatus(): Promise<void>;
   onRefresh(): Promise<void>;
   disabled: boolean;
+  /** On the workspace page the scope does not apply; it stays usable but recedes. */
+  dimmed: boolean;
 }): React.JSX.Element {
   const optionsRef = React.useRef<HTMLDivElement>(null);
   const repository = preview.repository!;
@@ -293,8 +346,9 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
     else void onCancelMergeStatus();
   }}>
     <PopoverTrigger asChild>
-      <Button variant="ghost" className={cn("topbar-scope-picker max-w-[220px]", BLOCK_BUTTON)} aria-label={`浏览范围：${label}`}
-        title={`浏览范围：${label}。只切换历史，不会 checkout`} data-testid="scope-picker" disabled={disabled}>
+      <Button variant="ghost" className={cn("topbar-scope-picker max-w-[220px]", BLOCK_BUTTON, dimmed && "opacity-50 hover:opacity-100")}
+        aria-label={`浏览范围：${label}${dimmed ? "（只影响提交和文件页）" : ""}`}
+        title={dimmed ? `浏览范围：${label}。只影响提交和文件页，不会改变工作区` : `浏览范围：${label}。只切换历史，不会 checkout`} data-testid="scope-picker" disabled={disabled}>
         <BlockCaption>{caption}</BlockCaption>
         <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[13px] leading-5 font-medium text-fg">
           {value.icon}

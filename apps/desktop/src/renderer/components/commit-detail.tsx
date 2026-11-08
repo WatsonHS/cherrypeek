@@ -7,9 +7,9 @@ import type { CommitDetailView } from "../lib/commit-detail-store.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
 import { CommitHandoffMenu } from "./handoff-menu.js";
 import { identityTime, identityTimeTitle, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
-import { cn } from "../lib/utils.js";
 import { refsByTarget, RefTags } from "./commit-list.js";
 import { IdentityAvatar } from "./identity-avatar.js";
+import { DiffView } from "./diff-view.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
@@ -301,40 +301,8 @@ function DiffPanel({ file, state, onRetry }: { file: ChangedFilesPage["files"][n
     {diff.kind === "text" && diff.patch === "" && !diff.truncated ? <p className="m-0 px-4 py-3 text-xs text-fg3">文件内容相同，仅路径或模式变化。</p> : null}
     {diff.textLossy ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 文本含有无法按 UTF-8 无损解码的数据。</p> : null}
     {diff.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，仅显示读取预算内的部分。</p> : null}
-    {diff.kind === "text" && diff.patch ? <DiffLines patch={diff.patch} /> : null}
+    {diff.kind === "text" && diff.patch ? <DiffView patch={diff.patch} /> : null}
     <span className="sr-only">{file.status} file diff</span>
-  </div>;
-}
-
-function DiffLines({ patch }: { patch: string }): React.JSX.Element {
-  let oldLine: number | null = null;
-  let newLine: number | null = null;
-  let inHunk = false;
-  const lines = patch.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return <div className="overflow-x-auto py-1 font-mono text-[12px] leading-[21px]" data-testid="diff-lines">
-    {lines.map((text, index) => {
-      const hunk = text.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u);
-      if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); inHunk = true; }
-      const notice = text === "\\ No newline at end of file";
-      const added = inHunk && text.startsWith("+");
-      const deleted = inHunk && text.startsWith("-");
-      const context = inHunk && text.startsWith(" ");
-      const header = Boolean(hunk) || !inHunk && (text.startsWith("diff ") || text.startsWith("index ") || text.startsWith("--- ") || text.startsWith("+++ "));
-      const shownOld = header || added || notice ? "" : oldLine === null ? "" : String(oldLine);
-      const shownNew = header || deleted || notice ? "" : newLine === null ? "" : String(newLine);
-      if (inHunk && !header && !notice) {
-        if (!added && oldLine !== null) oldLine += 1;
-        if (!deleted && newLine !== null) newLine += 1;
-      }
-      const content = notice ? "文件末尾没有换行" : inHunk && (added || deleted || context) ? text.slice(1) : text;
-      return <div key={index} className={cn("flex min-w-max whitespace-pre", notice ? "bg-warn-bg text-warn" : header && text.startsWith("@@") ? "bg-hunk-bg text-fg3" : added ? "bg-add-bg" : deleted ? "bg-del-bg" : "")}>
-        <span className="w-12 shrink-0 pr-2 text-right text-fg3">{shownOld}</span>
-        <span className="w-12 shrink-0 pr-2 text-right text-fg3">{shownNew}</span>
-        <span className={cn("w-5 shrink-0 text-center", added && "text-add", deleted && "text-del")}>{notice ? "!" : added ? "+" : deleted ? "−" : ""}</span>
-        <span className="pr-5">{content}</span>
-      </div>;
-    })}
   </div>;
 }
 
