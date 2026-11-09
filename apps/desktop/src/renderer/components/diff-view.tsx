@@ -93,7 +93,7 @@ export function DiffDisplayMenu({ fullAvailable, fullUnavailableReason }: { full
 
 const NUMBER = "shrink-0 pr-2 text-right text-fg3 select-none";
 
-/** Marks one new-side line, e.g. the line a blame click came from. */
+/** Marks one new-side line, e.g. the line a blame click came from. `label` is the marked line's tooltip. */
 export interface DiffFocus {
   newLine: number;
   label: string;
@@ -178,7 +178,8 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimi
   </div>;
 }
 
-const MARKED = "shadow-[inset_3px_0_0_var(--accent)]";
+/** The marked line: an accent bar and a light accent wash over the add / context colour; nothing is added to the code. */
+const MARKED_STYLE: React.CSSProperties = { boxShadow: "inset 3px 0 0 var(--accent), inset 0 0 0 100vmax color-mix(in srgb, var(--accent) 13%, transparent)" };
 
 type TokensFor = (side: "old" | "new", number: number | null) => readonly SyntaxToken[] | null;
 const TokensContext = React.createContext<TokensFor>(() => null);
@@ -196,10 +197,6 @@ function syntaxSides(lines: DiffLine[]): { oldLines: string[]; newLines: string[
   return { oldLines, newLines, oldIndex, newIndex };
 }
 
-function MarkTag({ label }: { label: string }): React.JSX.Element {
-  return <span className="ml-2 font-sans text-[11px] whitespace-nowrap text-accent-fg select-none">{label}</span>;
-}
-
 function rowTone(kind: DiffLine["kind"] | SplitSide["kind"]): string {
   return kind === "add" ? "bg-add-bg" : kind === "del" ? "bg-del-bg" : kind === "hunk" ? "bg-hunk-bg text-fg3" : kind === "notice" ? "bg-warn-bg text-warn" : "";
 }
@@ -215,14 +212,15 @@ function Unified({ lines, wrap, mark }: { lines: DiffLine[]; wrap: boolean; mark
       const sign = line.kind === "add" ? "+" : line.kind === "del" ? "−" : line.kind === "notice" ? "!" : "";
       const marked = Boolean(mark && line.newNumber === mark.newLine && line.kind !== "del");
       return <div key={index} data-hunk-start={line.kind === "hunk" ? line.hunk : undefined} data-marked={marked ? "true" : undefined}
-        className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", rowTone(line.kind), marked && MARKED)}>
+        title={marked ? mark!.label : undefined} style={marked ? MARKED_STYLE : undefined}
+        className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", rowTone(line.kind))}>
         <span className={cn(NUMBER, "w-12")}>{line.oldNumber ?? ""}</span>
         <span className={cn(NUMBER, "w-12")}>{line.newNumber ?? ""}</span>
         <span className={cn("w-5 shrink-0 text-center select-none", line.kind === "add" && "text-add", line.kind === "del" && "text-del")}>{sign}</span>
         <span className={cn("pr-5", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}>{line.kind === "notice" ? noticeText(line.text)
           : line.kind === "del" || line.kind === "add" || line.kind === "context"
             ? <SyntaxLine tokens={tokensFor(line.kind === "del" ? "old" : "new", line.kind === "del" ? line.oldNumber : line.newNumber)} fallback={line.text} />
-            : line.text}{marked ? <MarkTag label={mark!.label} /> : null}</span>
+            : line.text}</span>
       </div>;
     })}
   </div>;
@@ -241,11 +239,11 @@ const EMPTY_SIDE = "bg-[repeating-linear-gradient(135deg,var(--sunken)_0_3px,tra
 function SideCell({ side, wrap, mark, left }: { side: SplitSide; wrap: boolean; mark?: DiffFocus | null; left: boolean }): React.JSX.Element {
   const sign = side.kind === "add" ? "+" : side.kind === "del" ? "−" : "";
   const marked = Boolean(mark && side.number === mark.newLine && side.kind !== "del" && side.kind !== "empty");
-  return <div data-marked={marked ? "true" : undefined}
-    className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", side.kind === "empty" ? EMPTY_SIDE : rowTone(side.kind), marked && MARKED)}>
+  return <div data-marked={marked ? "true" : undefined} title={marked ? mark!.label : undefined} style={marked ? MARKED_STYLE : undefined}
+    className={cn("flex min-h-[21px]", wrap ? "min-w-0" : "min-w-max whitespace-pre", side.kind === "empty" ? EMPTY_SIDE : rowTone(side.kind))}>
     <span className={cn(NUMBER, "w-[42px]", !wrap && "sticky left-0 z-[1]", !wrap && (side.kind === "add" ? "bg-add-bg" : side.kind === "del" ? "bg-del-bg" : side.kind === "empty" ? "bg-transparent" : "bg-bg"))}>{side.number ?? ""}</span>
     <span className={cn("w-3.5 shrink-0 text-center select-none", side.kind === "add" && "text-add", side.kind === "del" && "text-del")}>{sign}</span>
-    <span className={cn("pr-3", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}><SideText side={side} left={left} />{marked ? <MarkTag label={mark!.label} /> : null}</span>
+    <span className={cn("pr-3", wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}><SideText side={side} left={left} /></span>
   </div>;
 }
 

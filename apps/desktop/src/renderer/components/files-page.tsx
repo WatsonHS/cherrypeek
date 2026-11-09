@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, Clock, Copy, FileText, Folder, FolderOpen, Layers, Link2, LoaderCircle, Pin, X } from "lucide-react";
-import { HoverCard } from "radix-ui";
+import { createPortal } from "react-dom";
 import type { BlameBlock, CommitIdentity, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { momentLabel, parseGitTime, shortOid } from "../lib/format.js";
 import { blameHeat, blameLineIndex, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
@@ -16,6 +16,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
 export interface FilesActions {
   toggleDirectory(pathHex: string): void;
+  /** Expands a directory and its parents in the tree; the right side stays as it is. */
+  revealDirectory(path: GitPath): void;
   loadMoreEntries(pathHex: string): void;
   retryDirectory(pathHex: string): void;
   select(selection: FilesSelection): void;
@@ -47,6 +49,41 @@ function blameDate(unixMs: number, now = new Date()): string {
   const label = momentLabel(unixMs, now);
   if (label.startsWith("今天") || label.startsWith("昨天")) return label;
   return date.getFullYear() === now.getFullYear() ? `${date.getMonth() + 1}月${date.getDate()}日` : `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+type BlameWidths = { date: number; author: number };
+const BLAME_AUTHOR_MAX = 180;
+
+/**
+ * Widths of the blame gutter's date and author columns, sized to the longest text like JetBrains'
+ * annotations rather than a fixed band; very long author names are cut at BLAME_AUTHOR_MAX.
+ * Measured with hidden spans in the gutter's own font: canvas picks different fallbacks for CJK text.
+ */
+function blameWidths(commits: Record<string, { authorName: string; authorTime: number }>): BlameWidths {
+  const dates = new Set<string>();
+  const authors = new Set<string>();
+  for (const commit of Object.values(commits)) {
+    dates.add(blameDate(commit.authorTime * 1000));
+    authors.add(commit.authorName);
+  }
+  const host = document.createElement("div");
+  host.className = "font-sans text-xs";
+  host.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;white-space:nowrap";
+  const spans = (texts: Set<string>, className: string) => [...texts].map(text => {
+    const span = document.createElement("span");
+    span.className = className;
+    span.style.display = "inline-block";
+    span.textContent = text;
+    host.append(span);
+    return span;
+  });
+  const dateSpans = spans(dates, "tabular-nums");
+  const authorSpans = spans(authors, "");
+  document.body.append(host);
+  const widest = (list: HTMLSpanElement[]) => Math.ceil(list.reduce((max, span) => Math.max(max, span.getBoundingClientRect().width), 0));
+  const widths = { date: widest(dateSpans) + 1, author: Math.min(widest(authorSpans) + 1, BLAME_AUTHOR_MAX) };
+  host.remove();
+  return widths;
 }
 
 function when(identity: CommitIdentity): string {
@@ -105,8 +142,17 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
           const last = index === all.length - 1;
           return <React.Fragment key={crumb.pathHex}>
             {last ? <span aria-current="page" className="px-1 text-[13px] font-semibold">{crumb.name}</span>
-              : <button type="button" className="rounded px-1 text-[13px] text-fg2 hover:bg-hover hover:text-fg"
-                onClick={() => actions.select({ path: { display: all.slice(0, index + 1).map(item => item.name).join("/"), rawHex: crumb.pathHex, textLossy: selection.path.textLossy }, kind: "directory" })}>{crumb.name}</button>}
+              : <button type="button" className="rounded px-1 text-[13px] text-fg2 hover:bg-hover hover:text-fg" title="在目录树中显示" data-testid="crumb-directory"
+                // Clicking a folder only browses: it is shown in the tree, and the right side keeps what it shows.
+                // Directory history has its own explicit button on the tree row.
+                onClick={() => {
+                  actions.revealDirectory({ display: all.slice(0, index + 1).map(item => item.name).join("/"), rawHex: crumb.pathHex, textLossy: selection.path.textLossy });
+                  requestAnimationFrame(() => {
+                    const row = document.querySelector<HTMLElement>(`[data-testid='tree-row'][data-path-hex='${crumb.pathHex}']`);
+                    row?.scrollIntoView({ block: "nearest" });
+                    row?.focus({ preventScroll: true });
+                  });
+                }}>{crumb.name}</button>}
             {last ? null : <span aria-hidden="true" className="text-line2">/</span>}
           </React.Fragment>;
         }) : <span className="px-1 text-[13px] text-fg3">选择左侧的文件或目录</span>}
@@ -125,6 +171,10 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
         <svg viewBox="0 0 16 16" aria-hidden="true" className="size-3.5" style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" }}><path d="M2.5 3v10M5 4.5h8.5M5 8h6M5 11.5h7.5" /></svg>
         逐行追溯{view.blameSupported ? null : <span className="text-[11px]">· 占位</span>}
       </button> : null}
+      {selection?.kind === "file" && view.tab === "history" && view.focus ? <button type="button" onClick={() => setScrollTarget(actions.returnToLine())} data-testid="return-to-line"
+        title="回到内容页里你点的那一行"
+        className="flex h-7 shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
+        <ArrowLeft className="size-3.5" strokeWidth={1.75} />回到第 {view.focus.line} 行</button> : null}
       {selection ? <nav aria-label="文件页" className="flex shrink-0 gap-0.5 rounded-[9px] bg-sunken p-[3px]">
         {selection.kind === "file" ? <button type="button" aria-current={view.tab === "content" ? "page" : undefined} onClick={() => actions.setTab("content")} data-testid="files-tab-content"
           className="flex h-[26px] items-center rounded-[7px] px-3 text-[13px] text-fg2 aria-[current=page]:bg-panel aria-[current=page]:font-semibold aria-[current=page]:text-fg aria-[current=page]:shadow-[0_0_0_1px_var(--line2)]">内容</button> : null}
@@ -140,7 +190,7 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
         {!selection ? <p className="m-auto text-[13px] text-fg3">在左侧选择文件查看内容，选择目录查看它的改动历史。</p>
           : view.tab === "content" && selection.kind === "file"
             ? <ContentPane view={view} actions={actions} find={find} onFindCount={onFindCount} scrollTarget={scrollTarget} onScrolled={() => setScrollTarget(null)} />
-            : <HistoryPane view={view} actions={actions} onReturn={() => setScrollTarget(actions.returnToLine())} />}
+            : <HistoryPane view={view} actions={actions} />}
       </main>
     </div>
   </div>;
@@ -211,7 +261,7 @@ function TreeRow({ entry, depth, view, actions }: { entry: TreeEntry; depth: num
   const Icon = isDirectory ? expanded ? FolderOpen : Folder : entry.kind === "symlink" ? Link2 : entry.kind === "submodule" ? Layers : FileText;
   return <>
     <div className={cn("group flex items-center rounded-[7px] hover:bg-hover", selected && "bg-accent-soft hover:bg-accent-soft")}>
-    <button type="button" data-testid="tree-row" aria-expanded={isDirectory ? expanded : undefined} aria-current={selected ? "true" : undefined}
+    <button type="button" data-testid="tree-row" data-path-hex={entry.path.rawHex} aria-expanded={isDirectory ? expanded : undefined} aria-current={selected ? "true" : undefined}
       title={entry.kind === "symlink" ? `${entry.path.display}（符号链接）` : entry.kind === "submodule" ? `${entry.path.display}（子模块）` : entry.path.display}
       onClick={() => {
         if (isDirectory) actions.toggleDirectory(entry.path.rawHex);
@@ -285,6 +335,7 @@ function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolle
   const blame = view.blameEnabled ? view.blame : null;
   const lineBlocks = React.useMemo(() => blame ? blameLineIndex(blame.blocks, Math.max(blame.totalLines, lines.length)) : null, [blame, lines.length]);
   const heat = React.useMemo(() => blame ? blameHeat(blame.commits) : {}, [blame]);
+  const gutterWidths = React.useMemo(() => blame ? blameWidths(blame.commits) : null, [blame]);
   const historyByOid = React.useMemo(() => new Map((view.history?.entries ?? []).map(entry => [entry.commit.oid, entry])), [view.history]);
 
   if (!content || content.state === "loading" && !content.value) {
@@ -315,7 +366,7 @@ function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolle
         const block = lineBlocks?.[number];
         const segments = findSegments(line, needle);
         return <div key={index} data-line={number} className={cn("flex", display.wrap ? "min-w-0" : "whitespace-pre")}>
-          {lineBlocks ? <BlameGutter block={block} number={number} commit={block ? blame!.commits[block.oid] : undefined} level={block ? heat[block.oid] ?? 0 : null}
+          {lineBlocks ? <BlameGutter block={block} number={number} commit={block ? blame!.commits[block.oid] : undefined} level={block ? heat[block.oid] ?? 0 : null} widths={gutterWidths!}
             history={block ? historyByOid.get(block.oid) : undefined} actions={actions} /> : null}
           <span className="w-14 shrink-0 pr-4 text-right text-fg3 select-none">{number}</span>
           <span className={cn("pr-5", display.wrap && "min-w-0 flex-1 break-all whitespace-pre-wrap")}>
@@ -330,48 +381,76 @@ function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolle
   </div>;
 }
 
-function BlameGutter({ block, number, commit, level, history, actions }: {
+const BLAME_CARD_WIDTH = 340;
+
+function BlameGutter({ block, number, commit, level, widths, history, actions }: {
   block: BlameBlock | undefined;
   number: number;
   commit: { summary: string; authorName: string; authorTime: number } | undefined;
   level: number | null;
+  widths: BlameWidths;
   history: FileHistoryEntry | undefined;
   actions: FilesActions;
 }): React.JSX.Element {
+  // The card mounts only for the line being hovered or focused: a hover-card component on each of up to
+  // 5,000 lines made turning blame on about 350 ms slower.
+  const [anchor, setAnchor] = React.useState<DOMRect | null>(null);
+  const timer = React.useRef<number | undefined>(undefined);
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  const later = (next: () => void, delayMs: number) => { window.clearTimeout(timer.current); timer.current = window.setTimeout(next, delayMs); };
+  const keep = () => window.clearTimeout(timer.current);
+  const show = (element: HTMLElement, delayMs: number) => later(() => setAnchor(element.getBoundingClientRect()), delayMs);
+  const hide = () => later(() => setAnchor(null), 120);
+  React.useEffect(() => () => window.clearTimeout(timer.current), []);
+  React.useEffect(() => {
+    if (!anchor) return;
+    const close = () => setAnchor(null);
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("scroll", close, true); window.removeEventListener("keydown", onKey); };
+  }, [anchor]);
+  React.useLayoutEffect(() => {
+    const card = cardRef.current;
+    if (!card || !anchor) return;
+    const overflow = card.getBoundingClientRect().bottom - (window.innerHeight - 8);
+    if (overflow > 0) card.style.top = `${Math.max(8, anchor.top - overflow)}px`;
+  }, [anchor]);
+
   const background = level === null ? "var(--skel)" : `color-mix(in srgb, var(--accent) ${HEAT[level]}%, transparent)`;
-  const first = Boolean(block && block.startLine === number);
-  const cell = "flex w-[212px] shrink-0 items-center gap-2.5 border-r border-line pr-2.5 pl-3.5 font-sans text-xs text-fg2 overflow-hidden";
-  if (!block || !first || !commit) return <span aria-hidden="true" className={cell} style={{ background }} />;
+  // Every line carries its own date and author, as in JetBrains' annotations; the colour band groups a block.
+  const cell = "flex shrink-0 items-center gap-2.5 border-r border-line pr-2.5 pl-3.5 font-sans text-xs text-fg2 overflow-hidden";
+  const width = 14 + widths.date + 10 + widths.author + 10 + 1;
+  if (!block || !commit) return <span aria-hidden="true" className={cell} style={{ background, width }} />;
   const date = blameDate(commit.authorTime * 1000);
-  const fullDate = momentLabel(commit.authorTime * 1000);
   const range = block.lineCount > 1 ? `第 ${block.startLine}–${block.startLine + block.lineCount - 1} 行` : `第 ${block.startLine} 行`;
-  return <HoverCard.Root openDelay={350} closeDelay={120}>
-    <HoverCard.Trigger asChild>
-      <button type="button" className={cn(cell, "text-left hover:text-accent-fg")} style={{ background }} data-testid="blame-cell"
-        aria-label={`第 ${number} 行：${shortOid(block.oid)}，${commit.authorName}，${date}。在文件历史中定位`} title="单击：在文件历史中定位这个提交"
-        onClick={() => actions.locateFromBlame(number)}>
-        <span className="w-[68px] shrink-0 truncate text-fg3 tabular-nums">{date}</span>
-        <span className="min-w-0 truncate">{commit.authorName}</span>
-      </button>
-    </HoverCard.Trigger>
-    <HoverCard.Portal>
-      <HoverCard.Content side="right" align="start" sideOffset={6} className="z-50 flex w-[340px] flex-col gap-2 rounded-xl border border-line2 bg-panel p-3.5 text-[13px] text-fg shadow-pop">
-        <span className="font-semibold leading-snug break-words">{commit.summary}</span>
-        <span className="text-xs text-fg3"><span className="font-mono">{shortOid(block.oid)}</span> · {commit.authorName} · {fullDate}</span>
-        <span className="text-xs text-fg2">这一块：{range}{history?.change.additions !== null && history?.change.additions !== undefined ? `。这个提交在本文件 +${history.change.additions} −${history.change.deletions ?? 0}` : ""}</span>
-        {block.originalPath ? <span className="text-xs text-warn">当时路径：{block.originalPath.display}（之后整个文件改过名）</span> : null}
-        <div className="flex gap-2 pt-1">
-          <Button size="sm" onClick={() => actions.locateFromBlame(number)}>定位到这个提交</Button>
-          <Button size="sm" variant="outline" onClick={() => actions.openCommit(block.oid)}>在提交历史中定位</Button>
-        </div>
-      </HoverCard.Content>
-    </HoverCard.Portal>
-  </HoverCard.Root>;
+  return <>
+    <button type="button" className={cn(cell, "text-left hover:text-accent-fg")} style={{ background, width }} data-testid="blame-cell"
+      aria-label={`第 ${number} 行：${shortOid(block.oid)}，${commit.authorName}，${date}。在文件历史中定位`} title="单击：在文件历史中定位这个提交"
+      onPointerEnter={event => show(event.currentTarget, 350)} onPointerLeave={hide}
+      onFocus={event => show(event.currentTarget, 0)} onBlur={hide}
+      onClick={() => actions.locateFromBlame(number)}>
+      <span className="shrink-0 truncate text-fg3 tabular-nums" style={{ width: widths.date }}>{date}</span>
+      <span className="min-w-0 truncate">{commit.authorName}</span>
+    </button>
+    {anchor ? createPortal(<div ref={cardRef} data-testid="blame-card" onPointerEnter={keep} onPointerLeave={hide} onFocus={keep} onBlur={hide}
+      className="fixed z-50 flex flex-col gap-2 rounded-xl border border-line2 bg-panel p-3.5 text-[13px] text-fg shadow-pop"
+      style={{ width: BLAME_CARD_WIDTH, left: Math.max(8, Math.min(anchor.right + 6, window.innerWidth - BLAME_CARD_WIDTH - 8)), top: Math.max(8, anchor.top) }}>
+      <span className="font-semibold leading-snug break-words">{commit.summary}</span>
+      <span className="text-xs text-fg3"><span className="font-mono">{shortOid(block.oid)}</span> · {commit.authorName} · {momentLabel(commit.authorTime * 1000)}</span>
+      <span className="text-xs text-fg2">这一块：{range}{history?.change.additions !== null && history?.change.additions !== undefined ? `。这个提交在本文件 +${history.change.additions} −${history.change.deletions ?? 0}` : ""}</span>
+      {block.originalPath ? <span className="text-xs text-warn">当时路径：{block.originalPath.display}（之后整个文件改过名）</span> : null}
+      <div className="flex gap-2 pt-1">
+        <Button size="sm" onClick={() => { setAnchor(null); actions.locateFromBlame(number); }}>定位到这个提交</Button>
+        <Button size="sm" variant="outline" onClick={() => { setAnchor(null); actions.openCommit(block.oid); }}>在提交历史中定位</Button>
+      </div>
+    </div>, document.body) : null}
+  </>;
 }
 
 const STATUS_LABEL = { added: "新增", modified: "修改", deleted: "删除", renamed: "重命名", copied: "复制", typeChanged: "类型" } as const;
 
-function HistoryPane({ view, actions, onReturn }: { view: FilesView; actions: FilesActions; onReturn(): void }): React.JSX.Element {
+function HistoryPane({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
   const display = useDiffDisplay();
   const [pinned, setPinned] = React.useState(false);
   const [floatingOpen, setFloatingOpen] = React.useState(false);
@@ -396,9 +475,6 @@ function HistoryPane({ view, actions, onReturn }: { view: FilesView; actions: Fi
     </div> : null}
     <div className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
       <div className="mx-auto flex max-w-[960px] flex-col gap-3.5 px-8 pt-5 pb-12">
-        {view.focus ? <button type="button" onClick={onReturn} data-testid="return-to-line"
-          className="inline-flex h-[26px] items-center gap-1 self-start rounded-[13px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium text-accent-fg">
-          <ArrowLeft className="size-3.5" strokeWidth={1.75} />回到第 {view.focus.line} 行</button> : null}
         {view.focus?.originalPath ? <p className="m-0 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是那个路径的历史。</p> : null}
         {!selected && view.selectedCommit && history?.state === "ready" ? <p className="m-0 text-xs text-fg3">所选提交 {shortOid(view.selectedCommit)} 不在已加载的历史里。</p> : null}
         {selected ? <CommitHeader entry={selected} onOpenCommit={() => actions.openCommit(selected.commit.oid)} /> : null}
@@ -494,7 +570,7 @@ function ChangeBox({ view, actions, entry, floatingButton }: { view: FilesView; 
     tooLarge: "文件超过读取上限，未生成 diff。",
     text: "",
   }[value.kind];
-  const focus = view.focus && view.focus.oid === view.selectedCommit ? { newLine: view.focus.originalLine, label: `你点的第 ${view.focus.line} 行` } : null;
+  const focus = view.focus && view.focus.oid === view.selectedCommit ? { newLine: view.focus.originalLine, label: `你在内容页点的第 ${view.focus.line} 行` } : null;
   return <div className="rounded-xl border border-line bg-bg" data-testid="file-change">
     {note || value.kind !== "text" || !value.patch ? <div className="flex h-9 items-center gap-1 border-b border-line px-3">{leading}</div> : null}
     {note ? <p className="m-0 px-4 py-3 text-xs text-fg3">{note}</p> : null}

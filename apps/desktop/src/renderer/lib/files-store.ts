@@ -179,6 +179,14 @@ export class FilesStore {
     if (expanded[pathHex] && !this.view.directories[pathHex]) void this.loadDirectory(pathHex, 0);
   }
 
+  /** Shows a directory in the tree, expanded with its parents, without changing what the right side shows. */
+  revealDirectory(path: GitPath): void {
+    this.expandParents(path);
+    if (this.view.expanded[path.rawHex]) return;
+    this.update({ ...this.view, expanded: { ...this.view.expanded, [path.rawHex]: true } });
+    if (!this.view.directories[path.rawHex]) void this.loadDirectory(path.rawHex, 0);
+  }
+
   loadMoreEntries(pathHex: string): void {
     const directory = this.view.directories[pathHex];
     if (directory?.state === "ready" && directory.hasMore) void this.loadDirectory(pathHex, directory.entries.length);

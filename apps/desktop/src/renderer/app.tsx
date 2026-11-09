@@ -850,6 +850,7 @@ export function App(): React.JSX.Element {
   }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
   const filesActions = React.useMemo<FilesActions>(() => ({
     toggleDirectory: pathHex => filesStore.toggleDirectory(pathHex),
+    revealDirectory: path => filesStore.revealDirectory(path),
     loadMoreEntries: pathHex => filesStore.loadMoreEntries(pathHex),
     retryDirectory: pathHex => filesStore.retryDirectory(pathHex),
     select: selection => filesStore.select(selection),
@@ -1148,7 +1149,7 @@ function filesSearchBox(files: ReturnType<FilesStore["getView"]>, find: { query:
         setFind(current => ({ ...current, current: current.current + (event.shiftKey ? -1 : 1) }));
       }} />;
   }
-  return <PageSearchBox scope={selection.kind === "directory" ? "这个目录的历史" : "这个文件的历史"} label="按提交消息搜索这个路径的历史" placeholder="搜索提交消息"
+  return <PageSearchBox scope={selection.kind === "directory" ? "目录历史" : "文件历史"} label="按提交消息搜索这个路径的历史" placeholder="搜索提交消息"
     value={historyQuery} onChange={setHistoryQuery} title="按提交消息搜索，路径条件固定为当前文件或目录（⌘F）" />;
 }
 

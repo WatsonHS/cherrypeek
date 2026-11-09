@@ -125,6 +125,30 @@ try {
     await tree("app.ts").click();
     await page.getByTestId("file-content").waitFor();
     assert.equal(await page.locator("[data-testid='file-content'] [data-line]").count(), 30);
+
+    // Clicking a folder only browses: the tree changes, the open file stays on the right.
+    const showsAppContent = async label => {
+      assert.equal(await page.getByTestId("files-tab-content").getAttribute("aria-current"), "page", `${label}: still on the content tab`);
+      assert.match(await page.locator("nav[aria-label='路径'] [aria-current='page']").textContent() ?? "", /^app\.ts$/u, `${label}: still on app.ts`);
+      assert.equal(await page.locator("[data-testid='file-content'] [data-line]").count(), 30, `${label}: the content is still shown`);
+    };
+    await tree("docs").click();
+    await tree("a.md").waitFor();
+    await showsAppContent("expanding a folder in the tree");
+    await tree("docs").click();
+    await tree("src").click();
+    assert.equal(await tree("src").getAttribute("aria-expanded"), "false");
+    await page.getByTestId("crumb-directory").filter({ hasText: /^src$/u }).click();
+    await tree("app.ts").waitFor();
+    assert.equal(await tree("src").getAttribute("aria-expanded"), "true", "the path's folder is shown in the tree");
+    await showsAppContent("clicking a folder in the path");
+    // Directory history is its own explicit action.
+    await page.locator("[data-testid='tree-row'][data-path-hex='" + Buffer.from("src").toString("hex") + "'] + [data-testid='directory-history']").click();
+    assert.equal(await page.getByTestId("files-tab-history").getAttribute("aria-current"), "page", "the history button opens the folder's history");
+    assert.match(await page.locator("nav[aria-label='路径'] [aria-current='page']").textContent() ?? "", /^src$/u);
+    await tree("app.ts").click();
+    await page.locator("[data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
+
     await page.keyboard.press("Meta+f");
     await page.keyboard.type("value2");
     await delay(200);
@@ -134,12 +158,33 @@ try {
     if (has("blame")) {
       await page.getByTestId("blame-toggle").click();
       await page.locator("[data-line='1'] [data-testid='blame-cell']").waitFor({ timeout: 20_000 });
+      await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-content'] [data-testid='blame-cell']").length === 30, null, { timeout: 20_000 });
+      // Like JetBrains' annotations: every line has its own date and author, in one gutter sized to the text.
+      const gutter = await page.evaluate(() => [...document.querySelectorAll("[data-testid='file-content'] [data-testid='blame-cell']")]
+        .map(cell => ({ text: cell.textContent ?? "", width: Math.round(cell.getBoundingClientRect().width) })));
+      assert.ok(gutter.every(cell => cell.text.includes("Smoke")), "every line names its author");
+      assert.equal(new Set(gutter.map(cell => cell.width)).size, 1, "all lines share one gutter width");
+      assert.ok(gutter[0].width < 212, `the gutter is sized to its text (${gutter[0].width}px)`);
+      // Hovering any line opens its commit card; moving away closes it.
+      await page.locator("[data-line='5'] [data-testid='blame-cell']").hover();
+      await page.getByTestId("blame-card").waitFor({ timeout: 5_000 });
+      assert.match(await page.getByTestId("blame-card").textContent() ?? "", /refactor: rename the module/u);
+      await page.mouse.move(5, 5);
+      await page.getByTestId("blame-card").waitFor({ state: "detached", timeout: 5_000 });
       await page.screenshot({ path: join(screenshotDir, "pages-blame.png") });
       // Line 1 comes from before the rename: its history is the old path's.
       await page.locator("[data-line='1'] [data-testid='blame-cell']").click();
       await page.getByTestId("return-to-line").waitFor({ timeout: 15_000 });
       assert.match(await page.locator("nav[aria-label='路径']").textContent() ?? "", /old-name\.ts/u);
       await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+      await page.locator("[data-marked='true']").first().waitFor({ timeout: 15_000 });
+      // The clicked line is only highlighted; its explanation is a tooltip, not text in the code.
+      assert.equal(await page.locator("[data-marked='true']").first().getAttribute("title"), "你在内容页点的第 1 行");
+      assert.doesNotMatch(await page.getByTestId("diff-lines").textContent() ?? "", /你点的|你在内容页/u);
+      // The way back sits in the fixed subtitle row, so scrolling the diff to the line cannot hide it.
+      const back = page.getByTestId("return-to-line");
+      assert.equal(await back.evaluate(element => element.closest(".overflow-auto") === null), true, "the return button is outside the scrolling area");
+      assert.ok(await back.isVisible());
       await page.screenshot({ path: join(screenshotDir, "pages-blame-located.png") });
       await page.getByTestId("return-to-line").click();
       await page.getByTestId("file-content").waitFor();
@@ -149,6 +194,20 @@ try {
     await page.getByTestId("files-tab-history").click();
     await page.getByTestId("file-history-row").first().waitFor({ timeout: 15_000 });
     assert.equal(await page.getByTestId("file-history-row").count(), 2, "literal path history: the rename and the later change");
+    // A narrower window still shows the history search's whole placeholder next to its scope.
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1200, 900));
+    await page.waitForFunction(() => window.innerWidth === 1200);
+    await delay(150);
+    assert.equal((await page.getByTestId("search-scope").first().textContent())?.trim(), "文件历史");
+    const placeholderFits = await page.getByLabel("按提交消息搜索这个路径的历史").evaluate(input => {
+      const context = document.createElement("canvas").getContext("2d");
+      const style = getComputedStyle(input);
+      context.font = `${style.fontSize} ${style.fontFamily}`;
+      return { needed: Math.ceil(context.measureText(input.placeholder).width), available: input.clientWidth };
+    });
+    assert.ok(placeholderFits.needed <= placeholderFits.available, `the placeholder fits at 1200px (${JSON.stringify(placeholderFits)})`);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 900));
+    await page.waitForFunction(() => window.innerWidth === 1440);
     await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
     await page.keyboard.press("Alt+d");
     await page.getByTestId("history-float-toggle").waitFor();
@@ -195,7 +254,9 @@ try {
     await page.locator("[data-testid='file-content'] [data-line='3']").waitFor({ timeout: 15_000 });
     const injected = async () => page.evaluate(() => {
       const content = document.querySelector("[data-testid='file-content']");
-      return { text: content.textContent, elements: content.querySelectorAll("img, script, b").length, ran: window.__injected ?? null };
+      // The code of each line is its last span; line numbers are not selectable and the blame gutter is separate.
+      const text = [...content.querySelectorAll("[data-line] > span:last-child")].map(span => span.textContent).join("\n");
+      return { text, elements: content.querySelectorAll("img, script, b").length, ran: window.__injected ?? null };
     });
     const plain = await injected();
     await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-content'] [class*='text-syn-']").length > 3, null, { timeout: 15_000 });

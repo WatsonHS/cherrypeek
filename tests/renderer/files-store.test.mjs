@@ -85,6 +85,33 @@ test("expanding and reopening a directory keeps the current file and reuses its 
   store.dispose();
 });
 
+test("revealing a folder from the path expands it in the tree and leaves the right side alone", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  store.select({ path: path("apps/desktop/a.ts"), kind: "file" }, { tab: "history" });
+  await api.answer("history", ok({ commit: version.commit, path: path("apps/desktop/a.ts"), entries: [historyEntry(oid("c"))], nextCursor: null }));
+  await api.answer("tree", ok({ commit: version.commit, path: path("apps"), entries: [], offset: 0, total: 0, hasMore: false }));
+  await api.answer("tree", ok({ commit: version.commit, path: path("apps/desktop"), entries: [], offset: 0, total: 0, hasMore: false }));
+  store.toggleDirectory(hex("apps"));
+  const before = store.getView();
+  assert.equal(before.expanded[hex("apps")], undefined, "the folder was collapsed");
+
+  store.revealDirectory(path("apps"));
+  const after = store.getView();
+  assert.equal(after.expanded[hex("apps")], true, "the folder is expanded again");
+  for (const key of ["selection", "tab", "selectedCommit", "history", "change", "content"]) {
+    assert.equal(after[key], before[key], `${key} is unchanged`);
+  }
+  store.revealDirectory(path("apps/desktop"));
+  assert.equal(store.getView().expanded[hex("apps/desktop")], true);
+  assert.equal(store.getView().selection, before.selection, "revealing never selects the folder");
+  assert.ok(!api.pending.some(item => item.kind === "history" && item.params.kind === "directory"), "no directory history is read");
+  store.dispose();
+});
+
 test("directories open on history; a file's history selects its newest change and loads that diff", async () => {
   const api = fakeApi();
   const store = new FilesStore(api);
