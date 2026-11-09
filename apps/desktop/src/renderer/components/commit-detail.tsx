@@ -81,7 +81,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
         {oldDetailContext && shownDetails?.refs.length ? <RefTags refs={shownDetails.refs} headReference={null} size="default" limit={6} /> : null}
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
         <div className="flex-1" />
-        {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory}>在历史中定位</Button> : null}
+        {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory} title="在完整历史里定位这个结果（⌘L）；定位后 ⌘[ 回到搜索结果">在历史中定位</Button> : null}
         {onOpenHandoff ? <CommitHandoffMenu oid={commit.oid} isMerge={isMerge} onOpenHandoff={onOpenHandoff}
           toNewest={!commitsOverride && index > 0
             ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }

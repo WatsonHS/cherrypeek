@@ -287,6 +287,18 @@ try {
     await page.getByTestId("history-filter").fill("");
     await page.getByTestId("back-to-file").click();
 
+    // Shortcuts keep one meaning on every page: ⌥H shows or hides the history column (a display toggle like ⌥B), ⌥⌘2
+    // opens the file's change (the newest in its history) and ⌥⌘1 returns to the file, like 概览 / 文件改动 on the commits page.
+    await page.keyboard.press("Alt+h");
+    await page.getByTestId("history-column").waitFor({ state: "hidden" });
+    await page.keyboard.press("Alt+h");
+    await page.getByTestId("history-column").waitFor();
+    await page.keyboard.press("Alt+Meta+2");
+    await page.getByTestId("change-panel").waitFor({ timeout: 15_000 });
+    assert.equal(await page.getByTestId("file-history-row").first().getAttribute("aria-pressed"), "true", "⌥⌘2 opens the newest change");
+    await page.keyboard.press("Alt+Meta+1");
+    await page.getByTestId("change-panel").waitFor({ state: "detached" });
+
     // The change view's commit bar: details folded until opened, and a switcher through every file of the commit (a root
     // commit here, no parent); another file opens in place with the same commit picked, and ⌘[ returns file by file.
     const crumbIs = name => page.waitForFunction(expected => document.querySelector("nav[aria-label='路径'] [aria-current='page']")?.textContent === expected, name, { timeout: 15_000 });
@@ -418,6 +430,21 @@ try {
     await delay(500);
     assert.equal(await note.getAttribute("aria-pressed"), "true", "the selected workspace file is kept");
     assert.equal(await scrollPreview(null), previewScroll, "the workspace page keeps its scroll position");
+
+    // "在文件页打开": an untracked file has nothing committed to open; a modified one opens on the files page, and the
+    // top bar names the way back to the workspace.
+    assert.equal(await page.getByTestId("workspace-open-file").count(), 0, "an untracked file has no committed version");
+    await page.getByTestId("workspace-file").filter({ hasText: "README.md" }).click();
+    await page.getByTestId("workspace-open-file").click();
+    assert.equal(await current(), "page-files");
+    await page.waitForFunction(() => document.querySelector("nav[aria-label='路径'] [aria-current='page']")?.textContent === "README.md", null, { timeout: 15_000 });
+    await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='3']").waitFor({ timeout: 15_000 });
+    assert.match(await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='3']").textContent() ?? "", /First version\./u, "the committed version, not the working tree");
+    assert.match(await page.getByTestId("tree-version").textContent() ?? "", /main/u, "opened at this window's HEAD, where the workspace's changes start");
+    const toWorkspace = page.locator("[data-hint='true']");
+    assert.equal((await toWorkspace.textContent() ?? "").trim(), "工作区");
+    await toWorkspace.click();
+    assert.equal(await current(), "page-workspace");
   }
 
   // The top bar narrows in the documented order and never overflows (docs/DESIGN.md section 11).

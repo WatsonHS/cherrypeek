@@ -242,6 +242,11 @@ export function App(): React.JSX.Element {
   const [detailTab, setDetailTab] = React.useState("overview");
   const [page, setPage] = React.useState<AppPage>("commits");
   const pageRef = React.useRef(page);
+  /** Shows or hides the files page's history column and remembers it (⌥H and the 历史 button). */
+  const historyToggle = React.useRef((open: boolean) => {
+    try { localStorage.setItem(FILES_HISTORY_OPEN_KEY, String(open)); } catch { /* storage unavailable: not remembered */ }
+    filesStore.setHistoryOpen(open);
+  });
   pageRef.current = page;
   const [workspaceFilter, setWorkspaceFilter] = React.useState("");
   const [filesVersionPinned, setFilesVersionPinned] = React.useState<TreeVersion | null>(null);
@@ -659,11 +664,19 @@ export function App(): React.JSX.Element {
   React.useEffect(() => () => filesStore.dispose(), [filesStore]);
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== "KeyB" || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || event.isComposing) return;
+      // ⌥ + a letter toggles a display option of the files page: ⌥B blame, ⌥H the history column (⌥D / ⌥F / ⌥Z: diffs).
+      if (event.code !== "KeyB" && event.code !== "KeyH" || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || event.isComposing) return;
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/u.test(target.tagName))) return;
       const files = filesStore.getView();
-      if (pageRef.current !== "files" || files.tab !== "content" || files.selection?.kind !== "file" || !files.blameSupported) return;
+      if (pageRef.current !== "files") return;
+      if (event.code === "KeyH") {
+        if (!files.selection) return;
+        event.preventDefault();
+        historyToggle.current(!files.historyOpen);
+        return;
+      }
+      if (files.tab !== "content" || files.selection?.kind !== "file" || !files.blameSupported) return;
       event.preventDefault();
       filesStore.setBlame(!files.blameEnabled);
     };
@@ -879,17 +892,34 @@ export function App(): React.JSX.Element {
   React.useEffect(() => {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
-  const openFileHistory = React.useCallback((path: GitPath, oid: string | undefined, from: "commits" | "workspace") => {
+  const openFileHistory = React.useCallback((path: GitPath, oid: string) => {
     setJumpOrigin(recordJump());
     filesVisited.current = true;
     filesStore.setVersion(filesVersion);
     setPage("files");
     filesStore.select({ path, kind: "file" }, { tab: "history", commit: oid });
   }, [filesStore, filesVersion, recordJump]);
+  /**
+   * "在文件页打开" on the workspace page. The workspace's changes are against this window's HEAD, so the file opens at
+   * HEAD whatever the browsing scope shows; the tree version is pinned only when HEAD is not already the scope's.
+   */
+  const workspaceHead = React.useMemo(() => {
+    const repository = view.repository;
+    return repository?.headOid ? { commit: repository.headOid, label: repository.headReference ? shortRefName(repository.headReference) : "HEAD" } : null;
+  }, [view.repository]);
+  const openFileFromWorkspace = React.useCallback((path: GitPath) => {
+    if (!workspaceHead) return;
+    setJumpOrigin(recordJump());
+    filesVisited.current = true;
+    setFilesVersionPinned(workspaceHead.commit === scopeTreeVersion?.commit && workspaceHead.label === scopeTreeVersion.label ? null : workspaceHead);
+    filesStore.setVersion(workspaceHead);
+    setPage("files");
+    filesStore.select({ path, kind: "file" });
+  }, [filesStore, recordJump, scopeTreeVersion, workspaceHead]);
   /** "在文件页打开" on a commit's changed file: the file at the tree version, or its history at this commit if the commit deleted it. */
   const openFileFromCommit = React.useCallback((file: ChangedFile, oid: string) => {
     if (!file.newPath) {
-      if (file.oldPath) openFileHistory(file.oldPath, oid, "commits");
+      if (file.oldPath) openFileHistory(file.oldPath, oid);
       return;
     }
     setJumpOrigin(recordJump());
@@ -1006,10 +1036,7 @@ export function App(): React.JSX.Element {
     stepCommitFile: delta => { recordJump(); void filesStore.stepCommitFile(delta); },
     loadMoreCommitFiles: () => filesStore.loadMoreCommitFiles(),
     retryCommitFiles: () => filesStore.retryCommitFiles(),
-    setHistoryOpen: open => {
-      try { localStorage.setItem(FILES_HISTORY_OPEN_KEY, String(open)); } catch { /* storage unavailable: not remembered */ }
-      filesStore.setHistoryOpen(open);
-    },
+    setHistoryOpen: open => historyToggle.current(open),
     loadMoreEntries: pathHex => filesStore.loadMoreEntries(pathHex),
     retryDirectory: pathHex => filesStore.retryDirectory(pathHex),
     select: selection => {
@@ -1035,8 +1062,8 @@ export function App(): React.JSX.Element {
     openCommit: oid => { void openCommitFromFiles(oid); },
   }), [filesStore, openCommitFromFiles, recordJump, scopeTreeVersion]);
   const versionOptions = React.useMemo(() => treeVersionOptions(view, scopeTreeVersion), [view.navigation, view.refs, scopeTreeVersion]);
-  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesStore, navigateBack, navigateForward });
-  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesStore, navigateBack, navigateForward };
+  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump });
+  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump };
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
@@ -1049,29 +1076,36 @@ export function App(): React.JSX.Element {
         const focus = () => window.dispatchEvent(new Event(FOCUS_SEARCH_EVENT));
         if (actions.page === "commits" && actions.historyLocation) void actions.returnToSearch().then(focus);
         else focus();
-      } else if (key === "[" && !event.altKey && actions.historyLocation) {
-        event.preventDefault();
-        void actions.returnToSearch();
-      } else if (key === "]" && !event.altKey && actions.searchView.active && actions.searchView.selectedOid) {
+      } else if (event.code === "KeyL" && !event.altKey && !event.shiftKey && actions.page === "commits" && actions.searchView.active && actions.searchView.selectedOid) {
+        // ⌘L: the selected search result in the full history.
         event.preventDefault();
         void actions.locateSelectedInHistory(actions.searchView.selectedOid);
+      } else if (key === "[" && !event.altKey && actions.historyLocation) {
+        // Back from a located result is back to the search results.
+        event.preventDefault();
+        void actions.returnToSearch();
       } else if ((key === "[" || key === "]") && !event.altKey && !event.shiftKey) {
-        // Everywhere else ⌘[ / ⌘] go back and forward between recorded places.
+        // ⌘[ / ⌘] always go back and forward between recorded places.
         event.preventDefault();
         if (key === "[") actions.navigateBack();
         else actions.navigateForward();
       } else if (/^Digit[123]$/u.test(event.code) && !event.altKey && !event.shiftKey) {
-        // ⌘1 / ⌘2 / ⌘3 switch pages; with ⌥ they switch the tabs inside the page.
+        // ⌘1 / ⌘2 / ⌘3 switch pages; with ⌥ they pick the first or second view on the right of the page.
         event.preventDefault();
         actions.changePage(event.code === "Digit1" ? "commits" : event.code === "Digit2" ? "files" : "workspace");
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "commits") {
         event.preventDefault();
         actions.setDetailTab(event.code === "Digit1" ? "overview" : "changes");
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "files") {
+        // ⌥⌘1 the file, ⌥⌘2 its change (the picked commit, or the newest in its history).
         event.preventDefault();
-        // ⌥1 closes a change open below the file; ⌥2 shows or hides the history column.
-        if (event.code === "Digit1") actions.filesStore.closeChange();
-        else actions.filesStore.setHistoryOpen(!actions.filesStore.getView().historyOpen);
+        const files = actions.filesStore.getView();
+        if (files.selection?.kind !== "file") return;
+        if (event.code === "Digit1") actions.filesActions.closeChange();
+        else if (files.tab === "content") {
+          actions.recordJump();
+          actions.filesStore.setTab("history");
+        }
       } else if (event.code === "KeyR" && event.altKey) {
         event.preventDefault();
         void actions.refresh();
@@ -1246,7 +1280,7 @@ export function App(): React.JSX.Element {
         <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
           onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
           onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
-          onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path, undefined, "workspace") : undefined} />
+          onRetryContent={() => workspaceStore.retryContent()} onOpenFile={filesView.supported && workspaceHead ? openFileFromWorkspace : undefined} />
       </div> : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}

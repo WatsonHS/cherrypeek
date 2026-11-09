@@ -163,30 +163,54 @@ function TopBarSearch({ label, children }: { label: string; children: React.Reac
   </div>;
 }
 
+/**
+ * One rule per modifier, the same on every page: ⌘ + digit picks the page, ⌥⌘ + digit the first or second view on the
+ * right of it, ⌥ + letter toggles a display option, and ⌘[ / ⌘] always go back and forward.
+ */
 function ShortcutGuide(): React.JSX.Element {
   const mac = /Mac|iPhone|iPad/u.test(navigator.platform);
-  const modifier = mac ? "⌘" : "Ctrl+";
-  const altModifier = mac ? "⌥⌘" : "Ctrl+Alt+";
-  const refreshKey = mac ? "⌥⌘R" : "Ctrl+Alt+R";
+  const cmd = mac ? "⌘" : "Ctrl+";
+  const alt = mac ? "⌥" : "Alt+";
+  const altCmd = mac ? "⌥⌘" : "Ctrl+Alt+";
+  const groups: { title: string; rows: [string, string][] }[] = [
+    { title: "全局", rows: [
+      ["切换页面：提交 / 文件 / 工作区", `${cmd}1 / 2 / 3`],
+      ["后退 / 前进", `${cmd}[ / ]`],
+      ["聚焦搜索", `${cmd}F`],
+      ["刷新仓库历史", `${altCmd}R`],
+    ] },
+    { title: "右侧视图", rows: [
+      ["提交页：概览 / 文件改动", `${altCmd}1 / 2`],
+      ["文件页：文件 / 修改", `${altCmd}1 / 2`],
+    ] },
+    { title: "显示开关", rows: [
+      ["文件页：历史列", `${alt}H`],
+      ["文件页：逐行追溯", `${alt}B`],
+      ["diff：上下合并 / 左右并排", `${alt}D`],
+      ["diff：只看改动 / 完整文件", `${alt}F`],
+      ["diff：自动换行", `${alt}Z`],
+    ] },
+    { title: "搜索与列表", rows: [
+      ["在历史中定位所选结果", `${cmd}L`],
+      ["定位后回到搜索结果", `${cmd}[`],
+      ["列表中上下选择", "↑ / ↓"],
+      ["关闭修改 / 收起搜索", "Esc"],
+    ] },
+  ];
   return <Popover>
     <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="快捷键说明" title="快捷键说明" data-testid="shortcut-guide-trigger">
       <Keyboard className="topbar-shortcut-icon size-4" strokeWidth={1.75} />
       <Ellipsis className="topbar-more-icon hidden size-4" strokeWidth={1.75} />
     </Button></PopoverTrigger>
-    <PopoverContent align="end" className="w-[300px] p-3" data-testid="shortcut-guide">
-      <h2 className="m-0 mb-2 text-[13px] font-semibold">快捷键</h2>
-      <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
-        <dt className="text-fg2">聚焦搜索</dt><dd className="m-0 font-mono text-fg3">{modifier}F</dd>
-        <dt className="text-fg2">后退 / 前进</dt><dd className="m-0 font-mono text-fg3">{modifier}[ / ]</dd>
-        <dt className="text-fg2">搜索时：在历史中定位 / 返回结果</dt><dd className="m-0 font-mono text-fg3">{modifier}] / [</dd>
-        <dt className="text-fg2">切换页面：提交 / 文件 / 工作区</dt><dd className="m-0 font-mono text-fg3">{modifier}1 / 2 / 3</dd>
-        <dt className="text-fg2">提交详情：概览 / 文件改动</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
-        <dt className="text-fg2">文件页：回到文件 / 开关历史列</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
-        <dt className="text-fg2">关闭修改，回到文件</dt><dd className="m-0 font-mono text-fg3">Esc</dd>
-        <dt className="text-fg2">刷新仓库历史</dt><dd className="m-0 font-mono text-fg3">{refreshKey}</dd>
-        <dt className="text-fg2">切换浏览范围</dt><dd className="m-0 text-fg3">顶部范围选择器</dd>
-        <dt className="text-fg2">历史列表中上下选择提交</dt><dd className="m-0 font-mono text-fg3">↑ / ↓</dd>
-      </dl>
+    <PopoverContent align="end" className="w-[320px] p-3" data-testid="shortcut-guide">
+      <h2 className="m-0 mb-1 text-[13px] font-semibold">快捷键</h2>
+      {groups.map(group => <section key={group.title} className="mt-2.5 first-of-type:mt-1.5">
+        <h3 className="m-0 mb-1 text-[11px] font-semibold text-fg3">{group.title}</h3>
+        <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-xs">
+          {group.rows.map(([label, keys]) => <React.Fragment key={label}><dt className="text-fg2">{label}</dt><dd className="m-0 text-right font-mono text-fg3">{keys}</dd></React.Fragment>)}
+        </dl>
+      </section>)}
+      <p className="m-0 mt-2.5 text-[11px] text-fg3">浏览范围用顶部的范围选择器切换。</p>
     </PopoverContent>
   </Popover>;
 }

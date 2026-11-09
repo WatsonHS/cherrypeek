@@ -211,7 +211,7 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
         <svg viewBox="0 0 16 16" aria-hidden="true" className="size-3.5" style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" }}><path d="M2.5 3v10M5 4.5h8.5M5 8h6M5 11.5h7.5" /></svg>
         逐行追溯{view.blameSupported ? null : <span className="text-[11px]">· 占位</span>}
       </button> : null}
-      {selection ? <button type="button" aria-pressed={view.historyOpen} data-testid="history-toggle" title="显示或隐藏这个路径的历史（⌥⌘2）"
+      {selection ? <button type="button" aria-pressed={view.historyOpen} data-testid="history-toggle" title="显示或隐藏这个路径的历史（⌥H）"
         onClick={() => actions.setHistoryOpen(!view.historyOpen)}
         className="flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] px-[9px] text-[12.5px] whitespace-nowrap text-fg3 hover:bg-hover hover:text-fg aria-pressed:bg-accent-soft aria-pressed:font-medium aria-pressed:text-accent-fg">
         <Clock className="size-3.5" strokeWidth={1.75} />历史{historyCount ? <span className="text-[11.5px] font-normal opacity-70">{historyCount}</span> : null}

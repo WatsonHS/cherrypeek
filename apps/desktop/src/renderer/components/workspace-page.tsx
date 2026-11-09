@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Clock, Info, LoaderCircle, RefreshCw } from "lucide-react";
+import { FileText, Info, LoaderCircle, RefreshCw } from "lucide-react";
 import type { ChangedFileStatus, GitPath, RepositoryInfo, WorkspaceDiff, WorkspaceFile } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
@@ -42,7 +42,7 @@ function Counts({ additions, deletions }: { additions: number | null | undefined
 }
 
 /** The workspace page: files changed in this window's directory on the left, the chosen file on the right. */
-export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, onLoadMore, onRetryContent, onOpenFileHistory }: {
+export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, onLoadMore, onRetryContent, onOpenFile }: {
   repository: RepositoryInfo;
   view: WorkspaceView;
   filter: string;
@@ -51,7 +51,8 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
   onLoadMore(): void;
   onRetryContent(): void;
   /** Opens the files page on this path's committed history (P4-10). */
-  onOpenFileHistory?(path: GitPath): void;
+  /** "在文件页打开": the committed file (its path before a staged rename) on the files page. */
+  onOpenFile?(path: GitPath): void;
 }): React.JSX.Element {
   const directory = repository.worktreePath ?? repository.path;
   if (!view.supported) {
@@ -140,7 +141,7 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
     </nav>
     <main aria-label={selected ? `${selected.entry.path.display} 的改动` : "所选文件的改动"} className="min-h-0 min-w-0 flex-[999_1_560px] overflow-auto overscroll-contain bg-panel">
       {selected ? <SelectedFile item={selected} view={view} onLoadMore={onLoadMore} onRetry={onRetryContent}
-        onOpenHistory={onOpenFileHistory && selected.group !== "untracked" ? () => onOpenFileHistory(selected.entry.originalPath ?? selected.entry.path) : undefined} />
+        onOpenFile={onOpenFile && committed(selected) ? () => onOpenFile(selected.entry.originalPath ?? selected.entry.path) : undefined} />
         : <p className="m-0 flex h-full items-center justify-center text-[13px] text-fg3">{status ? "选择左侧的文件查看改动。" : ""}</p>}
     </main>
   </div>;
@@ -152,7 +153,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_024 / 1_024).toFixed(1)} MB`;
 }
 
-function SelectedFile({ item, view, onLoadMore, onRetry, onOpenHistory }: { item: WorkspaceItem; view: WorkspaceView; onLoadMore(): void; onRetry(): void; onOpenHistory?(): void }): React.JSX.Element {
+/** Whether the file has a committed version to open: not untracked, and not a new file (added without a rename). */
+function committed(item: WorkspaceItem): boolean {
+  if (item.group === "untracked") return false;
+  const added = item.entry.staged?.status === "added" || item.entry.unstaged?.status === "added";
+  return !added || item.entry.originalPath !== null;
+}
+
+function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: WorkspaceItem; view: WorkspaceView; onLoadMore(): void; onRetry(): void; onOpenFile?(): void }): React.JSX.Element {
   const { name, dir } = splitPath(item.entry.path.display);
   const content = view.content;
   const side = item.group === "staged" ? "已暂存 · HEAD → index" : item.group === "unstaged" ? "未暂存 · index → 工作区" : item.group === "untracked" ? "未跟踪 · 只在工作区" : "冲突 · 工作区里带冲突标记的内容";
@@ -165,8 +173,8 @@ function SelectedFile({ item, view, onLoadMore, onRetry, onOpenHistory }: { item
         <span className="text-[12.5px] text-fg3">{side}{item.change ? <> · <Counts additions={item.change.additions} deletions={item.change.deletions} /></> : null}
           {item.entry.originalPath ? ` · 来自 ${item.entry.originalPath.display}` : ""}</span>
       </div>
-      {onOpenHistory ? <Button variant="outline" size="sm" onClick={onOpenHistory} data-testid="workspace-file-history">
-        <Clock className="size-3.5" strokeWidth={1.75} />文件历史</Button> : null}
+      {onOpenFile ? <Button variant="outline" size="sm" onClick={onOpenFile} data-testid="workspace-open-file" title="在文件页看这个文件在 HEAD 里的版本（这些改动的出发点）和它的历史">
+        <FileText className="size-3.5" strokeWidth={1.75} />在文件页打开</Button> : null}
     </div>
     {item.alsoIn && other ? <div className="flex items-center gap-2.5 rounded-[10px] bg-bg px-3 py-[9px] text-[12.5px] text-fg2 shadow-[inset_0_0_0_1px_var(--line)]">
       <Info className="size-3.5 shrink-0 text-fg3" strokeWidth={1.75} />

@@ -166,6 +166,12 @@ try {
     .waitFor({ state: "visible", timeout: 15_000 });
   assert.equal(await page.locator('[aria-label="提交详情"] button[aria-label^="复制完整 OID"]').getAttribute("aria-label"),
     `复制完整 OID ${fixture.wideFiles}`, "choosing a search result opens matching commit details");
+  // ⌘L locates the selected result in the full history; ⌘[ (back) returns to the search results.
+  await page.keyboard.press("Meta+KeyL");
+  await page.getByTestId("return-to-search").waitFor({ state: "visible", timeout: 20_000 });
+  await page.keyboard.press("Meta+BracketLeft");
+  await page.getByTestId("return-to-search").waitFor({ state: "detached", timeout: 20_000 });
+  await searchResult.waitFor({ state: "visible", timeout: 15_000 });
   await page.emulateMedia({ colorScheme: "light" });
   await waitForDom(page, () => document.documentElement.dataset.theme === "light", 5_000);
   await page.screenshot({ path: resolve(screenshotDirectory, "p2-02-commit-details-light.png"), fullPage: true });

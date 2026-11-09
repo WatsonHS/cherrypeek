@@ -501,7 +501,7 @@ export class FilesStore {
     const showingChange = this.view.tab === "history";
     const selectedCommit = this.view.selectedCommit ?? (showingChange ? entries[0]?.commit.oid ?? null : null);
     this.update({ ...this.view, history: { key, state: "ready", entries, nextCursor: result.value.nextCursor, loadingMore: false, error: null }, selectedCommit });
-    if (showingChange && selectedCommit && selection.kind === "file" && this.view.change === null) void this.loadChange();
+    if (showingChange && selectedCommit && selection.kind === "file") this.loadShownChange();
     if (selectedCommit && selection.kind === "directory" && this.view.pathChanges?.key !== pathChangesKey(selectedCommit, selection.path.rawHex)) void this.loadPathChanges(false);
   }
 
