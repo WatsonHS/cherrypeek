@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { _electron as electron } from "playwright";
 
 const root = resolve(import.meta.dirname, "../..");
-const bundle = resolve(root, "release", process.arch === "arm64" ? "mac-arm64" : "mac", "CommitScope.app");
+const bundle = resolve(root, "release", process.arch === "arm64" ? "mac-arm64" : "mac", "CherryPeek.app");
 const temporary = await mkdtemp(join(tmpdir(), "commitscope 包测试 "));
 const profile = join(temporary, "profile");
 const output = resolve(root, "output/playwright");
@@ -19,7 +19,7 @@ let app;
 let daemonPid;
 try {
   app = await electron.launch({
-    executablePath: join(bundle, "Contents/MacOS/CommitScope"),
+    executablePath: join(bundle, "Contents/MacOS/CherryPeek"),
     args: [`--repository=${root}`, `--user-data-dir=${profile}`],
     cwd: temporary,
     env,

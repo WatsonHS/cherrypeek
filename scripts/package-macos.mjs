@@ -21,6 +21,8 @@ const { name, version } = JSON.parse(await readFile(resolve(root, "package.json"
 // All runtime imports are bundled; the package needs no development dependencies.
 await writeFile(resolve(root, "apps/desktop/dist/package.json"), JSON.stringify({
   name,
+  // Electron names the app data folder after productName: ~/Library/Application Support/CherryPeek.
+  productName: "CherryPeek",
   version,
   private: true,
   description: "只读 Git 历史浏览器",

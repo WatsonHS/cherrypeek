@@ -1,8 +1,10 @@
-# CommitScope
+# CherryPeek
+
+中文 | [English](README.en.md)
 
 面向 Agent 高频提交场景的桌面 Git 历史浏览器。快速看清最近提交了多少、谁提交的、改了什么，以及分支之间的关系。
 
-**当前状态：只读 MVP 功能已齐全，M3 本机小规模主流程通过，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条，主列表最多保留 1800 条摘要，另为当前 merge 页预留 200 条；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过当时的 500 MiB 目标；现行内存预算已放宽，见下文。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，默认显示六列，点击图区 +N 可展开当前范围的全部图线并横向滚动，支持收起；明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整消息 / trailer、父提交文件比较、merge 带入分页与自动加载包含分支已接入，见 [P2-02 验证记录](docs/validation/p2-02-commit-details.md)；完整实窗检查未跑完。P2-03 已接入点击文件展开只读 diff，支持父提交切换、行号、二进制 / LFS / gitlink 提示和截断说明，见[实现及检查记录](docs/implementation/p2-03-readonly-diff.md)。P2-04 已接入搜索结果的历史定位与返回，恢复原查询、选择和滚动锚点，并提供快捷键说明，见[实现记录](docs/implementation/p2-04-history-location.md)。P3-01 已接入文件 / 目录字面路径筛选、当前快照路径补全和 merge 命中父说明，见[实现记录](docs/implementation/p3-01-path-history.md)。P3-02 活动统计、P3-03 外部变化提示与 P3-05 可编辑 Agent 提示词已接入；P3-04 的 8 步实窗流程和当前项目只读数据对照通过，见[M3 记录](docs/validation/m3-mvp.md)。尚未完成 M4 性能、长期稳定性与发行验收。`CommitScope` 是暂定工作名。
+**当前状态：只读 MVP 功能已齐全，M3 本机小规模主流程通过，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条，主列表最多保留 1800 条摘要，另为当前 merge 页预留 200 条；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过当时的 500 MiB 目标；现行内存预算已放宽，见下文。详见[P1-03 基线](docs/benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](docs/validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，默认显示六列，点击图区 +N 可展开当前范围的全部图线并横向滚动，支持收起；明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](docs/benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整消息 / trailer、父提交文件比较、merge 带入分页与自动加载包含分支已接入，见 [P2-02 验证记录](docs/validation/p2-02-commit-details.md)；完整实窗检查未跑完。P2-03 已接入点击文件展开只读 diff，支持父提交切换、行号、二进制 / LFS / gitlink 提示和截断说明，见[实现及检查记录](docs/implementation/p2-03-readonly-diff.md)。P2-04 已接入搜索结果的历史定位与返回，恢复原查询、选择和滚动锚点，并提供快捷键说明，见[实现记录](docs/implementation/p2-04-history-location.md)。P3-01 已接入文件 / 目录字面路径筛选、当前快照路径补全和 merge 命中父说明，见[实现记录](docs/implementation/p3-01-path-history.md)。P3-02 活动统计、P3-03 外部变化提示与 P3-05 可编辑 Agent 提示词已接入；P3-04 的 8 步实窗流程和当前项目只读数据对照通过，见[M3 记录](docs/validation/m3-mvp.md)。尚未完成 M4 性能、长期稳定性与发行验收。产品名为 CherryPeek（2026-11-10 定名，取 cherry-pick 的谐音，意为挑着看一眼；早期文档与记录里的 CommitScope 是原工作名，代码内部标识仍沿用 `commitscope`）。
 
 P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约 1.3 ms；同口径整树空闲 RSS 从约 603 降至 566 MiB，查询阶段采样峰值从约 690 降至 623 MiB。这些是旧预算下的优化结果，长期稳定性和发布验收仍待完成，详见[查询报告](docs/benchmarks/p4-01-interactive-performance.md)与[内存报告](docs/benchmarks/p4-01-memory.md)。
 
@@ -35,7 +37,7 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 | 文档 | 内容 |
 | --- | --- |
 | [产品范围](docs/PRODUCT.md) | 用户需求、主界面、搜索与统计口径、第一版边界 |
-| [界面设计稿](https://claude.ai/artifact/LssQVaEeGiqB1WdCRn2jDa) | 已确认的「v3 · B 细化」画板（示例数据；默认仅所有者可见；以产品范围的文字为准） |
+| 界面设计稿 | 已确认的「v3 · B 细化」画板，在未公开的设计画布里（示例数据）；以产品范围和 [DESIGN](docs/DESIGN.md) 的文字为准 |
 | [界面规范](docs/DESIGN.md) | 颜色、字体、间距、组件与状态的实现规范（以此为准） |
 | [交给 Agent 模板](docs/HANDOFF.md) | 各场景 prompt 的文案、变量与防注入规则 |
 | [UI-01 验收记录](docs/validation/ui-01-foundation.md) | 界面基础的实现范围、真实数据与占位划分、测试与未验证项 |
@@ -44,6 +46,7 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 | [技术架构](docs/ARCHITECTURE.md) | Electron / Rust 分工、通信、Git 读取、分页、索引与刷新 |
 | [路线图](docs/ROADMAP.md) | 从技术验证到可日用版本的阶段和验收关卡 |
 | [实施计划](docs/PLAN.md) | 可直接开始执行的任务、依赖、交付物和完成条件 |
+| [发布流程](docs/RELEASE.md) | macOS 签名、公证、检查与 GitHub Release 上传；第一版说明见 [v0.1.0](docs/releases/v0.1.0.md) |
 | [性能与正确性验收](docs/VALIDATION.md) | 测试仓库、性能预算、测量方式和关键边界 |
 | [P0-01 代码级计划](docs/implementation/p0-01-bootstrap.md) | 文件、接口、进程边界、命令与代理分工 |
 | [P0-01 验收记录](docs/validation/p0-01-bootstrap.md) | 实测环境、检查结果、修复记录和未验证范围 |
@@ -85,7 +88,7 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 
 ## macOS 本机打包
 
-在当前架构的 Mac 上执行 `pnpm package:mac`，会先构建 release Rust 核心与桌面代码，再生成 `release/mac-arm64/CommitScope.app` 和 `release/CommitScope-0.1.0-arm64.dmg`（Apple Silicon）。只需要应用目录时可执行 `pnpm package:mac --dir`。打开 DMG 后将 CommitScope 拖到 Applications，或直接打开生成的 `.app`。
+在当前架构的 Mac 上执行 `pnpm package:mac`，会先构建 release Rust 核心与桌面代码，再生成 `release/mac-arm64/CherryPeek.app` 和 `release/CherryPeek-0.1.0-arm64.dmg`（Apple Silicon）。只需要应用目录时可执行 `pnpm package:mac --dir`。打开 DMG 后将 CommitScope 拖到 Applications，或直接打开生成的 `.app`。
 
 运行应用只需兼容的系统 Git，不依赖 Node、pnpm、Rust 或项目源码。使用当前 PATH 查找 Git，找不到时尝试 `/usr/bin/git`；Git 必须支持 `--no-lazy-fetch`。本机包使用 ad-hoc 签名，尚未做公开分发的 Developer ID 签名与公证，也未验证 Intel 或干净系统安装。默认应用数据位于 `~/Library/Application Support/commitscope/`，其中 `repository-state/` 存放仓库缓存与查看记录。
 

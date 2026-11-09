@@ -37,7 +37,7 @@ const NOTE_PLACEHOLDER: Record<HandoffRequest["scenario"], string> = {
 /**
  * Hands one chosen task to an outside agent: a sentence on what it will be asked to do, the
  * objects involved, an optional note, and the full prompt folded away for editing. Copying only
- * writes the clipboard; CommitScope runs neither the agent nor Git.
+ * writes the clipboard; CherryPeek runs neither the agent nor Git.
  */
 export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadFacts, onCancelFacts, onCopyText }: HandoffDialogProps): React.JSX.Element | null {
   const requestKey = handoffRequestKey(request);
@@ -176,7 +176,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
 
       <footer className="flex items-center gap-3 border-t border-line px-5 py-3">
         <span role="status" aria-live="polite" data-testid="handoff-copy-status" className="mr-auto text-xs text-fg3">
-          {copyState === "copied" ? "已复制，粘贴给你的 Agent 即可。" : copyState === "failed" ? "复制失败，请重试。" : "CommitScope 只复制文字，不运行 Agent 或 Git。"}
+          {copyState === "copied" ? "已复制，粘贴给你的 Agent 即可。" : copyState === "failed" ? "复制失败，请重试。" : "CherryPeek 只复制文字，不运行 Agent 或 Git。"}
         </span>
         <Button data-testid="handoff-copy" disabled={copyDisabled} onClick={() => { void handleCopy(); }}>复制 prompt</Button>
       </footer>

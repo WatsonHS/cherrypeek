@@ -36,7 +36,7 @@ try {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({
-    executablePath: resolve(root, 'release/mac-arm64/CommitScope.app/Contents/MacOS/CommitScope'),
+    executablePath: resolve(root, 'release/mac-arm64/CherryPeek.app/Contents/MacOS/CherryPeek'),
     args: [`--user-data-dir=${join(temporary, 'profile')}`, `--repository=${repo}`],
     env, chromiumSandbox: true,
   });

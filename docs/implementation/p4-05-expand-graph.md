@@ -47,7 +47,7 @@
 - `graphHighlight` 只追踪有界已载图的真实连通主线；同色的第 0 / 6 / 12 列不会一起高亮，列号复用后的不相连提交不会误亮。隐藏直线按颜色合并的路径保留，另绘单条高亮线，避免扩大 SVG 节点数量。
 - `COMMITSCOPE_RENDERER_TEST_FILES=graph.test.mjs pnpm test:renderer`：6 项通过，覆盖动态隐藏数量、手动列数下的直线 / 日期桥裁切、第一父换道、分叉停止与列复用。
 - `pnpm typecheck`、`pnpm package:mac` 通过，更新 `release/mac-arm64/CommitScope.app` 和 `release/CommitScope-0.1.0-arm64.dmg`。打包日志 `output/benchmarks/p4-05-interactions-package.log`。
-- `COMMITSCOPE_PACKAGED_APP='/Users/huangsheng/Development/commitscope/release/mac-arm64/CommitScope.app/Contents/MacOS/CommitScope' node tests/smoke/graph-expansion-smoke.mjs` 通过：431 提交、1,000 refs、11 父 merge；鼠标拖宽、4 / 7 / 12 列键盘调整、双击复位，悬停与选中高亮切换、隐藏直线高亮、完整展开和跨 200 / 400 条分页后收起。选择、纵向锚点和后端图签名保持；仓库文件快照不变。
+- `COMMITSCOPE_PACKAGED_APP="$PWD/release/mac-arm64/CommitScope.app/Contents/MacOS/CommitScope" node tests/smoke/graph-expansion-smoke.mjs`（在仓库根目录运行） 通过：431 提交、1,000 refs、11 父 merge；鼠标拖宽、4 / 7 / 12 列键盘调整、双击复位，悬停与选中高亮切换、隐藏直线高亮、完整展开和跨 200 / 400 条分页后收起。选择、纵向锚点和后端图签名保持；仓库文件快照不变。
 - 实窗发现横向滚动会清空刚设置的悬停高亮，已改为只在纵向滚动时清空，并在指针移动时恢复当前行。修复后同一流程通过。截图 `output/playwright/graph-expansion/resized-highlight.png`。
 
 本轮未跑完整回归、Rust 测试、10 万提交性能矩阵、进程树资源采样或 Windows 检查；1,000 refs 的功能流程不作为滚动性能达标证据。未公开发布、未推送。

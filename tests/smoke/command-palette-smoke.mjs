@@ -27,7 +27,7 @@ try {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   // Exercise the actual bundle, including the released daemon and generated protocol validators.
-  app = await electron.launch({ executablePath: resolve(root, 'release/mac-arm64/CommitScope.app/Contents/MacOS/CommitScope'),
+  app = await electron.launch({ executablePath: resolve(root, 'release/mac-arm64/CherryPeek.app/Contents/MacOS/CherryPeek'),
     args: [`--user-data-dir=${join(temporary, 'profile')}`], env, chromiumSandbox: true });
   const page = await app.firstWindow();
   await page.locator('[data-testid="core-status"][data-state="ready"]').waitFor({ timeout: 20_000 });
@@ -98,7 +98,9 @@ try {
   await page.getByText('没有匹配的结果', { exact: true }).waitFor();
   await page.mouse.click(10, 100);
   await dialog.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '快速跳转', exact: true }).click();
+  // No top-bar button: ⌘K (listed in the shortcut guide) opens it again.
+  await page.keyboard.press('Meta+KeyK');
+  await dialog.waitFor();
   await input.fill('切换到');
   await mkdir(resolve(root, 'output/playwright'), { recursive: true });
   await page.screenshot({ path: resolve(root, 'output/playwright/p4-07-command-palette.png') });

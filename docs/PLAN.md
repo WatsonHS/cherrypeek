@@ -10,7 +10,7 @@
 
 2026-11-07 用户确认四项产品决策后修订：元数据索引与搜索由原 P3-01 / P3-02 前移为 P1-05 / P1-06；原 P3-03 至 P3-06 顺次重编号为 P3-01 至 P3-04。M1 先交付可试用的历史与元数据搜索，M2 接入图形定位、详情和 diff，M3 补齐完整 MVP。固定快照、消息搜索加字段筛选、部分结果自动合并的约定见 PRODUCT 与 ARCHITECTURE。随后用户授权开始实现，首项按 [P0-01 代码级计划](implementation/p0-01-bootstrap.md) 执行。
 
-同日用户确认界面设计 v3（[CommitScope UI 画布](https://claude.ai/artifact/LssQVaEeGiqB1WdCRn2jDa) 的「v3 · B 细化」页）：提交列表 + 详情双栏；分支与 worktree 收进范围选择器；文件改动放到详情第二层；新增分支合入状态、按需计算的包含分支和按 Author 的活动分布。据此修订 P1-04、P2-02、P3-02，界面细节以 PRODUCT「界面与交互」为准。随后用户确认补充：上次查看后新增的提交标记、更新明细、merge 带入的提交、trailer 展示、宽分支图、窄窗口布局、用时间代替快照编号、身份头像配色、筛选弹层、定位后横幅、⌘K 命令面板与快捷键；据此再修订 P1-01、P1-03、P1-06、P2-01、P2-02、P2-04、P3-01、P3-03。同日确认“App 只展示、Git 操作交给 Agent”的理念，新增 P3-05“交给 Agent”，排在 MVP 主路径验收 P3-04 之前，P3-04 改为依赖它。随后用户同意收窄第一版：合入状态的补丁比对（识别 squash / rebase）、分支图拖宽 / 展开 / 悬停高亮、窄窗口布局、⌘K 命令面板移到 M4 的 P4-05 至 P4-08；详情概览去掉单独的数据状态块。
+同日用户确认界面设计 v3（CommitScope UI 画布的「v3 · B 细化」页，画布未公开）：提交列表 + 详情双栏；分支与 worktree 收进范围选择器；文件改动放到详情第二层；新增分支合入状态、按需计算的包含分支和按 Author 的活动分布。据此修订 P1-04、P2-02、P3-02，界面细节以 PRODUCT「界面与交互」为准。随后用户确认补充：上次查看后新增的提交标记、更新明细、merge 带入的提交、trailer 展示、宽分支图、窄窗口布局、用时间代替快照编号、身份头像配色、筛选弹层、定位后横幅、⌘K 命令面板与快捷键；据此再修订 P1-01、P1-03、P1-06、P2-01、P2-02、P2-04、P3-01、P3-03。同日确认“App 只展示、Git 操作交给 Agent”的理念，新增 P3-05“交给 Agent”，排在 MVP 主路径验收 P3-04 之前，P3-04 改为依赖它。随后用户同意收窄第一版：合入状态的补丁比对（识别 squash / rebase）、分支图拖宽 / 展开 / 悬停高亮、窄窗口布局、⌘K 命令面板移到 M4 的 P4-05 至 P4-08；详情概览去掉单独的数据状态块。
 
 ## M0：技术验证与基线
 
@@ -91,8 +91,10 @@
   - 同日完成日期页复用：命中已载页仅返回真实目标位置，未命中也不再重复传输仓库 / 引用；renderer 保留已载窗口及对象。单独同口径对比中，同页定位 10.6 → 0.5 ms、响应 352,111 → 145 字节，拖动后整树 RSS 单点 802.0 → 788.0 MiB；六对页面和实际拖动落点一致。renderer RSS 未明显下降，500 MiB 与长期预算仍未通过。定向核心 / 协议 / 状态检查和 release 构建通过，见[实现记录](implementation/p4-01-history-page-reuse.md)与[实测报告](benchmarks/p4-01-history-page-reuse.md)。
   - 同日完成一轮有界的 renderer 分配优化：关闭的分支菜单不再构造千条 JSX，引用索引改为线性追加，普通分页的桌面 IPC 省略重复上下文并复用现有对象。三轮操作采样分配 1010.5 → 613.6 MiB，正常拖动后整树 RSS 780.2 → 757.3 MiB，第五秒 748.4 → 729.0 MiB；快照未显示提交 / DOM 随三轮持续增长，未据此声明长时无泄漏。38 项状态检查、类型检查和实窗对照通过。本批收尾，首次扫描和完整稳定性验收仍待处理，内存改按上述新预算；见[实现记录](implementation/p4-01-renderer-retention.md)与[报告](benchmarks/p4-01-renderer-retention.md)。
 - [ ] **P4-02 macOS 包与真实试用。** 固定打包链，随包带 Rust 二进制，检测系统 Git；验证从 Finder 启动的 PATH / 权限行为。2026-11-09 按用户要求已交付 arm64 本机试用 `.app` / `.dmg`，类型检查、包内运行、精简 PATH 和 LaunchServices 复制后启动通过，见 [P4-02 记录](implementation/p4-02-macos-package.md)。P4-01 的完整验收仍是公开发行前提。完成条件：本机可安装与运行，至少三个有代表性的本地仓库完成五个使用日试用记录；公开分发前再完成签名 / 公证与干净系统安装验证。
+  - 2026-11-10 用户决定：项目以 MIT 许可证开源，第一版只发 Apple 芯片版、通过 GitHub Release 分发（不上 Homebrew，需要时再建自己的 tap）；英文 README 另起一份；产品名定为 CherryPeek（cherry-pick 的谐音；查重见当日记录：GitHub 账号名、npm 包名与 .com 域名未被占用，商标库与 App Store 未查），只改用户可见的名称、应用标识（`io.github.watsonhs.cherrypeek`）、安装包与数据目录（`~/Library/Application Support/CherryPeek`），代码内部标识仍为 `commitscope`。已准备发布链：`pnpm release:mac` 用钥匙串里的 Developer ID 证书签名、开启 hardened runtime，按 `APPLE_KEYCHAIN_PROFILE` 指定的 notarytool 配置公证并装订应用与 DMG，再用 `codesign` / `stapler` / `spctl` 检查并写出 SHA-256；`pnpm package:mac` 保持本机试用包不变。应用数据目录随 `productName` 改为 `~/Library/Application Support/CherryPeek`。流程见 [RELEASE](RELEASE.md)。待用户在本机用自己的证书完成第一次签名发布和干净系统安装验证。
 - [ ] **P4-03 Windows 兼容与安装。** 适配 Git 发现、路径编码、文件通知、子进程树回收与二进制打包。依赖 P4-01。完成条件：目标 Windows 机器通过相同核心场景与单独性能预算；未验证前只声明计划支持，不阻塞 macOS 单平台候选版。
 - [ ] **P4-04 发行记录。** 汇总版本、依赖来源 / 许可证、测试平台、性能报告、已知限制和数据清理方式。依赖对应平台验收。完成条件：候选版本可以复现构建，能力声明与证据一致。正式项目许可证和公开发布渠道另行决定。
+  - 2026-11-10：加入 `LICENSE`（MIT）与生成的 `THIRD_PARTY_LICENSES.md`（`pnpm licenses:third-party`：npm 运行时依赖、Electron、macOS arm64 构建用到的 Rust crate，许可证原文去重；唯一的 copyleft 是文件级的 MPL-2.0 `uluru`），与 Chromium 的 `LICENSES.chromium.html` 一起随应用附带；第一版发行说明草稿见 [releases/v0.1.0](releases/v0.1.0.md)。
 
 以下体验增强在 MVP 之后进行，不阻塞 M3 验收：
 

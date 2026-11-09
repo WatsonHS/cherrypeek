@@ -2,6 +2,7 @@
   "name": "commitscope",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "packageManager": "pnpm@10.28.1",
   "engines": { "node": "26.0.0" },
   "scripts": {
@@ -11,6 +12,8 @@
     "build": "node scripts/build.mjs",
     "build:release": "node scripts/build.mjs --release",
     "package:mac": "node scripts/package-macos.mjs",
+    "release:mac": "node scripts/release-macos.mjs",
+    "licenses:third-party": "node scripts/third-party-licenses.mjs",
     "test:smoke:package": "node tests/smoke/packaged-app-smoke.mjs",
     "test:smoke:command-palette": "node tests/smoke/command-palette-smoke.mjs",
     "dev": "node scripts/launch.mjs --build",

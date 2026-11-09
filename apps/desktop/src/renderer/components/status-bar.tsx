@@ -54,7 +54,7 @@ export function StatusBar({ status, preview, onIndexAction, previewStatus, searc
     {session ? <MetadataIndexStatusControl view={preview} supported={indexSupported} onAction={onIndexAction} interactionBusy={Boolean(searchBusy)} /> : null}
     <span data-testid="preview-state" data-state={preview.opening !== null ? "loading" : preview.state} aria-live="polite" className={previewText ? undefined : "hidden"}>{previewText}</span>
     {session ? <span data-testid="snapshot-time" className="ml-auto whitespace-nowrap"
-      title={`本窗口 HEAD 读取于 ${momentLabel(session.observedAtUnixMs)}。之后的新提交要刷新才会显示；CommitScope 只读，不会修改仓库。`}>
+      title={`本窗口 HEAD 读取于 ${momentLabel(session.observedAtUnixMs)}。之后的新提交要刷新才会显示；CherryPeek 只读，不会修改仓库。`}>
       只读快照 · {momentLabel(session.observedAtUnixMs)}
     </span> : null}
   </footer>;

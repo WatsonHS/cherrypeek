@@ -15,7 +15,7 @@ export function OpenScreen({ preview, actions, recent }: { preview: RepositoryVi
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2.5">
             <AppMark />
-            <h1 className="m-0 text-[26px] font-semibold tracking-[-0.01em]">CommitScope</h1>
+            <h1 className="m-0 text-[26px] font-semibold tracking-[-0.01em]">CherryPeek</h1>
           </div>
           <p className="m-0 text-sm text-fg2">只读查看本地 Git 历史。浏览分支和 worktree 都不会 checkout。</p>
         </div>
