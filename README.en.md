@@ -1,3 +1,5 @@
+<img src="docs/brand/icon/cherrypeek-256.png" width="96" height="96" alt="CherryPeek icon">
+
 # CherryPeek
 
 [中文](README.md) | English

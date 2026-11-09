@@ -28,6 +28,8 @@ module.exports = {
   npmRebuild: false,
   publish: null,
   artifactName: "${productName}-${version}-${arch}.${ext}",
+  // Generated from docs/brand/icon/cherrypeek.svg by `pnpm icon:mac`.
+  icon: "build/icon.icns",
   mac: release ? {
     category: "public.app-category.developer-tools",
     minimumSystemVersion: "12.0",

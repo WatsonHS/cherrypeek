@@ -14,6 +14,7 @@
     "package:mac": "node scripts/package-macos.mjs",
     "release:mac": "node scripts/release-macos.mjs",
     "licenses:third-party": "node scripts/third-party-licenses.mjs",
+    "icon:mac": "node scripts/build-icon.mjs",
     "test:smoke:package": "node tests/smoke/packaged-app-smoke.mjs",
     "test:smoke:command-palette": "node tests/smoke/command-palette-smoke.mjs",
     "dev": "node scripts/launch.mjs --build",

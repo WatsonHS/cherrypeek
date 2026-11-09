@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- CherryPeek app icon. Two cherries hang from a Git history: a straight main line to the low one and a branch
+       leaving a commit for the high one. Flat: solid colors only. Regenerate the app icon with `pnpm icon:mac`. -->
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="#FBF4EC"/>
+  <!-- main line: straight down to the low cherry -->
+  <path d="M392 232 L392 556" fill="none" stroke="#2B2A2E" stroke-width="32" stroke-linecap="round"/>
+  <!-- branch: one smooth curve from the commit to the high cherry -->
+  <path d="M392 324 C 470 356, 640 372, 664 472" fill="none" stroke="#2B2A2E" stroke-width="32" stroke-linecap="round"/>
+  <!-- leaf at the top of the main line -->
+  <path d="M392 232 C 430 166, 512 148, 574 170 C 540 226, 464 256, 392 232 Z" fill="#3E9B57"/>
+  <!-- the commit where the branch starts -->
+  <circle cx="392" cy="324" r="35" fill="#FBF4EC" stroke="#2B2A2E" stroke-width="23"/>
+  <!-- two cherries: the main line's low, the branch's high -->
+  <circle cx="392" cy="700" r="144" fill="#E1253B"/>
+  <circle cx="664" cy="596" r="124" fill="#E1253B"/>
+</svg>

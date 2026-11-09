@@ -42,4 +42,5 @@
 - 发布模式的 entitlements 只放开 V8 JIT 所需的两项（`build/entitlements.mac.plist`）。应用不在 App Sandbox 里，以后加 fetch 等功能不需要额外的 entitlement。
 - 应用内附带 `LICENSE`、`THIRD_PARTY_LICENSES.md`（npm 运行时依赖、Electron、macOS 构建用到的 Rust crate）与 Chromium 的 `LICENSES.chromium.html`。
 - 应用数据（缓存与索引）在 `~/Library/Application Support/CherryPeek`。
+- 应用图标的源文件是 `docs/brand/icon/cherrypeek.svg`；改动后运行 `pnpm icon:mac`（需要 `brew install librsvg`）重新生成 `build/icon.icns` 与 README 用的 `docs/brand/icon/cherrypeek-256.png`，两者都提交。
 - Intel Mac、通用包、自动更新、Homebrew tap 与 CI 自动发布暂不做；需要时在此补充。
