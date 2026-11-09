@@ -63,3 +63,14 @@ test("listeners hear every change and clearing forgets everything", () => {
   history.record(place("c"));
   assert.equal(calls, 3);
 });
+
+test("peekBack shows where back would go without going", () => {
+  const history = new NavigationHistory();
+  assert.equal(history.peekBack(), null);
+  history.record({ key: "a", label: "A" });
+  history.record({ key: "b", label: "B" });
+  assert.equal(history.peekBack().key, "b");
+  assert.equal(history.peekBack().key, "b", "peeking does not move");
+  history.back({ key: "c", label: "C" });
+  assert.equal(history.peekBack().key, "a");
+});

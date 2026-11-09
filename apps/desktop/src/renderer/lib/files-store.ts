@@ -114,10 +114,10 @@ export interface FilesView {
   changeView: ChangeView;
   /** The file's content in the picked commit, read when `changeView` is "file". */
   revision: Load<FileContent> | null;
-  /** The change view's commit details strip: open or folded; read only while open. */
+  /** The change view's commit details (message, author, parents): open or folded; read only while open. */
   commitInfoOpen: boolean;
   commitInfo: Load<CommitDetails> | null;
-  /** Every file the picked commit changed (against its first parent), for the strip. */
+  /** Every file the picked commit changed, against the parent its change is shown against: the file switcher's list. */
   commitFiles: PathChangesState | null;
   blameEnabled: boolean;
   blame: BlameState | null;
@@ -275,8 +275,25 @@ export class FilesStore {
     if (this.view.commitInfoOpen) void this.loadCommitInfo();
   }
 
-  loadMoreCommitFiles(): void { if (this.view.commitFiles?.hasMore && !this.view.commitFiles.loadingMore) void this.loadCommitFiles(true); }
-  retryCommitInfo(): void { if (this.view.commitInfo?.state === "error") void this.loadCommitInfo(); else void this.loadCommitFiles(false); }
+  loadMoreCommitFiles(): void { void this.loadCommitFiles(true); }
+  retryCommitInfo(): void { void this.loadCommitInfo(); }
+  retryCommitFiles(): void { void this.loadCommitFiles(false); }
+
+  /** The previous or next file of the picked commit (‹ ›); past the files read so far, the next page is read first. */
+  async stepCommitFile(delta: 1 | -1): Promise<boolean> {
+    const files = this.view.commitFiles;
+    if (!files || files.state !== "ready") return false;
+    const index = files.files.findIndex(file => this.isCurrentFile(file));
+    const target = index < 0 ? delta > 0 ? 0 : -1 : index + delta;
+    if (target < 0) return false;
+    if (target >= files.files.length) {
+      if (!files.hasMore) return false;
+      await this.loadCommitFiles(true);
+      if (this.view.commitFiles?.key !== files.key || target >= this.view.commitFiles.files.length) return false;
+    }
+    this.openCommitFile(this.view.commitFiles!.files[target]!);
+    return true;
+  }
 
   /** Another file the picked commit changed: switch to it on the files page, the same commit still picked. */
   openCommitFile(file: ChangedFile): void {
@@ -326,6 +343,7 @@ export class FilesStore {
     if (parentIndex === this.view.parentIndex) return;
     this.update({ ...this.view, parentIndex });
     void this.loadChange();
+    void this.loadCommitFiles(false);
   }
 
   /** Re-reads the shown change, e.g. after the display switched between changes-only and the whole file. */
@@ -532,43 +550,53 @@ export class FilesStore {
   private loadShownChange(): void {
     if (this.view.changeView === "file") void this.loadRevision();
     else void this.loadChange();
+    void this.loadCommitFiles(false);
     if (this.view.commitInfoOpen) void this.loadCommitInfo();
+  }
+
+  private isCurrentFile(file: ChangedFile): boolean {
+    const hex = this.view.selection?.path.rawHex;
+    return file.newPath?.rawHex === hex || file.oldPath?.rawHex === hex;
   }
 
   private async loadCommitInfo(): Promise<void> {
     const oid = this.view.selectedCommit;
     if (!oid || this.view.selection?.kind !== "file") return;
     // Read again unless already read: a read cancelled midway (refresh, leaving the page) must not stay "loading".
-    if (this.view.commitInfo?.key === oid && this.view.commitInfo.state === "ready") { void this.loadCommitFiles(false); return; }
+    if (this.view.commitInfo?.key === oid && this.view.commitInfo.state === "ready") return;
     const intent = ++this.intents.commitInfo;
-    this.intents.commitFiles += 1;
-    this.update({ ...this.view, commitInfo: { key: oid, state: "loading", value: null, error: null }, commitFiles: null });
+    this.update({ ...this.view, commitInfo: { key: oid, state: "loading", value: null, error: null } });
     const result = await this.retrying(() => this.api.readCommitInfo({ oid }), () => intent === this.intents.commitInfo);
     if (!result || intent !== this.intents.commitInfo || this.view.commitInfo?.key !== oid) return;
     this.update({ ...this.view, commitInfo: result.ok ? { key: oid, state: "ready", value: result.value, error: null } : { key: oid, state: "error", value: null, error: errorOf(result) } });
-    if (result.ok) void this.loadCommitFiles(false);
   }
 
   private async loadCommitFiles(more: boolean): Promise<void> {
-    const details = this.view.commitInfo?.value;
-    if (!details) return;
-    const oid = details.commit.oid;
-    const current = this.view.commitFiles?.key === oid ? this.view.commitFiles : null;
-    if (!more && current?.state === "ready" && !current.loadingMore) return;
+    const oid = this.view.selectedCommit;
+    if (!oid || this.view.selection?.kind !== "file") return;
+    const parents = this.view.history?.entries.find(item => item.commit.oid === oid)?.commit.parents
+      ?? (this.view.commitInfo?.key === oid ? this.view.commitInfo.value?.commit.parents : undefined);
+    const wanted = parents && parents.length === 0 ? null : this.view.parentIndex;
+    const key = `${oid}:${wanted ?? "root"}`;
+    const current = this.view.commitFiles?.key === key ? this.view.commitFiles : null;
+    if (more ? current?.state !== "ready" || current.loadingMore || !current.hasMore : current?.state === "ready" && !current.loadingMore) return;
     const offset = more && current ? current.files.length : 0;
     const intent = ++this.intents.commitFiles;
     this.update({ ...this.view, commitFiles: more && current ? { ...current, loadingMore: true }
-      : { key: oid, state: "loading", files: [], totalFiles: 0, additions: 0, deletions: 0, hasMore: false, loadingMore: false, error: null } });
-    // The whole commit (an empty path), against its first parent like the rest of the files page.
-    const result = await this.retrying(() => this.api.listPathChanges({ oid, parentIndex: details.commit.parents.length === 0 ? null : 0, pathHex: "", offset, pageSize: PATH_CHANGES_PAGE }),
+      : { key, state: "loading", files: [], totalFiles: 0, additions: 0, deletions: 0, hasMore: false, loadingMore: false, error: null } });
+    // The whole commit (an empty path), against the same parent as the change shown.
+    const read = (parent: number | null) => this.retrying(() => this.api.listPathChanges({ oid, parentIndex: parent, pathHex: "", offset, pageSize: PATH_CHANGES_PAGE }),
       () => intent === this.intents.commitFiles);
-    if (!result || intent !== this.intents.commitFiles || this.view.commitFiles?.key !== oid) return;
+    let result = await read(wanted);
+    // Parents unknown (opened from blame before the history loaded): a root commit refuses parent 0.
+    if (!parents && wanted === 0 && result && !result.ok && result.error.code === "INVALID_REQUEST") result = await read(null);
+    if (!result || intent !== this.intents.commitFiles || this.view.commitFiles?.key !== key) return;
     if (!result.ok) {
       this.update({ ...this.view, commitFiles: { ...this.view.commitFiles, state: "error", loadingMore: false, error: errorOf(result) } });
       return;
     }
     const page = result.value;
-    this.update({ ...this.view, commitFiles: { key: oid, state: "ready", files: [...(more ? this.view.commitFiles.files : []), ...page.files], totalFiles: page.totalFiles,
+    this.update({ ...this.view, commitFiles: { key, state: "ready", files: [...(more ? this.view.commitFiles.files : []), ...page.files], totalFiles: page.totalFiles,
       additions: page.overview.additions, deletions: page.overview.deletions, hasMore: page.hasMore, loadingMore: false, error: null } });
   }
 

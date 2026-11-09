@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, Cloud, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Cloud, CornerUpLeft, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
 import type { NavigationView } from "../lib/navigation-history.js";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
@@ -22,6 +22,9 @@ import { RecentList, storeStatusText, type RecentState } from "./recent-reposito
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
+
+const NAV_CLASS = "flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent";
+const HINT_CLASS = "flex h-7 max-w-[clamp(96px,14vw,200px)] items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95";
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
   searchView, activityQuery, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths, observation, refDiff, refDiffLoading, refDiffError,
@@ -62,10 +65,14 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   filesAvailable: boolean;
   /** The search box of the files and workspace pages; the commits page uses the metadata search. */
   pageSearch: React.ReactNode;
-  /** Back / forward between recorded places (⌘[ / ⌘]). */
-  history: { view: NavigationView; onBack(): void; onForward(): void };
+  /**
+   * Back / forward between recorded places (⌘[ / ⌘]). After a jump to another page, `hint` names where it came from:
+   * merged into the back button while one step back is that place, otherwise a separate button that returns there.
+   */
+  history: { view: NavigationView; hint: { label: string; title: string; merged: boolean } | null; onBack(): void; onForward(): void; onReturn(): void };
 }): React.JSX.Element | null {
   const [scopeOpen, setScopeOpen] = React.useState(false);
+  const hint = history.hint;
   const repository = preview.repository;
   if (!repository) return null;
   const busy = preview.state === "loading" || preview.opening !== null || preview.scopeSwitching || preview.refreshing;
@@ -77,14 +84,19 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
       onLoadNavigation={onLoadNavigation} />
     <span aria-hidden="true" className="topbar-divider h-6 w-px shrink-0 bg-line" />
     <div className="flex shrink-0 items-center" data-testid="nav-buttons">
-      <button type="button" data-testid="nav-back" aria-label={history.view.backLabel ? `后退到 ${history.view.backLabel}` : "后退"} disabled={!history.view.canBack} onClick={history.onBack}
+      {/* After a jump to another page: "← 提交 92aa8c23" while one step back is that place; once other steps are recorded,
+          ← goes one step and "↩ 提交 92aa8c23" beside it returns to where the jump came from. */}
+      <button type="button" data-testid="nav-back" data-hint={hint?.merged ? "true" : undefined}
+        aria-label={history.view.backLabel ? `后退到 ${history.view.backLabel}` : "后退"} disabled={!history.view.canBack} onClick={history.onBack}
         title={history.view.backLabel ? `后退到 ${history.view.backLabel}（⌘[）` : "后退（⌘[）"}
-        className="flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent">
-        <ArrowLeft className="size-4" strokeWidth={1.75} /></button>
+        className={hint?.merged ? `nav-hint ${HINT_CLASS}` : NAV_CLASS}>
+        <ArrowLeft className={hint?.merged ? "size-3.5 shrink-0" : "size-4"} strokeWidth={1.75} />{hint?.merged ? <span className="truncate">{hint.label}</span> : null}</button>
       <button type="button" data-testid="nav-forward" aria-label={history.view.forwardLabel ? `前进到 ${history.view.forwardLabel}` : "前进"} disabled={!history.view.canForward} onClick={history.onForward}
-        title={history.view.forwardLabel ? `前进到 ${history.view.forwardLabel}（⌘]）` : "前进（⌘]）"}
-        className="flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent">
+        title={history.view.forwardLabel ? `前进到 ${history.view.forwardLabel}（⌘]）` : "前进（⌘]）"} className={NAV_CLASS}>
         <ArrowRight className="size-4" strokeWidth={1.75} /></button>
+      {hint && !hint.merged ? <button type="button" data-testid="nav-return" data-hint="true" onClick={history.onReturn}
+        aria-label={`回到 ${hint.title}`} title={`回到 ${hint.title}`} className={`nav-hint ml-1 ${HINT_CLASS}`}>
+        <CornerUpLeft className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{hint.label}</span></button> : null}
     </div>
     <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} />
     <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}

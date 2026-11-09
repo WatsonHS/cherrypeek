@@ -54,6 +54,11 @@ export class NavigationHistory<Place extends NavigationPlace> {
     return this.move(this.forwardSteps, this.backSteps, current);
   }
 
+  /** Where back would go now, without going. */
+  peekBack(): Place | null {
+    return this.backSteps.at(-1) ?? null;
+  }
+
   clear(): void {
     this.backSteps = [];
     this.forwardSteps = [];

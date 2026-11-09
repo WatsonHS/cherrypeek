@@ -244,9 +244,11 @@ try {
     await page.keyboard.press("Alt+Meta+2");
     await page.getByTestId("open-in-files").first().click();
     assert.equal(await current(), "page-files");
-    await page.getByTestId("to-files-banner").waitFor();
-    assert.match(await page.getByTestId("back-from-files").textContent() ?? "", /回到提交 [0-9a-f]{7,}/u);
-    assert.doesNotMatch(await page.getByTestId("to-files-banner").textContent() ?? "", /的历史/u, "it opened the file, not its history");
+    // Right after the jump, the top bar's back button names the commit it came from.
+    const backHint = page.locator("[data-hint='true']");
+    await backHint.waitFor();
+    assert.match(await backHint.textContent() ?? "", /提交 [0-9a-f]{7,}/u);
+    assert.equal(await page.getByTestId("change-panel").count(), 0, "it opened the file, not a change in its history");
     await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
     assert.equal(await page.getByTestId("change-panel").count(), 0, "the file itself is shown, not a change");
     // Back / forward: ⌘[ returns to the commit the jump came from, ⌘] comes back to the file.
@@ -273,10 +275,11 @@ try {
     await page.getByTestId("open-full-commit").click();
     assert.equal(await current(), "page-commits");
     await page.waitForFunction(() => document.querySelector("[role='option'][aria-selected='true']")?.textContent?.includes("adjust two values"), null, { timeout: 15_000 });
-    await page.getByTestId("from-files-banner").waitFor();
-    await page.getByTestId("back-to-files").click();
+    await backHint.waitFor();
+    assert.equal((await backHint.textContent() ?? "").trim(), "app.ts", "the back button names the file it came from");
+    await page.getByTestId("nav-back").click();
     assert.equal(await current(), "page-files");
-    assert.equal(await page.getByTestId("from-files-banner").count(), 0, "the way back is gone once back");
+    assert.equal(await backHint.count(), 0, "the named way back is gone once back");
     assert.equal(await page.getByTestId("history-filter").inputValue(), "adjust", "the history filter is kept");
     assert.equal(await page.getByTestId("file-history-row").count(), 1);
     assert.equal(await page.getByTestId("file-history-row").first().getAttribute("aria-pressed"), "true", "the chosen history entry is kept");
@@ -284,25 +287,43 @@ try {
     await page.getByTestId("history-filter").fill("");
     await page.getByTestId("back-to-file").click();
 
-    // The change view's commit details: folded until opened, then every file of the commit (a root commit here, no parent);
-    // another file opens in place with the same commit picked, and ⌘[ returns to the first file.
+    // The change view's commit bar: details folded until opened, and a switcher through every file of the commit (a root
+    // commit here, no parent); another file opens in place with the same commit picked, and ⌘[ returns file by file.
     const crumbIs = name => page.waitForFunction(expected => document.querySelector("nav[aria-label='路径'] [aria-current='page']")?.textContent === expected, name, { timeout: 15_000 });
     await tree("long.ts").click();
     await page.getByTestId("file-history-row").filter({ hasText: "add the first files" }).click();
     await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+    // The switcher lists the root commit's 6 files (README.md, docs/a.md, docs/inject.html, src/huge.ts, src/long.ts,
+    // src/old-name.ts) with long.ts current; the details open above the diff.
+    const fileMenu = page.getByTestId("commit-file-menu");
+    const menuShows = text => page.waitForFunction(expected => (document.querySelector("[data-testid='commit-file-menu']")?.textContent ?? "").replace(/\s+/gu, "").startsWith(expected),
+      text, { timeout: 15_000 });
+    await menuShows("5/6");
     const infoToggle = page.getByTestId("commit-info-toggle");
-    if (await infoToggle.getAttribute("aria-expanded") !== "true") await infoToggle.click();
-    await page.waitForFunction(() => document.querySelectorAll("[data-testid='commit-info-file']").length === 6, null, { timeout: 15_000 });
+    await infoToggle.click();
+    await page.getByTestId("commit-info-panel").getByText("无（根提交）").waitFor({ timeout: 15_000 });
+    await infoToggle.click();
+    // ‹ steps to the previous file of the commit, the same commit still picked; ⌘[ returns.
+    await page.getByTestId("commit-file-previous").click();
+    await crumbIs("huge.ts");
+    await menuShows("4/6");
+    assert.match(await page.locator("[data-testid='file-history-row'][aria-pressed='true']").textContent() ?? "", /add the first files/u, "the same commit stays picked");
+    await page.keyboard.press("Meta+BracketLeft");
+    await crumbIs("long.ts");
+    // Or pick any file from the list.
+    await menuShows("5/6");
+    await fileMenu.click();
+    await page.getByTestId("commit-file-list").waitFor();
+    assert.equal(await page.getByTestId("commit-info-file").count(), 6);
     assert.match(await page.locator("[data-testid='commit-info-file'][aria-current='true']").textContent() ?? "", /src\/long\.ts/u);
     await page.getByTestId("commit-info-file").filter({ hasText: "README.md" }).click();
     await crumbIs("README.md");
     await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
-    assert.match(await page.locator("[data-testid='commit-info-file'][aria-current='true']").textContent() ?? "", /README\.md/u, "the same commit, now on README.md");
-    assert.match(await page.locator("[data-testid='file-history-row'][aria-pressed='true']").textContent() ?? "", /add the first files/u);
+    await menuShows("1/6");
+    assert.equal(await page.getByTestId("commit-file-previous").isDisabled(), true, "README.md is the first file");
     await page.keyboard.press("Meta+BracketLeft");
     await crumbIs("long.ts");
     await page.getByTestId("change-panel").waitFor();
-    await infoToggle.click();
     await page.getByTestId("back-to-file").click();
 
     // Switching pages keeps the files page's file and scroll position.
@@ -362,9 +383,19 @@ try {
     await onPage("page-files");
     await page.locator("[data-testid='revision-content'] [data-revision-line='5']").waitFor({ timeout: 15_000 });
     assert.match(await page.locator("[data-testid='revision-content'] [data-revision-line='5']").textContent() ?? "", /value5 = 5;/u, "the first commit's version");
-    assert.match(await page.getByTestId("to-files-banner").textContent() ?? "", /当前版本里已没有这个文件/u);
+    await page.getByTestId("revision-gone").waitFor();
     assert.match(await page.getByTestId("tree-version").textContent() ?? "", /main/u, "the tree version stays on the branch");
+    assert.equal(await page.locator("[data-testid='nav-back'][data-hint='true']").count(), 1, "one step back is the commit: the back button names it");
     await page.getByTestId("back-to-file").click();
+    // Steps taken on the files page do not lose the way back: ← goes one step, "↩ 提交 …" beside it returns to the commit.
+    const returnButton = page.getByTestId("nav-return");
+    await returnButton.waitFor();
+    assert.match(await returnButton.textContent() ?? "", /提交 [0-9a-f]{7,}/u);
+    assert.equal(await page.locator("[data-testid='nav-back'][data-hint='true']").count(), 0, "← is a plain step back again");
+    await returnButton.click();
+    await onPage("page-commits");
+    assert.equal(await page.locator("[data-hint='true']").count(), 0, "back on the commits page, the way back is gone");
+    await page.keyboard.press("Meta+2");
   }
 
   if (has("workspaceStatus")) {

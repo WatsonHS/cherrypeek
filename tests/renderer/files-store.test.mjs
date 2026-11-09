@@ -270,7 +270,7 @@ test("the history column sits beside the file: picking a commit opens its change
   store.dispose();
 });
 
-test("the change view's commit details are read when opened, list the whole commit, and open another of its files in place", async () => {
+test("the change view reads the commit's files with the change, its details only when opened, and switches files in place", async () => {
   const api = fakeApi();
   const store = new FilesStore(api);
   store.bind("repo", capabilities);
@@ -283,14 +283,15 @@ test("the change view's commit details are read when opened, list the whole comm
   store.selectCommit(oid("c"));
   await api.answer("change", ok({ oid: oid("c") }));
   assert.ok(!api.pending.some(item => item.kind === "commitInfo"), "folded details are not read");
+  const files = await api.answer("pathChanges", ok(pathPage(oid("c"), [changedFile("a.ts"), changedFile("b.ts")])));
+  assert.deepEqual(files.params, { oid: oid("c"), parentIndex: 0, pathHex: "", offset: 0, pageSize: 200 }, "the switcher's list: the whole commit, against the change's parent");
+  assert.deepEqual(store.getView().commitFiles.files.map(file => file.newPath.display), ["a.ts", "b.ts"]);
   store.toggleCommitInfo();
   const details = commit => ({ commit: summary(commit), message: "fix\n\nbody\n", messageWithoutTrailers: "fix\n\nbody\n", trailers: [], refs: [], worktrees: [],
     observedAtUnixMs: 1, refsTruncated: false, worktreesTruncated: false, update: { state: "unchanged" } });
   const info = await api.answer("commitInfo", ok(details(oid("c"))));
   assert.deepEqual(info.params, { oid: oid("c") });
-  const files = await api.answer("pathChanges", ok(pathPage(oid("c"), [changedFile("a.ts"), changedFile("b.ts")])));
-  assert.deepEqual(files.params, { oid: oid("c"), parentIndex: 0, pathHex: "", offset: 0, pageSize: 200 }, "the whole commit, against its first parent");
-  assert.deepEqual(store.getView().commitFiles.files.map(file => file.newPath.display), ["a.ts", "b.ts"]);
+  assert.equal(store.getView().commitInfo.state, "ready");
 
   store.openCommitFile(changedFile("b.ts"));
   let view = store.getView();
@@ -298,6 +299,17 @@ test("the change view's commit details are read when opened, list the whole comm
   const change = await api.answer("change", ok({ oid: oid("c") }), item => item.params.pathHex === hex("b.ts"));
   assert.equal(change.params.oid, oid("c"));
   assert.ok(!api.pending.some(item => item.kind === "commitInfo" || item.kind === "pathChanges"), "the same commit's details are not read again");
+  assert.equal(await store.stepCommitFile(1), false, "b.ts is the last file");
+  assert.equal(await store.stepCommitFile(-1), true);
+  assert.deepEqual([store.getView().selection.path.display, store.getView().selectedCommit], ["a.ts", oid("c")], "‹ steps to the previous file of the commit");
+  await api.answer("change", ok({ oid: oid("c") }), item => item.params.pathHex === hex("a.ts"));
+  store.openCommitFile(changedFile("b.ts"));
+  await api.answer("change", ok({ oid: oid("c") }), item => item.params.pathHex === hex("b.ts"));
+  store.setParentIndex(1);
+  await flush();
+  assert.ok(api.pending.some(item => item.kind === "pathChanges" && item.params.parentIndex === 1), "a merge's other parent lists its own files");
+  await api.answer("pathChanges", ok(pathPage(oid("c"), [changedFile("b.ts")])));
+  store.setParentIndex(0);
 
   await api.answer("history", ok({ commit: version.commit, path: path("b.ts"), entries: [historyEntry(oid("c")), historyEntry(oid("d"))], nextCursor: null }));
   store.selectCommit(oid("d"));

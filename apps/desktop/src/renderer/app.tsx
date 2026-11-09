@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowLeft, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { ActivityStats, HandoffFacts, RefSnapshotDiff, RepositoryObservation, RepositorySessionInfo, SearchIdentity } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryScope } from "../../../../packages/protocol/src/generated/server-message.js";
@@ -176,7 +176,7 @@ function useLaunchRepository(ready: boolean, store: RepositorySessionStore) {
 const FILES_HISTORY_OPEN_KEY = "commitscope.files.historyOpen";
 
 /** A place back / forward can return to: the page, and where on it. Scroll offsets are not kept; the place is re-read. */
-type AppPlace = { key: string; label: string } & (
+type AppPlace = { key: string; label: string; /** A few words for the back button right after a jump. */ short?: string } & (
   | { page: "commits"; oid: string | null }
   | { page: "workspace" }
   | { page: "files"; version: TreeVersion | null; selection: FilesSelection | null; tab: FilesTab; selectedCommit: string | null });
@@ -188,27 +188,7 @@ function filesPlace(view: FilesView): AppPlace {
   const label = !selection ? "文件页" : selection.kind === "directory" ? `${name} 的历史`
     : showingChange ? `${name} 在 ${shortOid(view.selectedCommit!)} 的修改` : name;
   const key = JSON.stringify(["files", view.version?.commit ?? null, selection?.path.rawHex ?? null, selection?.kind ?? null, showingChange ? view.selectedCommit : null]);
-  return { key, label, page: "files", version: view.version, selection, tab: showingChange ? "history" : "content", selectedCommit: showingChange ? view.selectedCommit : null };
-}
-
-/** After a jump to another page: where the user came from, and a clear way back to it. */
-function ReturnBanner({ text, backLabel, backTitle, onBack, onDismiss, testId, backTestId }: {
-  text: React.ReactNode;
-  backLabel: string;
-  backTitle: string;
-  onBack(): void;
-  onDismiss(): void;
-  testId: string;
-  backTestId: string;
-}): React.JSX.Element {
-  return <div role="status" data-testid={testId} className="flex shrink-0 items-center gap-2 border-b border-line bg-bg py-1.5 pr-2 pl-4 text-xs text-fg2">
-    <span className="min-w-0 flex-1 truncate">{text}</span>
-    <button type="button" data-testid={backTestId} onClick={onBack} title={backTitle}
-      className="flex h-7 shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
-      <ArrowLeft className="size-3.5" strokeWidth={1.75} />{backLabel}</button>
-    <button type="button" aria-label="关闭提示" onClick={onDismiss}
-      className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><X className="size-3.5" strokeWidth={1.75} /></button>
-  </div>;
+  return { key, label, short: name || "文件页", page: "files", version: view.version, selection, tab: showingChange ? "history" : "content", selectedCommit: showingChange ? view.selectedCommit : null };
 }
 
 export function App(): React.JSX.Element {
@@ -237,10 +217,8 @@ export function App(): React.JSX.Element {
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
   const [historyLocation, setHistoryLocation] = React.useState<{ oid: string; sessionKey: string; loading: boolean; cancelled: boolean; error: string | null } | null>(null);
-  /** Set when "查看完整提交" on the files page brought the user here; the commits page offers the way back. */
-  const [fromFiles, setFromFiles] = React.useState<{ name: string } | null>(null);
-  /** Set when "文件历史" on the commits or workspace page opened the files page; it offers the way back. */
-  const [toFiles, setToFiles] = React.useState<{ page: "commits" | "workspace"; label: string; name: string; history: boolean; note?: string } | null>(null);
+  /** Where the last jump to another page left from; the top bar offers the way back to it until the user is on that page again. */
+  const [jumpOrigin, setJumpOrigin] = React.useState<AppPlace | null>(null);
   /** A file opened from a commit, until its content shows whether the tree version still has it. */
   const openFallback = React.useRef<{ pathHex: string; oid: string } | null>(null);
   const [activityStats, setActivityStats] = React.useState<{ key: string; value: ActivityStats } | null>(null);
@@ -887,7 +865,11 @@ export function App(): React.JSX.Element {
     return { key: JSON.stringify(["commits", oid ?? null]), label: oid ? `提交 ${shortOid(oid)}` : "提交页", page: "commits", oid: oid ?? null };
   }, [filesStore]);
   /** Called before every jump, so back returns to where the jump left from. */
-  const recordJump = React.useCallback(() => navigation.record(currentPlace()), [navigation, currentPlace]);
+  const recordJump = React.useCallback((): AppPlace => {
+    const place = currentPlace();
+    navigation.record(place);
+    return place;
+  }, [navigation, currentPlace]);
   const pageAllowed = React.useCallback((next: AppPage) => !(next === "workspace" && workspaceUnavailable) && !(next === "files" && !filesAvailable), [filesAvailable, workspaceUnavailable]);
   const changePage = React.useCallback((next: AppPage) => {
     if (!pageAllowed(next)) return;
@@ -898,8 +880,7 @@ export function App(): React.JSX.Element {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
   const openFileHistory = React.useCallback((path: GitPath, oid: string | undefined, from: "commits" | "workspace") => {
-    recordJump();
-    setToFiles({ page: from, label: from === "workspace" ? "工作区" : oid ? `提交 ${shortOid(oid)}` : "提交页", name: path.display.split("/").at(-1) ?? path.display, history: true });
+    setJumpOrigin(recordJump());
     filesVisited.current = true;
     filesStore.setVersion(filesVersion);
     setPage("files");
@@ -911,9 +892,8 @@ export function App(): React.JSX.Element {
       if (file.oldPath) openFileHistory(file.oldPath, oid, "commits");
       return;
     }
-    recordJump();
+    setJumpOrigin(recordJump());
     openFallback.current = { pathHex: file.newPath.rawHex, oid };
-    setToFiles({ page: "commits", label: `提交 ${shortOid(oid)}`, name: file.newPath.display.split("/").at(-1) ?? file.newPath.display, history: false });
     filesVisited.current = true;
     filesStore.setVersion(filesVersion);
     setPage("files");
@@ -932,7 +912,6 @@ export function App(): React.JSX.Element {
     if (!value || value.kind !== "missing" || value.path.rawHex !== pending.pathHex || value.commit === pending.oid) return;
     filesStore.select({ path: value.path, kind: "file" }, { tab: "history", commit: pending.oid });
     filesStore.setChangeView("file");
-    setToFiles(current => current ? { ...current, note: "当前版本里已没有这个文件，显示的是它在这个提交时的内容" } : current);
   }, [filesView.content, filesView.selection, filesStore]);
   /** Shows a commit on the commits page: located in the history, or in the search results when searching. */
   const showCommit = React.useCallback(async (oid: string) => {
@@ -945,9 +924,7 @@ export function App(): React.JSX.Element {
     if (found) setSelectedOid(oid);
   }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
   const openCommitFromFiles = React.useCallback(async (oid: string) => {
-    recordJump();
-    const path = filesStore.getView().selection?.path.display ?? "";
-    setFromFiles({ name: path.split("/").at(-1) || "文件页" });
+    setJumpOrigin(recordJump());
     setPage("commits");
     await showCommit(oid);
   }, [filesStore, recordJump, showCommit]);
@@ -995,12 +972,20 @@ export function App(): React.JSX.Element {
     window.addEventListener("mouseup", onMouseUp);
     return () => window.removeEventListener("mouseup", onMouseUp);
   }, [navigateBack, navigateForward]);
-  // Back on the page a jump came from, by any route, its way back is no longer needed.
-  React.useEffect(() => {
-    if (page === "files") setFromFiles(null);
-    setToFiles(current => current?.page === page ? null : current);
-  }, [page]);
-  React.useEffect(() => { setFromFiles(null); setToFiles(null); navigation.clear(); }, [workspaceRepo, navigation]);
+  React.useEffect(() => { setJumpOrigin(null); navigation.clear(); }, [workspaceRepo, navigation]);
+  // Back on the page the jump came from, by any route, the way back is no longer needed.
+  React.useEffect(() => { setJumpOrigin(current => current?.page === page ? null : current); }, [page]);
+  // "← 提交 92aa8c23" in the top bar: the back button itself while one step back is that place, otherwise a separate
+  // button beside it, so ← always means one step and the named button always means "back to where the jump came from".
+  const backTarget = navigation.peekBack();
+  const returnHint = jumpOrigin && jumpOrigin.page !== page
+    ? { label: jumpOrigin.short ?? jumpOrigin.label, title: jumpOrigin.label, merged: backTarget?.key === jumpOrigin.key } : null;
+  const returnToOrigin = React.useCallback(() => {
+    if (!jumpOrigin) return;
+    if (navigation.peekBack()?.key === jumpOrigin.key) { navigateBack(); return; }
+    recordJump();
+    restorePlace(jumpOrigin);
+  }, [jumpOrigin, navigation, navigateBack, recordJump, restorePlace]);
   const filesActions = React.useMemo<FilesActions>(() => ({
     toggleDirectory: pathHex => filesStore.toggleDirectory(pathHex),
     revealDirectory: path => filesStore.revealDirectory(path),
@@ -1015,9 +1000,12 @@ export function App(): React.JSX.Element {
     openOriginalHistory: () => { recordJump(); filesStore.openOriginalHistory(); },
     setChangeView: next => filesStore.setChangeView(next),
     toggleCommitInfo: () => filesStore.toggleCommitInfo(),
-    loadMoreCommitFiles: () => filesStore.loadMoreCommitFiles(),
     retryCommitInfo: () => filesStore.retryCommitInfo(),
+    // Another file is a step back / forward returns to; moving between commits of one file is browsing.
     openCommitFile: file => { recordJump(); filesStore.openCommitFile(file); },
+    stepCommitFile: delta => { recordJump(); void filesStore.stepCommitFile(delta); },
+    loadMoreCommitFiles: () => filesStore.loadMoreCommitFiles(),
+    retryCommitFiles: () => filesStore.retryCommitFiles(),
     setHistoryOpen: open => {
       try { localStorage.setItem(FILES_HISTORY_OPEN_KEY, String(open)); } catch { /* storage unavailable: not remembered */ }
       filesStore.setHistoryOpen(open);
@@ -1148,7 +1136,7 @@ export function App(): React.JSX.Element {
   return <DiffFullContext.Provider value={filesCapabilities.fullFile}><div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
     {view.repository
       ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
-        history={{ view: navigationView, onBack: navigateBack, onForward: navigateForward }}
+        history={{ view: navigationView, hint: returnHint, onBack: navigateBack, onForward: navigateForward, onReturn: returnToOrigin }}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
         searchView={searchView} activityQuery={displayedQuery} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths}
         observation={observation} refDiff={refDiff} refDiffLoading={refDiffLoading} refDiffError={refDiffError} onLoadRefDiff={loadRefDiff} onCancelRefDiff={cancelRefDiff} onObserve={observeNow}
@@ -1187,9 +1175,6 @@ export function App(): React.JSX.Element {
       {/* Pages stay mounted while hidden so each keeps its own selection, filters and scroll position. */}
       <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "commits" && "invisible absolute inset-0")}
         inert={page !== "commits"} data-testid="commits-page">
-        {fromFiles ? <ReturnBanner testId="from-files-banner" backTestId="back-to-files" backTitle="回到文件页（⌘2）"
-          text={<>从文件页的 <span className="font-medium text-fg">{fromFiles.name}</span> 打开了这个提交；文件页保持原样。</>}
-          backLabel={`回到 ${fromFiles.name}`} onBack={() => changePage("files")} onDismiss={() => setFromFiles(null)} /> : null}
         {historyLocation ? <div role="status" data-testid="history-location-banner" className="flex flex-wrap items-center gap-2 border-b border-line bg-bg px-4 py-2 text-xs text-fg2">
           <span className="min-w-0 flex-1" aria-live="polite">
             {historyLocation.loading ? "正在当前历史快照中定位…" : historyLocation.error ? `定位失败：${historyLocation.error}` : historyLocation.cancelled
@@ -1253,9 +1238,6 @@ export function App(): React.JSX.Element {
       {/* The files and workspace pages mount on first visit and then stay, hidden, like the commits page. */}
       {filesAvailable && (page === "files" || filesVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "files" && "invisible absolute inset-0")}
         inert={page !== "files"} data-testid="files-page-slot">
-        {toFiles ? <ReturnBanner testId="to-files-banner" backTestId="back-from-files" backTitle={toFiles.page === "workspace" ? "回到工作区（⌘3）" : "回到提交页（⌘1）"}
-          text={<>从{toFiles.label}打开了 <span className="font-medium text-fg">{toFiles.name}</span>{toFiles.history ? " 的历史" : ""}；{toFiles.note ? <span className="text-warn">{toFiles.note}。</span> : null}{toFiles.page === "workspace" ? "工作区" : "提交页"}保持原样。</>}
-          backLabel={`回到${toFiles.label}`} onBack={() => changePage(toFiles.page)} onDismiss={() => setToFiles(null)} /> : null}
         <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount}
           historyQuery={filesHistoryQuery} onHistoryQuery={setFilesHistoryQuery} />
       </div> : null}
