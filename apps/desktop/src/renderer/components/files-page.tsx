@@ -210,19 +210,26 @@ function TreeRow({ entry, depth, view, actions }: { entry: TreeEntry; depth: num
   const inPath = !selected && Boolean(view.selection?.path.rawHex.startsWith(`${entry.path.rawHex}2f`));
   const Icon = isDirectory ? expanded ? FolderOpen : Folder : entry.kind === "symlink" ? Link2 : entry.kind === "submodule" ? Layers : FileText;
   return <>
+    <div className={cn("group flex items-center rounded-[7px] hover:bg-hover", selected && "bg-accent-soft hover:bg-accent-soft")}>
     <button type="button" data-testid="tree-row" aria-expanded={isDirectory ? expanded : undefined} aria-current={selected ? "true" : undefined}
       title={entry.kind === "symlink" ? `${entry.path.display}（符号链接）` : entry.kind === "submodule" ? `${entry.path.display}（子模块）` : entry.path.display}
       onClick={() => {
         if (isDirectory) actions.toggleDirectory(entry.path.rawHex);
-        actions.select({ path: entry.path, kind: isDirectory ? "directory" : "file" });
+        else actions.select({ path: entry.path, kind: "file" });
       }}
-      className={cn("flex h-7 w-full items-center gap-1.5 rounded-[7px] pr-2 text-left text-[13px] whitespace-nowrap text-fg2 hover:bg-hover",
+      className={cn("flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[7px] pr-2 text-left text-[13px] whitespace-nowrap text-fg2",
         inPath && "text-fg", selected && "bg-accent-soft font-semibold text-accent-fg hover:bg-accent-soft")}
       style={{ paddingLeft: `${6 + depth * 14}px` }}>
       {isDirectory ? expanded ? <ChevronDown className="size-3 shrink-0 text-fg3" /> : <ChevronRight className="size-3 shrink-0 text-fg3" /> : <span className="w-3 shrink-0" />}
       <Icon className={cn("size-3.5 shrink-0", isDirectory ? "text-fg3" : "text-fg3")} strokeWidth={1.75} />
       <span className="min-w-0 truncate">{entry.name.display}</span>
     </button>
+    {isDirectory ? <button type="button" data-testid="directory-history" title="查看目录历史" aria-label={`查看 ${entry.path.display} 的历史`}
+      onClick={() => actions.select({ path: entry.path, kind: "directory" })}
+      className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-fg3 opacity-0 hover:bg-hover hover:text-fg group-hover:opacity-100 focus-visible:opacity-100">
+      <Clock className="size-3.5" />
+    </button> : null}
+    </div>
     {isDirectory && expanded ? <Directory pathHex={entry.path.rawHex} depth={depth + 1} view={view} actions={actions} /> : null}
   </>;
 }

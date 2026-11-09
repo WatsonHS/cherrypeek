@@ -33,6 +33,12 @@ flowchart LR
 
 Electron 的 preload 通过 `contextBridge` 提供窄接口，main 负责 IPC 路由；耗时读取在 Rust 处理，main 与 renderer 不执行同步 Git 或全库解析。[Electron IPC](https://www.electronjs.org/docs/latest/tutorial/ipc)、[性能建议](https://www.electronjs.org/docs/latest/tutorial/performance)。
 
+## macOS 应用包
+
+`pnpm package:mac` 使用固定版本的 electron-builder，先执行 release 构建，再按本机架构生成应用与 DMG。main、preload 和全部 renderer 资源放入 `app.asar`；Rust daemon 通过 `extraResources` 放在 `Contents/Resources/commitscope-daemon`。main 在 `app.isPackaged` 时从 `process.resourcesPath` 启动核心，开发模式仍从 dist/resources 启动。应用不依赖源码目录或构建工具链，Git 继续由 Rust 从 PATH 查找并以 `/usr/bin/git` 兜底，缓存使用 Electron userData。
+
+当前包仅用于本机试用，显式使用 ad-hoc 签名并关闭 hardened runtime 与公证；不自动寻找开发者证书、不发布。公开发行需要另配 Developer ID 签名、适当的 hardened runtime 权限与公证，见 [P4-02 实现记录](implementation/p4-02-macos-package.md)。
+
 ## 进程与协议
 
 main 使用异步 `spawn` 启动随应用打包的 Rust 可执行文件，通过 stdin/stdout 交换 UTF-8 JSON Lines；stdout 仅为协议，日志走 stderr。JSON 中的换行必须转义。实现时锁定 Electron 内置 Node 对应的 API，并分别验证 macOS 与 Windows 的启动和回收。[Node 子进程文档](https://nodejs.org/api/child_process.html)。

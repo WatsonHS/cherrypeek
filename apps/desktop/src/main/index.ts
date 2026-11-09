@@ -14,7 +14,9 @@ import { RepositorySessionController } from "./repository-session-controller.js"
 const APP_ROOT = resolve(__dirname, "..");
 const RENDERER_ENTRY = resolve(APP_ROOT, "renderer/index.html");
 const PRELOAD_ENTRY = resolve(__dirname, "../preload.cjs");
-const CORE_ENTRY = resolve(APP_ROOT, "resources/commitscope-daemon");
+const CORE_ENTRY = app.isPackaged
+  ? resolve(process.resourcesPath, "commitscope-daemon")
+  : resolve(APP_ROOT, "resources/commitscope-daemon");
 const APP_URL = pathToFileURL(RENDERER_ENTRY).href;
 const IPC_GET_STATUS = "commitscope:core:get-status";
 const IPC_STATUS_CHANGED = "commitscope:core:status-changed";

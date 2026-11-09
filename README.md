@@ -79,6 +79,14 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 
 建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。2026-11-08 确认的后续规划 `P4-09` 工作区状态与改动展示、`P4-10` 文件二级页面，以及随后拆出的 `P4-11` diff 显示增强、`P4-12` 逐行追溯，已于 2026-11-09 实现并验收。切分支、fetch、stash 等的执行方式留待讨论。`M4 / P4-01` 性能达标、边界恢复与发行验收继续保留，具体范围和完成条件见[实施计划](docs/PLAN.md)。
 
+## macOS 本机打包
+
+在当前架构的 Mac 上执行 `pnpm package:mac`，会先构建 release Rust 核心与桌面代码，再生成 `release/mac-arm64/CommitScope.app` 和 `release/CommitScope-0.1.0-arm64.dmg`（Apple Silicon）。只需要应用目录时可执行 `pnpm package:mac --dir`。打开 DMG 后将 CommitScope 拖到 Applications，或直接打开生成的 `.app`。
+
+运行应用只需兼容的系统 Git，不依赖 Node、pnpm、Rust 或项目源码。使用当前 PATH 查找 Git，找不到时尝试 `/usr/bin/git`；Git 必须支持 `--no-lazy-fetch`。本机包使用 ad-hoc 签名，尚未做公开分发的 Developer ID 签名与公证，也未验证 Intel 或干净系统安装。默认应用数据位于 `~/Library/Application Support/commitscope/`，其中 `repository-state/` 存放仓库缓存与查看记录。
+
+打包后可运行 `pnpm test:smoke:package` 检查包内核心、系统 Git、真实提交加载与退出清理。具体配置、试用范围和证据见 [P4-02 本机打包记录](docs/implementation/p4-02-macos-package.md)。
+
 ## 本地运行
 
 当前验证环境为 macOS 27.0.1 / Apple Silicon，使用 Node 26.0.0、pnpm 10.28.1、Rust 1.95.0；版本分别由 `.node-version`、`packageManager` 和 `rust-toolchain.toml` 固定。准备这些工具后，在项目根目录执行：

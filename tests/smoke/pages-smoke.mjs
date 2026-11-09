@@ -189,6 +189,8 @@ try {
 
     // Markup in a file is shown as text, before and after syntax highlighting, and never runs.
     await tree("docs").click();
+    assert.equal(await tree("long.ts").getAttribute("aria-current"), "true", "expanding a folder preserves the selected file");
+    await page.getByTestId("file-content").waitFor();
     await tree("inject.html").click();
     await page.locator("[data-testid='file-content'] [data-line='3']").waitFor({ timeout: 15_000 });
     const injected = async () => page.evaluate(() => {

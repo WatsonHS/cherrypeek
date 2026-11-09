@@ -65,6 +65,26 @@ test("the root directory loads for the tree version, and a nested file expands i
   store.dispose();
 });
 
+test("expanding and reopening a directory keeps the current file and reuses its entries", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  store.select({ path: path("README.md"), kind: "file" });
+  const selection = store.getView().selection;
+  store.toggleDirectory(hex("src"));
+  await api.answer("tree", ok({ commit: version.commit, path: path("src"), entries: [], offset: 0, total: 0, hasMore: false }));
+  store.toggleDirectory(hex("src"));
+  store.toggleDirectory(hex("src"));
+  await flush();
+  assert.equal(store.getView().selection, selection);
+  assert.equal(store.getView().tab, "content");
+  assert.equal(store.getView().directories[hex("src")].state, "ready");
+  assert.deepEqual(api.pending.map(item => item.kind), ["content"], "expansion does not request history or reread cached entries");
+  store.dispose();
+});
+
 test("directories open on history; a file's history selects its newest change and loads that diff", async () => {
   const api = fakeApi();
   const store = new FilesStore(api);
