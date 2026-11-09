@@ -1,6 +1,8 @@
-import type { HistoryGraph, HistoryGraphSegment } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { HistoryCommit, HistoryGraph, HistoryGraphSegment } from "../../../../../packages/protocol/src/generated/server-message.js";
 
 export const MAX_VISIBLE_LANES = 6;
+export const MIN_GRAPH_LANES = 4;
+export const MAX_GRAPH_LANES = 12;
 export const OVERFLOW_WIDTH = 48;
 
 export interface GraphGeometry { rowHeight: number; mid: number; laneGap: number; x0: number }
@@ -25,13 +27,13 @@ export function lanesInMask(mask: number): number[] {
   return lanes;
 }
 
-export function graphAboveLanes(graph: HistoryGraph): number[] {
-  const lanes = new Set(lanesInMask(graph.above));
+export function graphAboveLanes(graph: HistoryGraph, laneLimit = Infinity): number[] {
+  const lanes = new Set(lanesInMask(graph.above).filter(lane => lane <= laneLimit));
   for (const segment of graph.segments) {
-    if (segment.kind === "incoming" && segment.fromLane >= MAX_VISIBLE_LANES) lanes.add(segment.fromLane);
+    if (segment.kind === "incoming" && segment.fromLane >= MAX_VISIBLE_LANES && segment.fromLane <= laneLimit) lanes.add(segment.fromLane);
   }
   for (const range of graph.hiddenThroughRanges ?? []) {
-    for (let lane = range.startLane; lane <= range.endLane; lane += 1) lanes.add(lane);
+    for (let lane = range.startLane; lane <= Math.min(range.endLane, laneLimit); lane += 1) lanes.add(lane);
   }
   return [...lanes].sort((a, b) => a - b);
 }
@@ -43,10 +45,10 @@ export function maxGraphLane(graph: HistoryGraph): number {
   return maxLane;
 }
 
-export function hiddenThroughPaths(graph: HistoryGraph, geometry: GraphGeometry): Array<{ color: number; d: string }> {
+export function hiddenThroughPaths(graph: HistoryGraph, geometry: GraphGeometry, laneLimit = Infinity): Array<{ color: number; d: string }> {
   const paths = new Map<number, string[]>();
   for (const range of graph.hiddenThroughRanges ?? []) {
-    for (let lane = range.startLane; lane <= range.endLane; lane += 1) {
+    for (let lane = range.startLane; lane <= Math.min(range.endLane, laneLimit); lane += 1) {
       const color = lane % 6;
       const x = laneX(lane, geometry);
       const segments = paths.get(color) ?? [];
@@ -58,10 +60,77 @@ export function hiddenThroughPaths(graph: HistoryGraph, geometry: GraphGeometry)
 }
 
 /** Converts backend graph segments to paths for one rendered row. A lane limit keeps compact views to intersecting segments. */
-export function graphPaths(graph: HistoryGraph, geometry: GraphGeometry, laneLimit?: number): Array<{ d: string; color: number }> {
+export function graphPaths(graph: HistoryGraph, geometry: GraphGeometry, laneLimit?: number): Array<{ d: string; color: number; segment: HistoryGraphSegment }> {
   return graph.segments
     .filter(segment => laneLimit === undefined || segment.fromLane <= laneLimit || segment.toLane <= laneLimit)
-    .map(segment => ({ d: segmentPath(segment, geometry), color: segment.color }));
+    .map(segment => ({ d: segmentPath(segment, geometry), color: segment.color, segment }));
+}
+
+export function hiddenLaneCount(graph: HistoryGraph, visibleLanes: number): number {
+  const ranges = graph.hiddenThroughRanges ?? [];
+  const explicit = new Set([graph.lane, ...graph.segments.flatMap(segment => [segment.fromLane, segment.toLane])]);
+  return ranges.reduce((count, range) => count + Math.max(0, range.endLane - Math.max(visibleLanes, range.startLane) + 1), 0)
+    + [...explicit].filter(lane => lane >= visibleLanes && !ranges.some(range => lane >= range.startLane && lane <= range.endLane)).length;
+}
+
+export interface GraphRowHighlight {
+  node: boolean;
+  aboveLane?: number;
+  hiddenThroughLane?: number;
+  segments: Set<HistoryGraphSegment>;
+}
+
+/** Follow the drawn first-parent line inside the loaded window, including lane changes, never colour reuse. */
+export function graphHighlight(commits: Pick<HistoryCommit, "oid" | "graph">[], oid: string | undefined): Map<HistoryGraph, GraphRowHighlight> {
+  const result = new Map<HistoryGraph, GraphRowHighlight>();
+  const index = commits.findIndex(commit => commit.oid === oid);
+  if (index < 0) return result;
+  const row = (graph: HistoryGraph) => {
+    let value = result.get(graph);
+    if (!value) { value = { node: false, segments: new Set() }; result.set(graph, value); }
+    return value;
+  };
+  const firstParent = (graph: HistoryGraph) => graph.segments.find(segment => segment.kind === "outgoing");
+  const incoming = (graph: HistoryGraph) => graph.segments.find(segment => segment.kind === "incoming" && segment.fromLane === graph.lane);
+  const through = (graph: HistoryGraph, lane: number): boolean => {
+    const segment = graph.segments.find(segment => segment.kind === "through" && segment.fromLane === lane && segment.toLane === lane);
+    if (segment) { row(graph).segments.add(segment); row(graph).aboveLane = lane; return true; }
+    if (graph.hiddenThroughRanges.some(range => range.startLane <= lane && range.endLane >= lane)) {
+      row(graph).hiddenThroughLane = lane; row(graph).aboveLane = lane; return true;
+    }
+    return false;
+  };
+  const start = commits[index]!.graph;
+  row(start).node = true;
+  const startIncoming = incoming(start);
+  if (startIncoming) { row(start).segments.add(startIncoming); row(start).aboveLane = startIncoming.fromLane; }
+  let lane = startIncoming?.fromLane;
+  for (let i = index - 1; i >= 0 && lane !== undefined; i--) {
+    const graph = commits[i]!.graph;
+    if (through(graph, lane)) continue;
+    const outgoing = graph.segments.find(segment => segment.kind === "outgoing" && segment.toLane === lane);
+    if (!outgoing) break;
+    row(graph).segments.add(outgoing); row(graph).node = true;
+    // A secondary parent starts another line at this fork; do not jump onto its first-parent trunk.
+    if (outgoing !== firstParent(graph)) break;
+    const previous = incoming(graph);
+    if (previous) { row(graph).segments.add(previous); row(graph).aboveLane = previous.fromLane; }
+    lane = previous?.fromLane;
+  }
+  const startOutgoing = firstParent(start);
+  if (startOutgoing) row(start).segments.add(startOutgoing);
+  lane = startOutgoing?.toLane;
+  for (let i = index + 1; i < commits.length && lane !== undefined; i++) {
+    const graph = commits[i]!.graph;
+    if (through(graph, lane)) continue;
+    const next = graph.segments.find(segment => segment.kind === "incoming" && segment.fromLane === lane);
+    if (!next) break;
+    row(graph).segments.add(next); row(graph).aboveLane = lane; row(graph).node = true;
+    const outgoing = firstParent(graph);
+    if (outgoing) row(graph).segments.add(outgoing);
+    lane = outgoing?.toLane;
+  }
+  return result;
 }
 
 function segmentPath(segment: HistoryGraphSegment, geometry: GraphGeometry): string {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,6 +16,11 @@ const screenshotDirectory = resolve(root, "output/playwright/graph-expansion");
 const temporaryRoot = await mkdtemp(join(tmpdir(), "commitscope-graph-expansion-"));
 const fixture = await createGraphFixture(join(temporaryRoot, "fixture"), { mainCommitCount: 420, includeBoundaries: false });
 const repository = fixture.repository;
+const existingRefs = (await gitText(repository, ["for-each-ref", "--format=%(refname)"])).trim().split("\n").length;
+const headOid = await gitText(repository, ["rev-parse", "HEAD"]);
+execFileSync("git", ["-C", repository, "update-ref", "--stdin"], {
+  input: Array.from({ length: 1000 - existingRefs }, (_, index) => `create refs/heads/graph-test-${index} ${headOid.trim()}\n`).join(""),
+});
 const profile = join(temporaryRoot, "user-data");
 let app;
 let page;
@@ -26,8 +32,8 @@ try {
   for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({
-    executablePath: require("electron"),
-    args: [appEntry, `--repository=${repository}`, `--user-data-dir=${profile}`],
+    executablePath: process.env.COMMITSCOPE_PACKAGED_APP || require("electron"),
+    args: [...(process.env.COMMITSCOPE_PACKAGED_APP ? [] : [appEntry]), `--repository=${repository}`, `--user-data-dir=${profile}`],
     cwd: root,
     env,
     chromiumSandbox: true,
@@ -54,6 +60,41 @@ try {
   assert.equal(selectedBefore, targetOid, "the expanded row is selected before toggling its graph");
   assert.ok(anchorBefore);
   await page.screenshot({ path: join(screenshotDirectory, "compact.png") });
+
+  const hoverRow = list.locator('[data-testid="commit-row"]').filter({ has: page.locator('[data-testid="commit-graph"][data-graph-lane="6"]') }).first();
+  const hoverOid = await hoverRow.getAttribute("data-oid");
+  await hoverRow.hover();
+  await page.waitForFunction(oid => document.querySelector('[aria-label="提交"]')?.dataset.graphHighlightOid === oid, hoverOid);
+  assert.equal(await list.locator('[aria-selected="true"]').getAttribute('data-oid'), selectedBefore, 'hover never changes commit selection');
+  const opacities = await list.locator('[data-testid="commit-graph"] path').evaluateAll(paths => paths.map(path => Number(getComputedStyle(path).opacity)));
+  assert.ok(opacities.includes(0.4) && opacities.includes(1), 'unrelated edges dim while the selected line stays fully coloured');
+  assert.ok(await list.getByTestId('graph-highlight-through').count() === 0, 'hidden lane is clipped before dragging');
+  await page.mouse.move(1100, 20);
+  await page.waitForFunction(oid => document.querySelector('[aria-label="提交"]')?.dataset.graphHighlightOid === oid, selectedBefore);
+
+  const handle = page.getByTestId('graph-resize-handle');
+  const box = await handle.boundingBox();
+  const originalWidth = Number(await stableTargetRow.getByTestId('commit-graph').getAttribute('data-graph-width'));
+  await page.mouse.move(box.x + box.width / 2, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 54, box.y + 40, { steps: 6 });
+  await page.mouse.up();
+  assert.equal(await handle.getAttribute('aria-valuenow'), '12');
+  assert.ok(Number(await stableTargetRow.getByTestId('commit-graph').getAttribute('data-graph-width')) > originalWidth);
+  assert.equal(await stableTargetRow.getByTestId('commit-graph').getAttribute('data-graph-signature'), compactSignature);
+  assert.ok(Math.abs(await readScreenTop(stableTargetRow) - anchorBefore) <= 4, 'dragging preserves the vertical anchor');
+  await hoverRow.hover();
+  await page.waitForFunction(oid => document.querySelector('[aria-label="提交"]')?.dataset.graphHighlightOid === oid, hoverOid, { timeout: 5_000 });
+  assert.ok(await list.getByTestId('graph-highlight-through').count() > 0, 'resized graph highlights the hidden straight-through lane');
+  await page.screenshot({ path: join(screenshotDirectory, 'resized-highlight.png') });
+  await handle.focus();
+  await page.keyboard.press('Home');
+  assert.equal(await handle.getAttribute('aria-valuenow'), '4');
+  assert.ok(Number(await stableTargetRow.getByTestId('commit-graph').getAttribute('data-graph-hidden-count')) > 0);
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await handle.getAttribute('aria-valuenow'), '7');
 
   await targetButton.click();
   await page.waitForFunction(() => document.querySelector('[aria-label="提交"]')?.dataset.graphExpanded === "true", null, { timeout: 5_000 });
@@ -126,7 +167,7 @@ try {
   await page.getByTestId("graph-collapse").click();
   await page.waitForFunction(() => document.querySelector('[aria-label="提交"]')?.dataset.graphExpanded === "false", null, { timeout: 5_000 });
   assert.equal(await list.getAttribute("data-graph-expanded"), "false");
-  assert.equal(await list.getAttribute("data-visible-graph-lanes"), "6");
+  assert.equal(await list.getAttribute("data-visible-graph-lanes"), "7", "collapse restores the custom width");
   assert.equal(await list.evaluate(element => element.scrollLeft), 0, "collapse resets the list's horizontal offset");
   assert.ok(await list.locator('[data-testid="graph-expand"]').count() > 0, "compact mode restores the +N expansion controls");
   await list.evaluate(element => { element.scrollTop = 0; });
@@ -150,12 +191,14 @@ try {
   assert.equal(await page.getByTestId("graph-mode-bar").count(), 0, "collapsing removes the full-graph bar");
   const escapeTopAfter = await readScreenTop(escapeRow);
   assert.ok(Math.abs(escapeTopAfter - escapeTop) <= 4, `collapse keeps the row where it was on screen: before=${escapeTop}, after=${escapeTopAfter}`);
+  await page.getByTestId('graph-resize-handle').dblclick();
+  assert.equal(await list.getAttribute('data-visible-graph-lanes'), '6', 'double-click restores the default width');
 
   assert.deepEqual(await snapshotTree(repository), before, "expanding and browsing the graph never writes to the repository");
 
   await app.close();
   app = undefined;
-  process.stdout.write(`Graph expansion Electron smoke passed: ${expectedCount} fixture commits, multi-lane expansion/collapse across page boundary, unchanged selection/signature and read-only snapshot. Screenshots: ${screenshotDirectory}\n`);
+  process.stdout.write(`Graph interactions Electron smoke passed: ${expectedCount} commits / 1000 refs, drag and keyboard resize, hover/selection highlighting, expansion/collapse across pages, unchanged selection/signature and read-only snapshot. Screenshots: ${screenshotDirectory}\n`);
 } catch (error) {
   if (page) {
     await mkdir(screenshotDirectory, { recursive: true });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const { graphAboveLanes, graphPaths, graphWidth, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES } = await import(pathToFileURL(
+const { graphAboveLanes, graphHighlight, graphPaths, graphWidth, graphWidthForMaxLane, hiddenLaneCount, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES } = await import(pathToFileURL(
   join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "graph.mjs")));
 
 const geometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
@@ -60,4 +60,39 @@ test("expanded lane set supplies hidden date bridges as well as visible mask lan
   assert.deepEqual(bridgeLanes, [0, 2, 5, 6, 7, 9], "date bridge lanes include hidden incoming and straight-through lines");
   assert.equal(graphWidthForMaxLane(geometry, Math.max(...bridgeLanes)), 95,
     "expanded date bridge width reaches the furthest actual lane");
+});
+
+test("resized graphs count hidden lines and clip bridges at the chosen lane limit", () => {
+  const graph = {
+    lane: 0, color: 0, parents: ['p'], boundary: false, above: 0b100001, below: 0,
+    hiddenLaneCount: 5, hiddenThroughRanges: [{ startLane: 6, endLane: 9 }],
+    segments: [{ kind: 'through', fromLane: 5, toLane: 5, color: 5 }, { kind: 'outgoing', fromLane: 0, toLane: 10, color: 4 }],
+  };
+  assert.equal(hiddenLaneCount(graph, 4), 6);
+  assert.equal(hiddenLaneCount(graph, 8), 3);
+  assert.equal(hiddenLaneCount(graph, 12), 0);
+  assert.deepEqual(graphAboveLanes(graph, 7), [0, 5, 6, 7]);
+  assert.deepEqual(hiddenThroughPaths(graph, geometry, 7).map(path => path.color), [0, 1]);
+});
+
+test("highlight follows connected first-parent edges, not reused colours or lanes", () => {
+  const graph = (lane, segments, ranges = []) => ({ lane, color: lane % 6, parents: [], boundary: false, above: 0, below: 0, hiddenLaneCount: 0, segments, hiddenThroughRanges: ranges });
+  const edge = (kind, fromLane, toLane) => ({ kind, fromLane, toLane, color: toLane % 6 });
+  const commits = [
+    { oid: 'fork', graph: graph(0, [edge('outgoing', 0, 6), edge('outgoing', 0, 12)]) },
+    { oid: 'side', graph: graph(12, [edge('incoming', 12, 12), edge('outgoing', 12, 12)], [{ startLane: 6, endLane: 6 }]) },
+    { oid: 'parent', graph: graph(6, [edge('incoming', 6, 6), edge('outgoing', 6, 2)], [{ startLane: 12, endLane: 12 }]) },
+    { oid: 'root', graph: graph(2, [edge('incoming', 2, 2), edge('incoming', 12, 2)]) },
+    { oid: 'reused', graph: graph(2, [edge('outgoing', 2, 2)]) },
+  ];
+  const highlights = graphHighlight(commits, 'parent');
+  assert.equal(highlights.get(commits[0].graph).node, true);
+  assert.equal(highlights.get(commits[1].graph).node, false, 'lane 12 shares lane 6 colour but not its line');
+  assert.equal(highlights.get(commits[1].graph).hiddenThroughLane, 6);
+  assert.equal(highlights.get(commits[3].graph).aboveLane, 2, 'date bridge follows the changed lane');
+  assert.equal(highlights.has(commits[4].graph), false, 'a new branch reusing the slot is not connected');
+  const side = graphHighlight(commits, 'side');
+  assert.equal(side.get(commits[0].graph).segments.has(commits[0].graph.segments[0]), false);
+  assert.equal(side.get(commits[0].graph).segments.has(commits[0].graph.segments[1]), true, 'the upper fork ends at its secondary edge');
+  assert.equal(graphHighlight(commits, 'outside-window').size, 0);
 });

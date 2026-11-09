@@ -4,7 +4,8 @@ import type { RepositoryView } from "../lib/repository-session-store.js";
 import { LoaderCircle, TriangleAlert } from "lucide-react";
 import { clock, dayKey, dayLabel, parseGitTime, refTarget } from "../lib/format.js";
 import { errorTitle } from "../lib/errors.js";
-import { graphAboveLanes, graphPaths, graphWidthForMaxLane, hiddenThroughPaths, laneX, lanesInMask, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry } from "../lib/graph.js";
+import { graphAboveLanes, graphHighlight, graphPaths, graphWidthForMaxLane, hiddenLaneCount, hiddenThroughPaths, laneX, maxGraphLane, MAX_VISIBLE_LANES, type GraphGeometry, type GraphRowHighlight } from "../lib/graph.js";
+import { GraphResizeHandle } from "./graph-resize-handle.js";
 import { refLabels, type OtherWorktreeHead } from "../lib/ref-labels.js";
 import { cn } from "../lib/utils.js";
 import { IdentityAvatar } from "./identity-avatar.js";
@@ -21,10 +22,11 @@ import { historyPrefetchDistance } from "../lib/history-prefetch.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
-/** Room after the six compact lanes for the hidden-node marker and the "+N" control. */
+/** Room after the visible lanes for the hidden-node marker and the "+N" control. */
 const HIDDEN_LANES_GUTTER = 32;
 /** Inner left padding of a commit's text card; day labels use the same so the text lines up. */
 const TEXT_INSET = 10;
+const GraphHighlightContext = React.createContext(new Map<HistoryCommit["graph"], GraphRowHighlight>());
 
 type ListEntry =
   | { kind: "day"; key: string; dayKey: string; label: string; graph: HistoryCommit["graph"]; height: number }
@@ -128,6 +130,9 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
   const [graphExpanded, setGraphExpanded] = React.useState(false);
+  const [customGraphLanes, setCustomGraphLanes] = React.useState<number | null>(null);
+  const [hoveredOid, setHoveredOid] = React.useState<string>();
+  const [graphScrollLeft, setGraphScrollLeft] = React.useState(0);
   const [viewportDay, setViewportDay] = React.useState<string | null>(null);
   const [viewportSeconds, setViewportSeconds] = React.useState<number | null>(null);
   /** The time slider is being dragged; the list follows it without the locating notice. */
@@ -139,15 +144,15 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   const lastRestoredPageRevision = React.useRef(0);
   const refIndex = React.useMemo(() => refsByTarget(preview.refs), [preview.refs]);
   const commitByOid = React.useMemo(() => new Map(preview.commits.map(commit => [commit.oid, commit])), [preview.commits]);
-  const maxLaneInWindow = preview.commits.reduce((maxLane, commit) => Math.max(maxLane, maxGraphLane(commit.graph)), -1);
-  const visibleLaneCount = graphExpanded ? Math.max(MAX_VISIBLE_LANES, maxLaneInWindow + 1) : MAX_VISIBLE_LANES;
-  // Compact mode is only as wide as the lanes this window uses (up to six), plus room for
-  // the "+N" control when some lanes are hidden.
-  const hasHiddenLanes = maxLaneInWindow >= MAX_VISIBLE_LANES || preview.commits.some(commit => commit.graph.hiddenLaneCount > 0);
-  const graphColumnWidth = graphExpanded
-    ? graphWidthForMaxLane(ROW, visibleLaneCount - 1)
-    : hasHiddenLanes ? graphColumnX() + HIDDEN_LANES_GUTTER : graphWidthForMaxLane(ROW, Math.max(0, maxLaneInWindow));
-  const expandedContentMinWidth = graphExpanded ? graphColumnWidth + 280 : undefined;
+  const highlightedOid = hoveredOid && commitByOid.has(hoveredOid) ? hoveredOid : selectedOid;
+  const highlights = React.useMemo(() => graphHighlight(preview.commits, highlightedOid), [preview.commits, highlightedOid]);
+  const maxLaneInWindow = React.useMemo(() => preview.commits.reduce((maxLane, commit) => Math.max(maxLane, maxGraphLane(commit.graph)), -1), [preview.commits]);
+  const visibleLaneCount = graphExpanded ? Math.max(MAX_VISIBLE_LANES, maxLaneInWindow + 1) : customGraphLanes ?? MAX_VISIBLE_LANES;
+  const hasHiddenLanes = maxLaneInWindow >= visibleLaneCount;
+  const drawnLaneCount = graphExpanded || customGraphLanes !== null ? visibleLaneCount : Math.min(visibleLaneCount, Math.max(1, maxLaneInWindow + 1));
+  // Keep the overflow gutter while resizing, so revealing the final hidden lane does not shrink the handle back.
+  const graphColumnWidth = graphWidthForMaxLane(ROW, drawnLaneCount - 1) + (hasHiddenLanes || customGraphLanes !== null ? HIDDEN_LANES_GUTTER : 0);
+  const expandedContentMinWidth = graphExpanded || customGraphLanes !== null ? graphColumnWidth + 280 : undefined;
   const headReference = preview.repository?.headReference ?? null;
   const headOid = preview.repository?.headOid ?? null;
   const otherWorktreesByHead = React.useMemo(() => {
@@ -501,7 +506,10 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     }
     setGraphExpanded(false);
   };
-
+  const updateGraphHover = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch" || event.buttons) return;
+    setHoveredOid((event.target as Element).closest<HTMLElement>('[data-testid="commit-row"]')?.dataset.oid);
+  };
 
   const loadingEmpty = preview.state === "loading" && preview.commits.length === 0;
   const finishedEmpty = preview.state === "ready" && preview.commits.length === 0;
@@ -510,7 +518,7 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     && preview.opening === null && !preview.pageLoading && !preview.refreshing && !preview.scopeSwitching
     && !preview.pageError;
 
-  return <nav aria-label="提交列表" className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+  return <GraphHighlightContext.Provider value={highlights}><nav aria-label="提交列表" className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     {preview.error && preview.repository ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-bad" strokeWidth={1.75} aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col"><span className="font-semibold text-bad">{errorTitle(preview.error.code)}</span><span className="break-words text-fg2">{preview.error.message} <code className="font-mono text-xs text-fg3">{preview.error.code}</code></span></span>
@@ -536,13 +544,20 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     <HistoryDayStrip listRef={listRef} markers={dayMarkers} days={timeRailDays} atNewest={atNewest} onJumpToNewest={() => void goNewest()} rowHeight={DAY_ROW_HEIGHT} textLeft={graphColumnWidth + 24 + TEXT_INSET}
       graphLaneCount={graphExpanded ? visibleLaneCount : null} onCollapseGraph={collapseGraph} onChooseDate={jumpToDate} />
     <div ref={listRef} role="listbox" aria-label="提交" tabIndex={0} aria-activedescendant={activeDescendant} aria-busy={preview.pageLoading}
+      data-graph-highlight-oid={highlights.size ? highlightedOid : undefined}
       data-graph-expanded={graphExpanded ? "true" : "false"} data-visible-graph-lanes={visibleLaneCount}
       data-page-loading={preview.pageLoading ? "true" : "false"} data-loaded-offset={preview.pageOffset ?? 0}
       data-loaded-count={preview.commits.length} data-window-pages={preview.windowPageCount}
       className={cn("min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain px-2 pb-6 outline-none",
         // The time slider marks the position; keep only the horizontal scrollbar for the expanded graph.
         "[&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-0 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:bg-line2")}
-      style={{ overflowAnchor: "none" }} onScroll={handleScroll}
+      style={{ overflowAnchor: "none" }} onScroll={() => {
+        // Horizontal scrolling keeps the pointer over the same row; it must not erase its highlight.
+        if (listRef.current?.scrollTop !== lastScrollTop.current) setHoveredOid(undefined);
+        setGraphScrollLeft(listRef.current?.scrollLeft ?? 0);
+        handleScroll();
+      }}
+      onPointerOver={updateGraphHover} onPointerMove={updateGraphHover} onPointerLeave={() => setHoveredOid(undefined)}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
         if (event.key === "Enter" && selectedOid && event.target === event.currentTarget) {
@@ -592,13 +607,15 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       {preview.anchorRestorationSpace > 0 ? <div aria-hidden="true" style={{ height: preview.anchorRestorationSpace }} /> : null}
       </div>
     </div>
+    {!graphExpanded && preview.commits.length ? <GraphResizeHandle left={16 + graphColumnWidth - graphScrollLeft} lanes={visibleLaneCount}
+      drawnLanes={drawnLaneCount} laneGap={ROW.laneGap} onChange={setCustomGraphLanes} onReset={() => setCustomGraphLanes(null)} /> : null}
     </div>
     {preview.commits.length ? <HistoryTimeSlider days={timeRailDays}
       partial={!useActivityDays || activityDaysPartial ? "counting" : activityDaysTruncated ? "truncated" : false}
       sessionKey={viewportSessionKey} viewportSeconds={viewportSeconds} loading={timeRailLoading} onChooseTime={jumpToTime}
       onScrubbingChange={value => { setScrubbing(value); onScrubbingChange?.(value); }} /> : null}
     </div>
-  </nav>;
+  </nav></GraphHighlightContext.Provider>;
 }
 
 function rowId(oid: string): string {
@@ -628,8 +645,9 @@ function captureWindowAnchor(
   return { oid: lastCommit.commit.oid, offset: offset - scrollTop, repoId: session.repoId, generation: session.generation };
 }
 
-function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, onExpand, isHead = false, testId = "commit-graph" }: {
+function GraphLanes({ graph, bridgeGraph, width, height, lanes, expanded, visibleLaneCount, onExpand, isHead = false, testId = "commit-graph" }: {
   graph?: HistoryCommit["graph"];
+  bridgeGraph?: HistoryCommit["graph"];
   width: number;
   height: number;
   lanes?: number[];
@@ -640,14 +658,17 @@ function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, o
   isHead?: boolean;
   testId?: string;
 }): React.JSX.Element {
-  const paths = React.useMemo(() => graph ? graphPaths(graph, ROW, expanded ? undefined : MAX_VISIBLE_LANES - 1) : [], [graph, expanded]);
-  const hiddenPaths = React.useMemo(() => graph && expanded ? hiddenThroughPaths(graph, ROW) : [], [graph, expanded]);
+  const highlights = React.useContext(GraphHighlightContext);
+  const highlight = highlights.get((graph ?? bridgeGraph)!);
+  const opacity = (matches: boolean | undefined) => highlights.size && !matches ? 0.4 : 1;
+  const paths = React.useMemo(() => graph ? graphPaths(graph, ROW, visibleLaneCount - 1) : [], [graph, visibleLaneCount]);
+  const hiddenPaths = React.useMemo(() => graph ? hiddenThroughPaths(graph, ROW, visibleLaneCount - 1) : [], [graph, visibleLaneCount]);
   const hiddenNode = graph ? graph.lane >= visibleLaneCount : false;
-  const hiddenCount = expanded ? 0 : graph?.hiddenLaneCount ?? 0;
-  const overflowX = graphColumnX();
+  const hiddenCount = React.useMemo(() => graph && !expanded ? hiddenLaneCount(graph, visibleLaneCount) : 0, [graph, expanded, visibleLaneCount]);
+  const overflowX = graphWidthForMaxLane(ROW, visibleLaneCount - 1);
   const aboveMask = graph?.above ?? (lanes ?? []).filter(lane => lane < MAX_VISIBLE_LANES).reduce((mask, lane) => mask | (1 << lane), 0);
   const belowMask = graph?.below ?? 0;
-  const aboveLanes = lanes ?? (graph ? (expanded ? graphAboveLanes(graph) : lanesInMask(graph.above)) : []);
+  const aboveLanes = React.useMemo(() => lanes ?? (graph ? graphAboveLanes(graph, visibleLaneCount - 1) : []), [lanes, graph, visibleLaneCount]);
   const hiddenRanges = graph?.hiddenThroughRanges ?? [];
   const drawnWidth = expanded ? width : Math.min(overflowX, width);
   const signature = graph
@@ -656,24 +677,27 @@ function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, o
   return <span className="relative block shrink-0" style={{ width, height }}>
     <svg width={width} height={height} aria-hidden="true" className="shrink-0"
       data-testid={testId} data-graph-signature={signature} data-graph-lane={graph?.lane}
+      data-graph-highlighted={highlight?.node ?? false}
       data-graph-expanded={expanded ? "true" : "false"} data-graph-width={width} data-graph-visible-lanes={visibleLaneCount} data-graph-hidden-count={hiddenCount}
       data-graph-boundary={graph?.boundary ? "true" : "false"} data-graph-above-mask={aboveMask} data-graph-below-mask={belowMask}
       data-graph-above-lanes={aboveLanes.join(",")} data-graph-hidden-through-ranges={hiddenRanges.map(item => `${item.startLane}-${item.endLane}`).join(",")}>
       <svg x={0} y={0} width={drawnWidth} height={height} viewBox={`0 0 ${drawnWidth} ${height}`} className="overflow-hidden">
-        {lanes?.filter(lane => expanded || lane < MAX_VISIBLE_LANES).map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
-        {paths.map((path, index) => <path key={index} d={path.d} style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
+        {lanes?.filter(lane => lane < visibleLaneCount).map(lane => <path key={lane} d={`M${laneX(lane, ROW)} 0V${height}`} style={{ opacity: opacity(highlight?.aboveLane === lane), stroke: `var(--l${lane % 6})`, strokeWidth: 1.5, fill: "none" }} />)}
+        {paths.map((path, index) => <path key={index} d={path.d} style={{ opacity: opacity(highlight?.segments.has(path.segment)), stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none", strokeLinecap: "round" }} />)}
         {hiddenPaths.map(path => <path key={path.color} data-testid="graph-hidden-through" data-graph-color={path.color} d={path.d}
-          style={{ stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none" }} />)}
+          style={{ opacity: opacity(false), stroke: `var(--l${path.color})`, strokeWidth: 1.5, fill: "none" }} />)}
+        {highlight?.hiddenThroughLane !== undefined && highlight.hiddenThroughLane < visibleLaneCount ? <path data-testid="graph-highlight-through"
+          d={`M${laneX(highlight.hiddenThroughLane, ROW)} 0V${height}`} style={{ stroke: `var(--l${highlight.hiddenThroughLane % 6})`, strokeWidth: 1.5, fill: "none" }} /> : null}
         {graph && isHead && (!hiddenNode || expanded) ? <circle data-testid="graph-head-ring" cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={6.5}
-          style={{ fill: "none", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }} /> : null}
+          style={{ opacity: opacity(highlight?.node), fill: "none", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }} /> : null}
         {graph && (!hiddenNode || expanded) ? <circle cx={laneX(graph.lane, ROW)} cy={ROW.mid} r={3.5}
-          style={graph.boundary
+          opacity={opacity(highlight?.node)} style={graph.boundary
             ? { fill: "var(--bg)", stroke: "var(--warn)", strokeWidth: 1.8 }
             : graph.parents.length > 1
               ? { fill: "var(--bg)", stroke: `var(--l${graph.color})`, strokeWidth: 1.5 }
               : { fill: `var(--l${graph.color})` }} /> : null}
       </svg>
-      {hiddenCount > 0 && hiddenNode ? <circle cx={overflowX + 3} cy={ROW.mid} r={2.5} className="fill-fg3" /> : null}
+      {hiddenCount > 0 && hiddenNode ? <circle cx={overflowX + 3} cy={ROW.mid} r={2.5} className="fill-fg3" opacity={opacity(highlight?.node)} /> : null}
     </svg>
     {hiddenCount > 0 ? <button type="button" data-testid="graph-expand" aria-label={`展开完整提交图，显示另外 ${hiddenCount} 条隐藏图线`}
       title={`展开完整提交图；另有 ${hiddenCount} 条隐藏图线`} className="absolute z-[1] rounded px-0.5 font-mono text-[9px] leading-3 text-fg3 hover:bg-hover hover:text-fg"
@@ -684,14 +708,10 @@ function GraphLanes({ graph, width, height, lanes, expanded, visibleLaneCount, o
   </span>;
 }
 
-function graphColumnX(): number {
-  return laneX(MAX_VISIBLE_LANES - 1, ROW) + ROW.x0;
-}
-
 function DayRow({ entry, width, expanded, visibleLaneCount, contentMinWidth }: { entry: Extract<ListEntry, { kind: "day" }>; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number }): React.JSX.Element {
-  const lanes = expanded ? graphAboveLanes(entry.graph) : lanesInMask(entry.graph.above);
+  const lanes = React.useMemo(() => graphAboveLanes(entry.graph, visibleLaneCount - 1), [entry.graph, visibleLaneCount]);
   return <div role="presentation" className="flex items-stretch gap-2 pr-3 pl-2" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
-    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-day-bridge" />
+    <GraphLanes bridgeGraph={entry.graph} width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-day-bridge" />
     <span className="flex flex-1 items-end justify-between pb-1.5 text-xs" style={{ paddingLeft: TEXT_INSET }}>
       <span className="font-semibold text-fg2">{entry.label}</span>
     </span>
@@ -703,11 +723,11 @@ function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinW
   newCount: number;
   onReview?(): void;
 }): React.JSX.Element {
-  const lanes = expanded ? graphAboveLanes(graph) : lanesInMask(graph.above);
+  const lanes = React.useMemo(() => graphAboveLanes(graph, visibleLaneCount - 1), [graph, visibleLaneCount]);
   // A group rather than a separator: it holds the review action.
   return <div role="group" aria-label="上次看到这里" data-testid="history-divider" data-marker-kind="last-seen"
     className="flex items-center gap-2 pr-3 pl-2 text-[11px] text-fg3" style={{ height: DAY_ROW_HEIGHT, minWidth: contentMinWidth }}>
-    <GraphLanes width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-last-seen-bridge" />
+    <GraphLanes bridgeGraph={graph} width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-last-seen-bridge" />
     <span className="h-px flex-1 bg-line" />
     <span>上次看到这里</span>
     {onReview && newCount > 0 ? <button type="button" data-testid="handoff-new-commits"
@@ -734,13 +754,14 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
   const isMerge = commit.parents.length > 1;
   const date = parseGitTime(commit.committer.timestamp);
   const isHead = headOid === commit.oid;
+  const hiddenCount = React.useMemo(() => expanded ? 0 : hiddenLaneCount(commit.graph, visibleLaneCount), [commit.graph, expanded, visibleLaneCount]);
   const labels = refLabels({ refs, headReference, isHeadCommit: isHead, otherWorktrees, foldRemotes: true });
   return <div id={rowId(commit.oid)} role="option" aria-selected={selected} tabIndex={-1}
     data-testid="commit-row" data-oid={commit.oid} data-commit-day={date ? dayKey(date) : undefined}
     title={[
       commit.graph.boundary ? "历史边界（浅克隆或父关系调整）" : undefined,
-      !expanded && commit.graph.lane >= MAX_VISIBLE_LANES ? "此提交位于未显示的图线中" : undefined,
-      !expanded && commit.graph.hiddenLaneCount > 0 ? `另有 ${commit.graph.hiddenLaneCount} 条图线未显示` : undefined,
+      !expanded && commit.graph.lane >= visibleLaneCount ? "此提交位于未显示的图线中" : undefined,
+      hiddenCount > 0 ? `另有 ${hiddenCount} 条图线未显示` : undefined,
     ].filter(Boolean).join("；") || undefined}
     onClick={onSelect}
     style={{ minWidth: contentMinWidth }}
@@ -757,8 +778,8 @@ function CommitRow({ commit, graphWidth, expanded, visibleLaneCount, contentMinW
           title="上次查看后新增" className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
         {commit.graph.boundary ? <span title="历史边界（浅克隆或父关系调整）" className="shrink-0 rounded bg-sunken px-1 text-[10px] text-warn">边界</span> : null}
         {commit.graph.boundary ? <span className="sr-only">历史边界（浅克隆或父关系调整）。</span> : null}
-        {!expanded && commit.graph.lane >= MAX_VISIBLE_LANES ? <span className="sr-only">此提交位于未显示的图线中。</span> : null}
-        {!expanded && commit.graph.hiddenLaneCount > 0 ? <span className="sr-only">另有 {commit.graph.hiddenLaneCount} 条图线未显示。</span> : null}
+        {!expanded && commit.graph.lane >= visibleLaneCount ? <span className="sr-only">此提交位于未显示的图线中。</span> : null}
+        {hiddenCount > 0 ? <span className="sr-only">另有 {hiddenCount} 条图线未显示。</span> : null}
         <span className={cn("min-w-0 flex-1 truncate text-sm", isMerge ? "font-normal text-fg3" : "font-medium text-fg")}>{commit.summary}</span>
         <span className="shrink-0 text-xs whitespace-nowrap text-fg3 tabular-nums">{date ? clock(date) : commit.committer.timestamp}</span>
       </span>
