@@ -45,7 +45,7 @@ pnpm package:mac         # an unsigned .app / .dmg for this Mac, in release/
 
 Signed releases are built with `pnpm release:mac`; see [docs/RELEASE.md](docs/RELEASE.md) (in Chinese).
 
-The product, design and architecture documents in [docs/](docs/) are written in Chinese.
+Development notes (progress, the full document index, test commands and project layout) are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The product, design and architecture documents in [docs/](docs/) are written in Chinese.
 
 ## License
 

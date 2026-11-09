@@ -1,6 +1,6 @@
 # 项目工作约定
 
-- 开始实现前阅读 `README.md`、`docs/PRODUCT.md`、`docs/ARCHITECTURE.md` 和 `docs/PLAN.md`；按阶段更新状态和验证证据。
+- 开始实现前阅读 `docs/DEVELOPMENT.md`、`docs/PRODUCT.md`、`docs/ARCHITECTURE.md` 和 `docs/PLAN.md`；按阶段更新状态和验证证据。开发进度、文档索引和测试命令写在 `docs/DEVELOPMENT.md`；`README.md` 与 `README.en.md` 面向使用者，只在功能、安装或使用方式变化时更新（2026-11-10 起）。
 - Electron + React/TypeScript 前端、Rust 核心已确定。独立实现，不 fork 或复制 GitComet，不接入其 crates / AppStore。
 - MVP 是只读历史浏览器。浏览分支不得触发 checkout；不加入 stage、commit、merge、rebase、push 等写操作或自动 fetch。
 - 仓库事实由 Rust 查询服务提供；renderer 只持有有界页面和视图状态。查询必须可取消，过期结果不得覆盖当前视图。
