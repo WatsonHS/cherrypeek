@@ -280,6 +280,47 @@ test("single changes match git diff against the chosen parent, and full-file mod
   }
 });
 
+test("a directory's changes in a commit match git diff on that directory against the chosen parent", async () => {
+  const { repository, root, renamed, merge, head } = fixture.files;
+  const client = await openClient("files-path-changes", repository);
+  const letter = { added: "A", modified: "M", deleted: "D", renamed: "R", copied: "C", typeChanged: "T" };
+  const project = file => `${letter[file.status]} ${file.oldPath?.rawHex ?? "-"} ${file.newPath?.rawHex ?? "-"}`;
+  try {
+    const parents = (await git(repository, ["rev-list", "--parents", "-n1", merge])).split(" ").slice(1);
+    const cases = [
+      { oid: head, parentIndex: 0, base: `${head}^`, directory: "src" },
+      { oid: merge, parentIndex: 0, base: parents[0], directory: "src" },
+      { oid: merge, parentIndex: 1, base: parents[1], directory: "" },
+      { oid: renamed, parentIndex: 0, base: `${renamed}^`, directory: "docs" },
+      { oid: root, parentIndex: null, base: EMPTY_TREE, directory: "many" },
+      { oid: root, parentIndex: null, base: EMPTY_TREE, directory: "unicodé 目录" },
+      { oid: root, parentIndex: null, base: EMPTY_TREE, directory: "" },
+    ];
+    for (const item of cases) {
+      const where = `${item.directory || "(repository)"} in ${item.oid.slice(0, 7)} against parent ${item.parentIndex}`;
+      const page = await client.listPathChanges(item.oid, item.parentIndex, item.directory ? hex(item.directory) : "");
+      const scope = item.directory ? ["--", `${item.directory}/`] : [];
+      const expected = parseRaw(await git(repository, ["diff", "-z", "--raw", "--no-abbrev", "-M", item.base, item.oid, ...scope], { binary: true }))
+        .map(change => `${change.letter} ${change.oldPathHex ?? (change.letter === "A" ? "-" : change.pathHex)} ${change.letter === "D" ? "-" : change.pathHex}`);
+      assert.deepEqual(page.files.map(project).sort(), expected.sort(), where);
+      assert.equal(page.totalFiles, expected.length, where);
+      assert.equal(page.hasMore, false, where);
+    }
+    // Pages of three add up to the whole list.
+    const all = [];
+    for (let offset = 0; ;) {
+      const page = await client.listPathChanges(root, null, "", offset, 3);
+      all.push(...page.files.map(project));
+      offset += page.files.length;
+      if (!page.hasMore) break;
+    }
+    assert.deepEqual(all, (await client.listPathChanges(root, null, "")).files.map(project));
+    await assert.rejects(client.listPathChanges(root, 0, hex("src")), error => error.code === "INVALID_REQUEST", "a root commit takes no parent index");
+  } finally {
+    await client.stop();
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // P4-12 blame against git blame --porcelain
 // ---------------------------------------------------------------------------------------------

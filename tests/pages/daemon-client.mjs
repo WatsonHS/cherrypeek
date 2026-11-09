@@ -52,6 +52,10 @@ export class PagesDaemonClient extends NavigationDaemonClient {
     return single(await this.call("readFileChange", params), "fileDiff", "diff");
   }
 
+  async listPathChanges(oid, parentIndex, pathHex, offset = 0, pageSize = 200) {
+    return single(await this.call("listPathChanges", { oid, parentIndex, pathHex, offset, pageSize }), "changedFiles", "page");
+  }
+
   async blame(commit, pathHex) {
     return projectBlame(await this.call("readBlame", { commit, pathHex }, 60_000));
   }

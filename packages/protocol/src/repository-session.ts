@@ -40,7 +40,7 @@ import type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTi
   ListSearchPathsParams, SearchPathFilter, SearchPathKind, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
   ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
-  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "./generated/client-message.js";
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "./generated/client-message.js";
 
 export type { RepositoryScope, RepositoryNavigation, RefMergeStatusResult } from "./generated/server-message.js";
 export type { HistoryGraph, HistoryGraphSegment, HistoryGraphSegmentKind } from "./generated/server-message.js";
@@ -54,7 +54,7 @@ export type { SearchCommitsParams, SearchIdentitiesParams, SearchQuery, SearchTi
 export type { GetActivityStatsParams, GetHandoffFactsParams } from "./generated/client-message.js";
 export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams } from "./generated/client-message.js";
 export type { ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams, WorkspaceSide } from "./generated/client-message.js";
-export type { ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "./generated/client-message.js";
+export type { ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "./generated/client-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -175,6 +175,8 @@ export interface RepositorySessionApi {
   readFileContent(params: ReadFileContentParams): Promise<RepositorySessionResult<FileContent>>;
   readFileHistory(params: ReadFileHistoryParams): Promise<RepositorySessionResult<FileHistoryPage>>;
   readFileChange(params: ReadFileChangeParams): Promise<RepositorySessionResult<FileDiff>>;
+  /** Files a commit changed under one directory (empty pathHex: the whole repository), one page at a time. */
+  listPathChanges(params: ListPathChangesParams): Promise<RepositorySessionResult<ChangedFilesPage>>;
   cancelFiles(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   /** P4-12: chunks arrive through `onBlameChunk` with the same `streamId`; the result resolves when the file is covered. */
   readBlame(params: ReadBlameParams, streamId: string): Promise<RepositorySessionResult<{ totalLines: number; blocks: number }>>;

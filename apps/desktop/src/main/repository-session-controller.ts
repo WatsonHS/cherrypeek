@@ -28,7 +28,7 @@ import type {
 import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
   ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
-  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ReadBlameParams } from "../../../../packages/protocol/src/generated/client-message.js";
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type {
   HistoryPage,
   HistoryDateLocation,
@@ -163,7 +163,7 @@ export class RepositorySessionController {
    * previous one on the same channel, so a slow answer never lands on a newer selection.
    */
   private readonly channelIntent: Record<ReadChannel, number> = {
-    workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, blame: 0,
+    workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, blame: 0,
   };
   private readonly activeChannel: Partial<Record<ReadChannel, ActiveChannelRequest>> = {};
   private readonly unsubscribeCore: () => void;
@@ -874,6 +874,17 @@ export class RepositorySessionController {
         page.entries.length <= params.pageSize && (page.nextCursor === null || page.entries.length > 0)));
   }
 
+  async listPathChanges(input: unknown): Promise<ChangedFilesPage> {
+    const params = validatePathChangesParams(input);
+    const session = this.requireFilesCapability();
+    const prefix = params.pathHex ? `${params.pathHex}2f` : "";
+    return this.runChannelRequest("pathChanges", session, signal => this.readSingleSection(session, "listPathChanges", params, signal,
+      data => data.section === "changedFiles" ? data.page : undefined,
+      page => page.oid.toLowerCase() === params.oid && page.parentIndex === params.parentIndex && page.offset === params.offset &&
+        page.files.length <= params.pageSize && page.files.every(file =>
+          [file.oldPath, file.newPath].some(path => path !== null && path.rawHex.toLowerCase().startsWith(prefix)))));
+  }
+
   async readFileChange(input: unknown): Promise<FileDiff> {
     const params = validateFileChangeParams(input);
     const session = this.requireFilesCapability();
@@ -922,7 +933,7 @@ export class RepositorySessionController {
   }
 
   async cancelFiles(): Promise<{ cancelled: boolean }> {
-    return this.cancelChannels(["tree", "fileContent", "fileHistory", "fileChange", "blame"], "文件页读取已取消");
+    return this.cancelChannels(["tree", "fileContent", "fileHistory", "fileChange", "pathChanges", "blame"], "文件页读取已取消");
   }
 
   private async cancelChannels(channels: ReadChannel[], reason: string): Promise<{ cancelled: boolean }> {
@@ -2381,7 +2392,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "blame";
+type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "blame";
 
 interface ActiveChannelRequest {
   abort: AbortController;
@@ -2434,6 +2445,18 @@ function validateFileHistoryParams(value: unknown): ReadFileHistoryParams {
     throw new ProtocolClientError("INVALID_REQUEST", "文件历史参数无效");
   }
   return { commit, pathHex: (value.pathHex as string).toLowerCase(), kind: value.kind, message: value.message, cursor: value.cursor as string | null, pageSize: value.pageSize as number };
+}
+
+function validatePathChangesParams(value: unknown): ListPathChangesParams {
+  const oid = isRecord(value) ? oidParam(value.oid) : null;
+  if (!isRecord(value) || !oid || !exactKeys(value, ["offset", "oid", "pageSize", "parentIndex", "pathHex"], []) ||
+    !(value.pathHex === "" || workspacePathHex(value.pathHex)) ||
+    value.parentIndex !== null && (!Number.isInteger(value.parentIndex) || (value.parentIndex as number) < 0 || (value.parentIndex as number) > 127) ||
+    !Number.isInteger(value.offset) || (value.offset as number) < 0 || (value.offset as number) > 0xffff_ffff ||
+    !Number.isInteger(value.pageSize) || (value.pageSize as number) < 1 || (value.pageSize as number) > 200) {
+    throw new ProtocolClientError("INVALID_REQUEST", "目录改动参数无效");
+  }
+  return { oid, parentIndex: value.parentIndex as number | null, pathHex: (value.pathHex as string).toLowerCase(), offset: value.offset as number, pageSize: value.pageSize as number };
 }
 
 function validateFileChangeParams(value: unknown): ReadFileChangeParams {

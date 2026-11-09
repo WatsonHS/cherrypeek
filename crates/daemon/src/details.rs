@@ -595,6 +595,18 @@ pub fn list_changed_files(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> DetailResult<ChangedFilesPage> {
+    list_changed_files_under(executable, session, params, None, cancelled, deadline)
+}
+
+/// The changed-file page, optionally only for files whose old or new path is under `directory_hex`.
+pub(crate) fn list_changed_files_under(
+    executable: &Path,
+    session: &session::RepositorySession,
+    params: &ListChangedFilesParams,
+    directory_hex: Option<&str>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> DetailResult<ChangedFilesPage> {
     validate_oid(&params.oid, session.discovered.oid_length)?;
     let oid = params.oid.to_ascii_lowercase();
     let mut parsed = repository::read_commit_metadata(
@@ -658,6 +670,21 @@ pub fn list_changed_files(
     )?;
     repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
         .map_err(from_preview)?;
+    let diff = match directory_hex.filter(|directory| !directory.is_empty()) {
+        Some(directory) => {
+            // Raw paths are hex of bytes; "/" is 2f, so a file under the directory starts with "<dir>2f".
+            let prefix = format!("{}2f", directory.to_ascii_lowercase());
+            diff.into_iter()
+                .filter(|file| {
+                    [&file.old_path, &file.new_path].iter().any(|path| {
+                        path.as_ref()
+                            .is_some_and(|path| path.raw_hex.starts_with(&prefix))
+                    })
+                })
+                .collect()
+        }
+        None => diff,
+    };
     let total_files = u32::try_from(diff.len()).map_err(|_| {
         detail_error(
             ErrorCode::ResourceLimit,

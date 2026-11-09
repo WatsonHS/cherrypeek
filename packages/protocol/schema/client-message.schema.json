@@ -141,6 +141,53 @@
       ],
       "type": "object"
     },
+    "ListPathChangesParams": {
+      "additionalProperties": false,
+      "description": "Files a commit changed under one directory, against the chosen parent (a root commit compares with the empty tree).",
+      "properties": {
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "maxLength": 64,
+          "minLength": 40,
+          "type": "string"
+        },
+        "pageSize": {
+          "format": "uint16",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "parentIndex": {
+          "anyOf": [
+            {
+              "maximum": 127,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pathHex": {
+          "description": "The directory's raw path bytes as hex; empty means the whole repository.",
+          "maxLength": 32768,
+          "type": "string"
+        }
+      },
+      "required": [
+        "oid",
+        "parentIndex",
+        "pathHex",
+        "offset",
+        "pageSize"
+      ],
+      "type": "object"
+    },
     "ListSearchPathsParams": {
       "additionalProperties": false,
       "properties": {
@@ -797,6 +844,9 @@
         },
         {
           "$ref": "#/definitions/ReadFileChangeParams"
+        },
+        {
+          "$ref": "#/definitions/ListPathChangesParams"
         },
         {
           "$ref": "#/definitions/ReadBlameParams"

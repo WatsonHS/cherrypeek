@@ -2,9 +2,9 @@ use crate::{framing, repository, runtime, session, session_store};
 use commitscope_core::{
     BranchesContainingParams, ClientMessage, ControlMetadataIndexParams, CoreReady, Coverage,
     EmptyParams, ErrorCode, GetActivityStatsParams, GetCommitParams, GetHandoffFactsParams,
-    ListChangedFilesParams, ListSearchPathsParams, ListTreeParams, LocateCommitParams,
-    LocateHistoryDateParams, MetadataIndexAction, OpenRepositoryParams, PROTOCOL_VERSION,
-    ReadBlameParams, ReadDiffParams, ReadFileChangeParams, ReadFileContentParams,
+    ListChangedFilesParams, ListPathChangesParams, ListSearchPathsParams, ListTreeParams,
+    LocateCommitParams, LocateHistoryDateParams, MetadataIndexAction, OpenRepositoryParams,
+    PROTOCOL_VERSION, ReadBlameParams, ReadDiffParams, ReadFileChangeParams, ReadFileContentParams,
     ReadFileHistoryParams, ReadHistoryPageParams, ReadMergeCommitsParams,
     ReadRepositoryPreviewParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
     ReadWorkspaceStatusParams, RefMergeStatusParams, RefreshRepositoryParams, RepositoryScope,
@@ -75,6 +75,7 @@ enum RequestOperation {
     ReadFileContent(ReadFileContentParams),
     ReadFileHistory(ReadFileHistoryParams),
     ReadFileChange(ReadFileChangeParams),
+    ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
     RecordRepositoryView,
     CloseRepository,
@@ -534,6 +535,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ReadFileContent(_)
             | RequestOperation::ReadFileHistory(_)
             | RequestOperation::ReadFileChange(_)
+            | RequestOperation::ListPathChanges(_)
             | RequestOperation::ReadBlame(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
@@ -1343,6 +1345,28 @@ fn dispatch_request(
                     let diff =
                         crate::files::read_file_change(git, session, &params, cancelled, deadline)?;
                     Ok((ResponseData::FileDiff { diff }, 1))
+                },
+            );
+        }
+        RequestOperation::ListPathChanges(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let page = crate::files::list_path_changes(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    // One bounded page in one section, like the other files-page reads.
+                    Ok((ResponseData::ChangedFiles { page }, 1))
                 },
             );
         }
@@ -2221,6 +2245,7 @@ fn validate_request(
         | "readFileContent"
         | "readFileHistory"
         | "readFileChange"
+        | "listPathChanges"
         | "readBlame"
         | "recordRepositoryView"
         | "closeRepository"
@@ -2485,6 +2510,18 @@ fn validate_request(
                             "readFileChange params 无效".into(),
                         )
                     }),
+                "listPathChanges" => {
+                    serde_json::from_value::<ListPathChangesParams>(params.clone())
+                        .ok()
+                        .filter(|params| (1..=200).contains(&params.page_size))
+                        .map(RequestOperation::ListPathChanges)
+                        .ok_or_else(|| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "listPathChanges params 无效".into(),
+                            )
+                        })
+                }
                 "readBlame" => serde_json::from_value::<ReadBlameParams>(params.clone())
                     .map(RequestOperation::ReadBlame)
                     .map_err(|_| (ErrorCode::InvalidRequest, "readBlame params 无效".into())),
@@ -2537,6 +2574,7 @@ fn validate_request(
         | "readFileContent"
         | "readFileHistory"
         | "readFileChange"
+        | "listPathChanges"
         | "readBlame"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),

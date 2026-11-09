@@ -423,6 +423,7 @@ pub enum RequestParams {
     ReadFileContent(ReadFileContentParams),
     ReadFileHistory(ReadFileHistoryParams),
     ReadFileChange(ReadFileChangeParams),
+    ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
 }
 
@@ -1533,6 +1534,24 @@ pub struct ReadFileChangeParams {
     pub old_path_hex: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub full_file: bool,
+}
+
+/// Files a commit changed under one directory, against the chosen parent (a root commit compares with the empty tree).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPathChangesParams {
+    #[schemars(length(min = 40, max = 64))]
+    pub oid: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableParentIndexSchema")]
+    pub parent_index: Option<u8>,
+    /// The directory's raw path bytes as hex; empty means the whole repository.
+    #[schemars(length(max = 32768))]
+    pub path_hex: String,
+    pub offset: u32,
+    #[schemars(range(min = 1, max = 200))]
+    pub page_size: u16,
 }
 
 /// P4-12: blame of a file at a commit, streamed in chunks.

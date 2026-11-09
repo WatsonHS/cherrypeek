@@ -1,5 +1,5 @@
 import * as React from "react";
-import { X } from "lucide-react";
+import { ArrowLeft, X } from "lucide-react";
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { ActivityStats, HandoffFacts, RefSnapshotDiff, RepositoryObservation, RepositorySessionInfo, SearchIdentity } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryScope } from "../../../../packages/protocol/src/generated/server-message.js";
@@ -28,7 +28,7 @@ import { workspaceBadge, workspaceBranchLabel } from "./lib/workspace-indicator.
 import { WorkspaceStore, workspaceIndicatorFor } from "./lib/workspace-store.js";
 import { cn } from "./lib/utils.js";
 import { errorTitle } from "./lib/errors.js";
-import { repositoryName, shortRefName } from "./lib/format.js";
+import { repositoryName, shortOid, shortRefName } from "./lib/format.js";
 import { RepositorySessionStore, settle, type RepositoryView } from "./lib/repository-session-store.js";
 import { applySelectionIfCurrent, SelectionIntent, type SelectionIntentToken } from "./lib/selection-intent.js";
 import { hasSearchCriteria, MetadataSearchStore } from "./lib/metadata-search-store.js";
@@ -172,6 +172,28 @@ function useLaunchRepository(ready: boolean, store: RepositorySessionStore) {
   }, [ready, store]);
 }
 
+const FILES_HISTORY_OPEN_KEY = "commitscope.files.historyOpen";
+
+/** After a jump to another page: where the user came from, and a clear way back to it. */
+function ReturnBanner({ text, backLabel, backTitle, onBack, onDismiss, testId, backTestId }: {
+  text: React.ReactNode;
+  backLabel: string;
+  backTitle: string;
+  onBack(): void;
+  onDismiss(): void;
+  testId: string;
+  backTestId: string;
+}): React.JSX.Element {
+  return <div role="status" data-testid={testId} className="flex shrink-0 items-center gap-2 border-b border-line bg-bg py-1.5 pr-2 pl-4 text-xs text-fg2">
+    <span className="min-w-0 flex-1 truncate">{text}</span>
+    <button type="button" data-testid={backTestId} onClick={onBack} title={backTitle}
+      className="flex h-7 shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
+      <ArrowLeft className="size-3.5" strokeWidth={1.75} />{backLabel}</button>
+    <button type="button" aria-label="关闭提示" onClick={onDismiss}
+      className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><X className="size-3.5" strokeWidth={1.75} /></button>
+  </div>;
+}
+
 export function App(): React.JSX.Element {
   const { status, readError } = useCoreStatus();
   const store = React.useMemo(() => new RepositorySessionStore(window.commitScope), []);
@@ -180,6 +202,10 @@ export function App(): React.JSX.Element {
   const detailStore = React.useMemo(() => new CommitDetailStore(window.commitScope, () => fullFileWanted.current && diffDisplay.getView().scope === "full"), []);
   const workspaceStore = React.useMemo(() => new WorkspaceStore(window.commitScope, () => Date.now(), () => fullFileWanted.current && diffDisplay.getView().scope === "full"), []);
   const filesStore = React.useMemo(() => new FilesStore(window.commitScope, () => diffDisplay.getView().scope === "full"), []);
+  // The history column stays as the user last left it.
+  React.useEffect(() => {
+    try { if (localStorage.getItem(FILES_HISTORY_OPEN_KEY) === "true") filesStore.setHistoryOpen(true); } catch { /* storage unavailable: start closed */ }
+  }, [filesStore]);
   const selectionIntent = React.useMemo(() => new SelectionIntent(), []);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   const searchView = React.useSyncExternalStore(searchStore.subscribe, searchStore.getView);
@@ -194,6 +220,10 @@ export function App(): React.JSX.Element {
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
   const [historyLocation, setHistoryLocation] = React.useState<{ oid: string; sessionKey: string; loading: boolean; cancelled: boolean; error: string | null } | null>(null);
+  /** Set when "查看完整提交" on the files page brought the user here; the commits page offers the way back. */
+  const [fromFiles, setFromFiles] = React.useState<{ name: string } | null>(null);
+  /** Set when "文件历史" on the commits or workspace page opened the files page; it offers the way back. */
+  const [toFiles, setToFiles] = React.useState<{ page: "commits" | "workspace"; label: string; name: string } | null>(null);
   const [activityStats, setActivityStats] = React.useState<{ key: string; value: ActivityStats } | null>(null);
   const [activityError, setActivityError] = React.useState<string | null>(null);
   const [activityLoading, setActivityLoading] = React.useState(false);
@@ -610,6 +640,9 @@ export function App(): React.JSX.Element {
     if (page === "files") filesVisited.current = true;
     if (filesVisited.current) filesStore.setVersion(filesVersion);
   }, [filesStore, page, filesVersion?.commit, filesVersion?.label]);
+  // The store starts each path's history unfiltered; the filter box follows.
+  const filesPathHex = filesView.selection?.path.rawHex;
+  React.useEffect(() => setFilesHistoryQuery(""), [filesPathHex]);
   React.useEffect(() => {
     const timer = setTimeout(() => filesStore.setHistoryMessage(filesHistoryQuery.trim()), 300);
     return () => clearTimeout(timer);
@@ -832,13 +865,16 @@ export function App(): React.JSX.Element {
   React.useEffect(() => {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
-  const openFileHistory = React.useCallback((path: GitPath, oid?: string) => {
+  const openFileHistory = React.useCallback((path: GitPath, oid: string | undefined, from: "commits" | "workspace") => {
+    setToFiles({ page: from, label: from === "workspace" ? "工作区" : oid ? `提交 ${shortOid(oid)}` : "提交页", name: path.display.split("/").at(-1) ?? path.display });
     filesVisited.current = true;
     filesStore.setVersion(filesVersion);
     setPage("files");
     filesStore.select({ path, kind: "file" }, { tab: "history", commit: oid });
   }, [filesStore, filesVersion]);
   const openCommitFromFiles = React.useCallback(async (oid: string) => {
+    const path = filesStore.getView().selection?.path.display ?? "";
+    setFromFiles({ name: path.split("/").at(-1) || "文件页" });
     setPage("commits");
     if (searchStore.getView().active) {
       await locateSelectedInHistory(oid);
@@ -847,10 +883,25 @@ export function App(): React.JSX.Element {
     selectionIntent.invalidate();
     const found = await store.locateCommit(oid);
     if (found) setSelectedOid(oid);
-  }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
+  }, [filesStore, locateSelectedInHistory, searchStore, selectionIntent, store]);
+  // Back on the page a jump came from, by any route, its way back is no longer needed.
+  React.useEffect(() => {
+    if (page === "files") setFromFiles(null);
+    setToFiles(current => current?.page === page ? null : current);
+  }, [page]);
+  React.useEffect(() => { setFromFiles(null); setToFiles(null); }, [workspaceRepo]);
   const filesActions = React.useMemo<FilesActions>(() => ({
     toggleDirectory: pathHex => filesStore.toggleDirectory(pathHex),
     revealDirectory: path => filesStore.revealDirectory(path),
+    closeChange: () => filesStore.closeChange(),
+    togglePathFile: file => filesStore.togglePathFile(file),
+    loadMorePathChanges: () => filesStore.loadMorePathChanges(),
+    retryPathChanges: () => filesStore.retryPathChanges(),
+    openOriginalHistory: () => filesStore.openOriginalHistory(),
+    setHistoryOpen: open => {
+      try { localStorage.setItem(FILES_HISTORY_OPEN_KEY, String(open)); } catch { /* storage unavailable: not remembered */ }
+      filesStore.setHistoryOpen(open);
+    },
     loadMoreEntries: pathHex => filesStore.loadMoreEntries(pathHex),
     retryDirectory: pathHex => filesStore.retryDirectory(pathHex),
     select: selection => filesStore.select(selection),
@@ -896,7 +947,9 @@ export function App(): React.JSX.Element {
         actions.setDetailTab(event.code === "Digit1" ? "overview" : "changes");
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "files") {
         event.preventDefault();
-        actions.filesStore.setTab(event.code === "Digit1" ? "content" : "history");
+        // ⌥1 closes a change open below the file; ⌥2 shows or hides the history column.
+        if (event.code === "Digit1") actions.filesStore.closeChange();
+        else actions.filesStore.setHistoryOpen(!actions.filesStore.getView().historyOpen);
       } else if (event.code === "KeyR" && event.altKey) {
         event.preventDefault();
         void actions.refresh();
@@ -999,6 +1052,9 @@ export function App(): React.JSX.Element {
       {/* Pages stay mounted while hidden so each keeps its own selection, filters and scroll position. */}
       <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "commits" && "invisible absolute inset-0")}
         inert={page !== "commits"} data-testid="commits-page">
+        {fromFiles ? <ReturnBanner testId="from-files-banner" backTestId="back-to-files" backTitle="回到文件页（⌘2）"
+          text={<>从文件页的 <span className="font-medium text-fg">{fromFiles.name}</span> 打开了这个提交；文件页保持原样。</>}
+          backLabel={`回到 ${fromFiles.name}`} onBack={() => changePage("files")} onDismiss={() => setFromFiles(null)} /> : null}
         {historyLocation ? <div role="status" data-testid="history-location-banner" className="flex flex-wrap items-center gap-2 border-b border-line bg-bg px-4 py-2 text-xs text-fg2">
           <span className="min-w-0 flex-1" aria-live="polite">
             {historyLocation.loading ? "正在当前历史快照中定位…" : historyLocation.error ? `定位失败：${historyLocation.error}` : historyLocation.cancelled
@@ -1036,7 +1092,7 @@ export function App(): React.JSX.Element {
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
             selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
-            onOpenFileHistory={filesView.supported ? openFileHistory : undefined}
+            onOpenFileHistory={filesView.supported ? (path, oid) => openFileHistory(path, oid, "commits") : undefined}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}
@@ -1062,14 +1118,18 @@ export function App(): React.JSX.Element {
       {/* The files and workspace pages mount on first visit and then stay, hidden, like the commits page. */}
       {filesAvailable && (page === "files" || filesVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "files" && "invisible absolute inset-0")}
         inert={page !== "files"} data-testid="files-page-slot">
-        <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount} />
+        {toFiles ? <ReturnBanner testId="to-files-banner" backTestId="back-from-files" backTitle={toFiles.page === "workspace" ? "回到工作区（⌘3）" : "回到提交页（⌘1）"}
+          text={<>从{toFiles.label}打开了 <span className="font-medium text-fg">{toFiles.name}</span> 的历史；{toFiles.page === "workspace" ? "工作区" : "提交页"}保持原样。</>}
+          backLabel={`回到${toFiles.label}`} onBack={() => changePage(toFiles.page)} onDismiss={() => setToFiles(null)} /> : null}
+        <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount}
+          historyQuery={filesHistoryQuery} onHistoryQuery={setFilesHistoryQuery} />
       </div> : null}
       {!workspaceUnavailable && (page === "workspace" || workspaceVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "workspace" && "invisible absolute inset-0")}
         inert={page !== "workspace"} data-testid="workspace-page-slot">
         <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
           onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
           onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
-          onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path) : undefined} />
+          onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path, undefined, "workspace") : undefined} />
       </div> : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
@@ -1132,7 +1192,8 @@ function filesSearchBox(files: ReturnType<FilesStore["getView"]>, find: { query:
     return <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
       title={files.supported ? "先选择一个文件或目录" : "文件页尚未接入（占位 · P4-10）"} />;
   }
-  if (files.tab === "content" && selection.kind === "file") {
+  // A file is always shown, so the box finds in it; a directory's box searches its history.
+  if (selection.kind === "file") {
     const truncated = files.content?.value?.truncated ?? false;
     const lines = files.content?.value?.lines ?? 0;
     const position = count ? ((find.current % count) + count) % count + 1 : 0;

@@ -78,7 +78,7 @@ try {
   assert.deepEqual(diagnostics.apiKeys, [
     "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelFiles", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "cancelWorkspace", "chooseRepository",
     "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository", "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation",
-    "getRepositorySession", "listChangedFiles", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onRepositoryObservationChanged",
+    "getRepositorySession", "listChangedFiles", "listPathChanges", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onRepositoryObservationChanged",
     "onWorkspaceChanged", "openRepositorySession", "readBlame", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
     "readWorkspaceStatus", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
   ]);

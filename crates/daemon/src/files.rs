@@ -8,9 +8,9 @@ use std::{
 
 use commitscope_core::{
     ChangedFileStatus, ErrorCode, FileContent, FileContentKind, FileDiff, FileHistoryChange,
-    FileHistoryEntry, FileHistoryPage, ListTreeParams, ReadDiffParams, ReadFileChangeParams,
-    ReadFileContentParams, ReadFileHistoryParams, SearchPathKind, TreeEntry, TreeEntryKind,
-    TreePage,
+    FileHistoryEntry, FileHistoryPage, ListPathChangesParams, ListTreeParams, ReadDiffParams,
+    ReadFileChangeParams, ReadFileContentParams, ReadFileHistoryParams, SearchPathKind, TreeEntry,
+    TreeEntryKind, TreePage,
 };
 
 use crate::{
@@ -902,6 +902,34 @@ pub(crate) fn read_file_history_at(
 }
 
 /// One file's change in one commit: finds the raw path pair the commit changed, then reads it as a commit diff.
+/// Files a commit changed under one directory, as a page of the same shape as the commit's changed files.
+pub fn list_path_changes(
+    executable: &Path,
+    session: &session::RepositorySession,
+    params: &ListPathChangesParams,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> FilesResult<commitscope_core::ChangedFilesPage> {
+    let path_hex = params.path_hex.to_ascii_lowercase();
+    if !path_hex.is_empty() {
+        validate_path_hex(Some(&path_hex))?;
+    }
+    let list = commitscope_core::ListChangedFilesParams {
+        oid: params.oid.clone(),
+        parent_index: params.parent_index,
+        offset: params.offset,
+        page_size: params.page_size,
+    };
+    details::list_changed_files_under(
+        executable,
+        session,
+        &list,
+        Some(&path_hex),
+        cancelled,
+        deadline,
+    )
+}
+
 pub fn read_file_change(
     executable: &Path,
     session: &session::RepositorySession,

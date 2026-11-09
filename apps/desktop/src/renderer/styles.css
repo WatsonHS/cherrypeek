@@ -272,3 +272,15 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .topbar-updates-label { max-width: 64px; }
   .topbar-divider { margin-inline: -2px; }
 }
+
+/*
+ * Files page: a commit's change slides in from the left, out of the history column beside it, and going back
+ * slides the file in from the right, so it is clear the file was moved aside and where it went.
+ */
+@keyframes files-push-in { from { opacity: 0; transform: translateX(-56px); } to { opacity: 1; transform: none; } }
+@keyframes files-back-in { from { opacity: 0; transform: translateX(56px); } to { opacity: 1; transform: none; } }
+.files-push-in { animation: files-push-in 360ms cubic-bezier(.22, .61, .36, 1) both; }
+.files-back-in { animation: files-back-in 360ms cubic-bezier(.22, .61, .36, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .files-push-in, .files-back-in { animation: none; }
+}

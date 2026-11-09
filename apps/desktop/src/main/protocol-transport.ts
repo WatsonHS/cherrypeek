@@ -639,6 +639,12 @@ function validRequestParams(method: string, params: unknown): boolean {
     typeof params.message === "string" && Buffer.byteLength(params.message, "utf8") <= 4096 &&
     (params.cursor === null || typeof params.cursor === "string" && params.cursor.length > 0 && Buffer.byteLength(params.cursor, "utf8") <= 512) &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 200) return true;
+  if (method === "listPathChanges" && isRecord(params) && hasExactKeys(params, ["offset", "oid", "pageSize", "parentIndex", "pathHex"]) &&
+    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
+    (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
+    typeof params.pathHex === "string" && params.pathHex.length <= 32 * 1024 && params.pathHex.length % 2 === 0 && /^[0-9a-fA-F]*$/.test(params.pathHex) &&
+    Number.isInteger(params.offset) && (params.offset as number) >= 0 && (params.offset as number) <= 0xffff_ffff &&
+    Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 200) return true;
   if (method === "readFileChange" && isRecord(params) && hasKeysWithOptional(params, ["oid", "oldPathHex", "parentIndex", "pathHex"], ["fullFile"]) &&
     validOid(params.oid) && validPathHex(params.pathHex) && (params.oldPathHex === null || validPathHex(params.oldPathHex)) &&
     (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
@@ -651,7 +657,7 @@ function validRequestParams(method: string, params: unknown): boolean {
 }
 
 /** P4-10 to P4-12 reads of the files page: session methods that can be cancelled and drained. */
-const FILE_METHODS = ["listTree", "readFileContent", "readFileHistory", "readFileChange", "readBlame"];
+const FILE_METHODS = ["listTree", "readFileContent", "readFileHistory", "readFileChange", "listPathChanges", "readBlame"];
 
 function validOid(value: unknown): boolean {
   return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value);

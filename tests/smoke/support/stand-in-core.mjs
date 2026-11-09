@@ -10,7 +10,7 @@ import readline from "node:readline";
 
 const repo = process.env.COMMITSCOPE_STAND_IN_REPOSITORY;
 const real = spawn(process.env.COMMITSCOPE_STAND_IN_REAL_CORE, process.argv.slice(2), { stdio: ["pipe", "pipe", "inherit"], env: process.env });
-const OURS = new Set(["readWorkspaceStatus", "readWorkspaceDiff", "readWorkspaceFile", "listTree", "readFileContent", "readFileHistory", "readFileChange", "readBlame"]);
+const OURS = new Set(["readWorkspaceStatus", "readWorkspaceDiff", "readWorkspaceFile", "listTree", "readFileContent", "readFileHistory", "readFileChange", "listPathChanges", "readBlame"]);
 const out = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 const git = (args, options = {}) => execFileSync("git", ["-c", "core.fsmonitor=false", "--no-optional-locks", ...args], { cwd: repo, maxBuffer: 64 * 1024 * 1024, encoding: options.buffer ? "buffer" : "utf8" });
 const hex = text => Buffer.from(text, "utf8").toString("hex");
@@ -22,7 +22,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   try { message = JSON.parse(line); } catch { real.stdin.write(`${line}\n`); return; }
   if (message.type === "request" && OURS.has(message.method)) {
     try { handle(message); } catch (error) {
-      out({ type: "error", requestId: message.requestId, repoId: message.repoId, generation: message.generation, code: "GIT_ERROR", message: String(error.message ?? error).slice(0, 500), retryable: false });
+      out({ type: "error", requestId: message.requestId, repoId: message.repoId, generation: message.generation, code: error.code ?? "GIT_ERROR", message: String(error.message ?? error).slice(0, 500), retryable: false });
     }
     return;
   }
@@ -137,6 +137,8 @@ function handle(message) {
       const old = params.oldPathHex ? fromHex(params.oldPathHex) : null;
       const info = summaries([params.oid]).get(params.oid);
       const parent = params.parentIndex === null ? null : info.parents[params.parentIndex];
+      // Like the core: a parent index the commit does not have is an invalid request (a root commit takes null).
+      if (params.parentIndex !== null && !parent) throw Object.assign(new Error("parentIndex is outside the commit parent list"), { code: "INVALID_REQUEST" });
       const range = parent ? [parent, params.oid] : ["4b825dc642cb6eb9a060e54bf8d69288fbee4904", params.oid];
       const paths = old ? [old, file] : [file];
       const patch = git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-M", params.fullFile ? "-U100000" : "-U3", ...range, "--", ...paths]);
@@ -148,6 +150,34 @@ function handle(message) {
           oldOid: null, newOid: null, oldMode: "100644", newMode: "100644", similarity: null,
           additions: binary ? null : Number(numstat[0] || 0), deletions: binary ? null : Number(numstat[1] || 0), binary, gitlink: false },
         kind: binary ? "binary" : "text", patch: binary ? "" : patch.slice(0, params.fullFile ? 1024 * 1024 : 128 * 1024), truncated: false, textLossy: false, oldSize: null, newSize: null } });
+      return;
+    }
+    case "listPathChanges": {
+      const directory = params.pathHex ? fromHex(params.pathHex) : "";
+      const info = summaries([params.oid]).get(params.oid);
+      const parent = params.parentIndex === null ? null : info.parents[params.parentIndex];
+      // Like the core: a parent index the commit does not have is an invalid request (a root commit takes null).
+      if (params.parentIndex !== null && !parent) throw Object.assign(new Error("parentIndex is outside the commit parent list"), { code: "INVALID_REQUEST" });
+      const range = parent ? [parent, params.oid] : ["4b825dc642cb6eb9a060e54bf8d69288fbee4904", params.oid];
+      const scope = directory ? ["--", directory] : [];
+      const statuses = git(["diff", "-M", "--name-status", ...range, ...scope]).trim().split("\n").filter(Boolean).map(line => line.split("\t"));
+      const counts = new Map(git(["diff", "-M", "--numstat", ...range, ...scope]).trim().split("\n").filter(Boolean)
+        .map(line => line.split("\t")).map(([added, deleted, ...paths]) => [paths.at(-1).replace(/^.*\{.*=> (.*)\}.*$/u, "$1"), [added, deleted]]));
+      const files = statuses.map(([letter, first, second]) => {
+        const renamed = letter.startsWith("R");
+        const newPath = renamed ? second : letter.startsWith("D") ? null : first;
+        const [added, deleted] = counts.get(newPath ?? first) ?? ["0", "0"];
+        const binary = added === "-";
+        return { status: statusOf(letter), oldPath: letter.startsWith("A") ? null : gitPath(first), newPath: newPath ? gitPath(newPath) : null,
+          oldOid: null, newOid: null, oldMode: "100644", newMode: "100644", similarity: renamed ? Number(letter.slice(1)) : null,
+          additions: binary ? null : Number(added), deletions: binary ? null : Number(deleted), binary, gitlink: false };
+      });
+      const page = files.slice(params.offset, params.offset + params.pageSize);
+      const total = (key) => files.reduce((sum, file) => sum + (file[key] ?? 0), 0);
+      respond(message, { section: "changedFiles", page: { oid: params.oid, parentIndex: params.parentIndex, parentOid: parent, offset: params.offset, pageSize: params.pageSize,
+        totalFiles: files.length, hasMore: params.offset + params.pageSize < files.length, files: page,
+        overview: { totalFiles: files.length, counts: { added: 0, modified: 0, deleted: 0, renamed: 0, copied: 0, typeChanged: 0 }, additions: total("additions"), deletions: total("deletions"),
+          binaryFiles: files.filter(file => file.binary).length, gitlinkFiles: 0, directories: [] } } });
       return;
     }
     case "readBlame": {

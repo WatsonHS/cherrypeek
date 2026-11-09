@@ -1,7 +1,7 @@
 import * as React from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, Clock, Copy, FileText, Folder, FolderOpen, Layers, Link2, LoaderCircle, Pin, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Clock, Copy, FileText, Folder, FolderOpen, Layers, Link2, LoaderCircle, Search, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import type { BlameBlock, CommitIdentity, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { BlameBlock, ChangedFile, CommitIdentity, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { momentLabel, parseGitTime, shortOid } from "../lib/format.js";
 import { blameHeat, blameLineIndex, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
 import { cn } from "../lib/utils.js";
@@ -18,6 +18,16 @@ export interface FilesActions {
   toggleDirectory(pathHex: string): void;
   /** Expands a directory and its parents in the tree; the right side stays as it is. */
   revealDirectory(path: GitPath): void;
+  /** Shows or hides the history column, and remembers the choice. */
+  setHistoryOpen(open: boolean): void;
+  /** Closes the change below the file; returns the blame line it came from, if any. */
+  closeChange(): number | null;
+  /** In a directory's change list: open or close one file's diff, load more files, retry. */
+  togglePathFile(file: ChangedFile): void;
+  loadMorePathChanges(): void;
+  retryPathChanges(): void;
+  /** For a blame line from before a whole-file rename: the old path's history at that commit. */
+  openOriginalHistory(): void;
   loadMoreEntries(pathHex: string): void;
   retryDirectory(pathHex: string): void;
   select(selection: FilesSelection): void;
@@ -117,14 +127,33 @@ function crumbs(path: GitPath): { name: string; pathHex: string }[] {
 }
 
 /** The files page: tree on the left, the selected file's content or history on the right (P4-10 to P4-12). */
-export function FilesPage({ view, actions, versionOptions, find, onFindCount }: {
+export function FilesPage({ view, actions, versionOptions, find, onFindCount, historyQuery, onHistoryQuery }: {
   view: FilesView;
   actions: FilesActions;
   versionOptions: VersionOption[];
   find: { query: string; current: number };
   onFindCount(count: number): void;
+  /** The history column's commit-message filter. */
+  historyQuery: string;
+  onHistoryQuery(query: string): void;
 }): React.JSX.Element {
   const [scrollTarget, setScrollTarget] = React.useState<number | null>(null);
+  // Both columns can be dragged wider or narrower; the widths are remembered.
+  const tree = useColumnWidth("commitscope.files.treeWidth", 290, 180, 520);
+  const historyColumn = useColumnWidth("commitscope.files.historyWidth", 300, 220, 560);
+  // Coming back from a change slides the file in; a blame line it came from flashes once.
+  const [backAnimating, setBackAnimating] = React.useState(false);
+  const [flashLine, setFlashLine] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    if (flashLine === null) return;
+    const timer = setTimeout(() => setFlashLine(null), 1600);
+    return () => clearTimeout(timer);
+  }, [flashLine]);
+  const back = React.useCallback(() => {
+    const line = actions.closeChange();
+    setBackAnimating(true);
+    if (line !== null) { setScrollTarget(line); setFlashLine(line); }
+  }, [actions]);
   if (!view.supported) {
     return <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-panel p-8" data-testid="files-page">
       <PlaceholderBox task="P4-10" title="文件页" className="max-w-[520px]"
@@ -133,6 +162,7 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
   }
   const selection = view.selection;
   const historyCount = view.history?.state === "ready" ? `${view.history.entries.length}${view.history.nextCursor ? "+" : ""}` : null;
+  const changeOpen = selection?.kind === "file" && view.tab === "history" && view.selectedCommit !== null;
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="files-page">
     <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-line pr-4 pl-2.5">
       <VersionBlock version={view.version} options={versionOptions} onChoose={actions.setVersion} />
@@ -164,33 +194,37 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount }: 
       {selection ? <button type="button" aria-label="复制路径" title="复制路径" onClick={() => { void window.commitScope.copyText(selection.path.display); }}
         className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><Copy className="size-[13px]" strokeWidth={1.75} /></button> : null}
       <div className="flex-1" />
-      {selection?.kind === "file" && view.tab === "content" ? <button type="button" aria-pressed={view.blameEnabled} data-testid="blame-toggle"
+      {selection?.kind === "file" ? <button type="button" aria-pressed={view.blameEnabled} data-testid="blame-toggle"
         disabled={!view.blameSupported} onClick={() => actions.setBlame(!view.blameEnabled)}
         title={view.blameSupported ? "逐行追溯：显示每一行最后由哪个提交修改（git blame，⌥B）" : "逐行追溯需要核心支持（占位 · P4-12）"}
         className="flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] px-[9px] text-[12.5px] whitespace-nowrap text-fg3 hover:bg-hover hover:text-fg disabled:opacity-50 aria-pressed:bg-accent-soft aria-pressed:font-medium aria-pressed:text-accent-fg">
         <svg viewBox="0 0 16 16" aria-hidden="true" className="size-3.5" style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" }}><path d="M2.5 3v10M5 4.5h8.5M5 8h6M5 11.5h7.5" /></svg>
         逐行追溯{view.blameSupported ? null : <span className="text-[11px]">· 占位</span>}
       </button> : null}
-      {selection?.kind === "file" && view.tab === "history" && view.focus ? <button type="button" onClick={() => setScrollTarget(actions.returnToLine())} data-testid="return-to-line"
-        title="回到内容页里你点的那一行"
-        className="flex h-7 shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
-        <ArrowLeft className="size-3.5" strokeWidth={1.75} />回到第 {view.focus.line} 行</button> : null}
-      {selection ? <nav aria-label="文件页" className="flex shrink-0 gap-0.5 rounded-[9px] bg-sunken p-[3px]">
-        {selection.kind === "file" ? <button type="button" aria-current={view.tab === "content" ? "page" : undefined} onClick={() => actions.setTab("content")} data-testid="files-tab-content"
-          className="flex h-[26px] items-center rounded-[7px] px-3 text-[13px] text-fg2 aria-[current=page]:bg-panel aria-[current=page]:font-semibold aria-[current=page]:text-fg aria-[current=page]:shadow-[0_0_0_1px_var(--line2)]">内容</button> : null}
-        <button type="button" aria-current={view.tab === "history" ? "page" : undefined} onClick={() => actions.setTab("history")} data-testid="files-tab-history"
-          className="flex h-[26px] items-center gap-1.5 rounded-[7px] px-3 text-[13px] text-fg2 aria-[current=page]:bg-panel aria-[current=page]:font-semibold aria-[current=page]:text-fg aria-[current=page]:shadow-[0_0_0_1px_var(--line2)]">
-          历史{historyCount ? <span className="text-[11.5px] font-normal text-fg3">{historyCount}</span> : null}
-        </button>
-      </nav> : null}
+      {selection ? <button type="button" aria-pressed={view.historyOpen} data-testid="history-toggle" title="显示或隐藏这个路径的历史（⌥⌘2）"
+        onClick={() => actions.setHistoryOpen(!view.historyOpen)}
+        className="flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] px-[9px] text-[12.5px] whitespace-nowrap text-fg3 hover:bg-hover hover:text-fg aria-pressed:bg-accent-soft aria-pressed:font-medium aria-pressed:text-accent-fg">
+        <Clock className="size-3.5" strokeWidth={1.75} />历史{historyCount ? <span className="text-[11.5px] font-normal opacity-70">{historyCount}</span> : null}
+      </button> : null}
     </div>
     <div className="flex min-h-0 flex-1 overflow-hidden">
-      <TreeColumn view={view} actions={actions} />
-      <main aria-label={selection ? `${selection.path.display}` : "文件"} className="flex min-h-0 min-w-0 flex-[999_1_560px] flex-col overflow-hidden bg-panel">
-        {!selection ? <p className="m-auto text-[13px] text-fg3">在左侧选择文件查看内容，选择目录查看它的改动历史。</p>
-          : view.tab === "content" && selection.kind === "file"
-            ? <ContentPane view={view} actions={actions} find={find} onFindCount={onFindCount} scrollTarget={scrollTarget} onScrolled={() => setScrollTarget(null)} />
-            : <HistoryPane view={view} actions={actions} />}
+      <TreeColumn view={view} actions={actions} width={tree.width} />
+      <ColumnResizer label="调整目录树宽度" column={tree} />
+      {selection && view.historyOpen ? <>
+        <HistoryColumn view={view} actions={actions} width={historyColumn.width} query={historyQuery} onQuery={onHistoryQuery} />
+        <ColumnResizer label="调整历史列宽度" column={historyColumn} />
+      </> : null}
+      <main aria-label={selection ? `${selection.path.display}` : "文件"} className="relative flex min-h-0 min-w-0 flex-[999_1_480px] flex-col overflow-hidden bg-panel">
+        {!selection ? <p className="m-auto text-[13px] text-fg3">在左侧选择文件查看内容；点目录旁的历史按钮查看它的改动历史。</p>
+          : selection.kind === "directory" ? <CommitPane view={view} actions={actions} />
+            : <>
+              {/* The file stays mounted under a change, so going back returns to the same scroll position. */}
+              <div className={cn("flex min-h-0 flex-1 flex-col", changeOpen ? "invisible absolute inset-0" : backAnimating && "files-back-in")}
+                inert={changeOpen} onAnimationEnd={() => setBackAnimating(false)} data-testid="file-view">
+                <ContentPane view={view} actions={actions} find={find} onFindCount={onFindCount} scrollTarget={scrollTarget} flashLine={flashLine} onScrolled={() => setScrollTarget(null)} />
+              </div>
+              {changeOpen ? <div className="files-push-in flex min-h-0 flex-1 flex-col"><ChangePanel view={view} actions={actions} onBack={back} /></div> : null}
+            </>}
       </main>
     </div>
   </div>;
@@ -233,8 +267,57 @@ function VersionBlock({ version, options, onChoose }: { version: TreeVersion | n
   </Popover>;
 }
 
-function TreeColumn({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
-  return <nav aria-label="目录树" data-testid="file-tree" className="flex min-h-0 min-w-[270px] flex-[0_1_290px] flex-col overflow-auto border-r border-line px-1.5 pt-1.5 pb-6">
+type ColumnWidth = { width: number; fallback: number; min: number; max: number; set(width: number): void };
+
+/** A column width the user can drag, kept per viewer in localStorage. */
+function useColumnWidth(key: string, fallback: number, min: number, max: number): ColumnWidth {
+  const clamp = React.useCallback((value: number) => Math.round(Math.min(max, Math.max(min, value))), [min, max]);
+  const [width, setWidth] = React.useState(() => {
+    try {
+      const stored = Number(localStorage.getItem(key));
+      return stored ? clamp(stored) : fallback;
+    } catch { return fallback; }
+  });
+  const set = React.useCallback((value: number) => {
+    const next = clamp(value);
+    setWidth(next);
+    try { localStorage.setItem(key, String(next)); } catch { /* storage unavailable: not remembered */ }
+  }, [clamp, key]);
+  return { width, fallback, min, max, set };
+}
+
+/** The draggable edge on a column's right: drag, ← / → by 16px, or double-click to reset. */
+function ColumnResizer({ label, column }: { label: string; column: ColumnWidth }): React.JSX.Element {
+  const drag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = column.width;
+    handle.setPointerCapture(event.pointerId);
+    document.body.style.cursor = "col-resize";
+    const move = (moveEvent: PointerEvent) => column.set(startWidth + moveEvent.clientX - startX);
+    const stop = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      document.body.style.cursor = "";
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  };
+  return <div role="separator" aria-orientation="vertical" aria-label={label} aria-valuenow={column.width} aria-valuemin={column.min} aria-valuemax={column.max}
+    tabIndex={0} title="拖动调整宽度，双击恢复默认" data-testid="column-resizer"
+    onPointerDown={drag} onDoubleClick={() => column.set(column.fallback)}
+    onKeyDown={event => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); column.set(column.width + (event.key === "ArrowLeft" ? -16 : 16)); }
+    }}
+    className="group relative z-10 w-px shrink-0 cursor-col-resize touch-none bg-line outline-none before:absolute before:inset-y-0 before:-left-[3px] before:w-[7px] before:content-[''] hover:bg-accent focus-visible:bg-accent" />;
+}
+
+function TreeColumn({ view, actions, width }: { view: FilesView; actions: FilesActions; width: number }): React.JSX.Element {
+  return <nav aria-label="目录树" data-testid="file-tree" className="flex min-h-0 min-w-[160px] flex-col overflow-auto px-1.5 pt-1.5 pb-6" style={{ flex: `0 1 ${width}px` }}>
     {view.version ? <Directory pathHex="" depth={0} view={view} actions={actions} /> : <p className="m-0 px-2.5 py-3 text-xs text-fg3">先选择目录树版本。</p>}
   </nav>;
 }
@@ -299,12 +382,14 @@ function findSegments(text: string, needle: string): { text: string; match: bool
   return segments;
 }
 
-function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolled }: {
+function ContentPane({ view, actions, find, onFindCount, scrollTarget, flashLine = null, onScrolled }: {
   view: FilesView;
   actions: FilesActions;
   find: { query: string; current: number };
   onFindCount(count: number): void;
   scrollTarget: number | null;
+  /** A line that flashes once, e.g. the blame line just come back from. */
+  flashLine?: number | null;
   onScrolled(): void;
 }): React.JSX.Element {
   const display = useDiffDisplay();
@@ -338,6 +423,7 @@ function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolle
   const gutterWidths = React.useMemo(() => blame ? blameWidths(blame.commits) : null, [blame]);
   const historyByOid = React.useMemo(() => new Map((view.history?.entries ?? []).map(entry => [entry.commit.oid, entry])), [view.history]);
 
+
   if (!content || content.state === "loading" && !content.value) {
     return <p role="status" className="m-0 flex items-center gap-1.5 p-6 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取文件…</p>;
   }
@@ -365,7 +451,10 @@ function ContentPane({ view, actions, find, onFindCount, scrollTarget, onScrolle
         const number = index + 1;
         const block = lineBlocks?.[number];
         const segments = findSegments(line, needle);
-        return <div key={index} data-line={number} className={cn("flex", display.wrap ? "min-w-0" : "whitespace-pre")}>
+        // After coming back from a blame line's change, that line flashes so it is clear where the file was.
+        const marked = flashLine === number;
+        return <div key={index} data-line={number} data-marked={marked ? "true" : undefined} className={cn("flex", display.wrap ? "min-w-0" : "whitespace-pre")}
+          style={marked ? { boxShadow: "inset 3px 0 0 var(--accent), inset 0 0 0 100vmax color-mix(in srgb, var(--accent) 13%, transparent)" } : undefined}>
           {lineBlocks ? <BlameGutter block={block} number={number} commit={block ? blame!.commits[block.oid] : undefined} level={block ? heat[block.oid] ?? 0 : null} widths={gutterWidths!}
             history={block ? historyByOid.get(block.oid) : undefined} actions={actions} /> : null}
           <span className="w-14 shrink-0 pr-4 text-right text-fg3 select-none">{number}</span>
@@ -450,44 +539,140 @@ function BlameGutter({ block, number, commit, level, widths, history, actions }:
 
 const STATUS_LABEL = { added: "新增", modified: "修改", deleted: "删除", renamed: "重命名", copied: "复制", typeChanged: "类型" } as const;
 
-function HistoryPane({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
+/** The history column: commits that changed the path; picking one opens its change below the file. */
+function HistoryColumn({ view, actions, width, query, onQuery }: { view: FilesView; actions: FilesActions; width: number; query: string; onQuery(query: string): void }): React.JSX.Element {
+  const selection = view.selection!;
+  const focus = view.focus;
+  // A blame line from before a whole-file rename: its commit is in the old path's history, not this one's.
+  const renamedFrom = focus?.originalPath && focus.oid === view.selectedCommit && focus.originalPath.rawHex !== selection.path.rawHex ? focus.originalPath : null;
+  return <aside aria-label={`${selection.path.display} 的历史`} data-testid="history-column" className="flex min-h-0 min-w-[200px] flex-col bg-bg" style={{ flex: `0 1 ${width}px` }}>
+    <div className="shrink-0 px-2 pt-2">
+      <label className="flex h-8 items-center gap-1.5 rounded-lg bg-sunken px-2.5 text-fg3">
+        <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+        <input data-testid="history-filter" aria-label="按提交消息筛选这个路径的历史" placeholder="筛选提交消息" value={query} onChange={event => onQuery(event.currentTarget.value)}
+          className="min-w-0 flex-1 bg-transparent text-[13px] text-fg outline-none placeholder:text-fg3" />
+        {query ? <button type="button" aria-label="清空筛选" onClick={() => onQuery("")} className="flex size-5 items-center justify-center rounded text-fg3 hover:bg-hover"><X className="size-3.5" /></button> : null}
+      </label>
+      {renamedFrom ? <button type="button" data-testid="renamed-history" onClick={actions.openOriginalHistory}
+        className="mt-2 flex w-full items-center gap-1.5 rounded-[10px] border border-line bg-panel px-3 py-2 text-left text-xs text-fg2 hover:bg-hover">
+        <span className="min-w-0 flex-1">这一行来自改名前的 <span className="font-mono text-fg">{renamedFrom.display.split("/").at(-1)}</span>；这次提交在它的历史里</span>
+        <ChevronRight className="size-3.5 shrink-0 text-fg3" strokeWidth={1.75} />
+      </button> : null}
+    </div>
+    <HistoryList view={view} actions={actions} />
+  </aside>;
+}
+
+/**
+ * A picked commit's change to the file, pushed in over the file. The way back to the file is the first thing in
+ * its header ("← app.ts", or "← app.ts 第 N 行" after a blame click); Esc and ⌥1 go back too.
+ */
+function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: FilesActions; onBack(): void }): React.JSX.Element {
+  const entries = view.history?.entries ?? [];
+  const entry = entries.find(item => item.commit.oid === view.selectedCommit) ?? null;
+  const blameCommit = !entry && view.focus && view.blame ? view.blame.commits[view.focus.oid] : undefined;
+  const oid = view.selectedCommit!;
+  const summary = entry?.commit.summary ?? blameCommit?.summary ?? shortOid(oid);
+  const meta = entry ? `${entry.commit.author.name} · ${when(entry.commit.author)}` : blameCommit ? `${blameCommit.authorName} · ${momentLabel(blameCommit.authorTime * 1000)}` : "";
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.key === "Escape" && !target?.closest?.("input, textarea, [role='dialog'], [role='menu']")) onBack();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onBack]);
+  const fileName = (view.focus?.from ?? view.selection)?.path.display.split("/").at(-1) ?? "文件";
+  const backLabel = view.focus ? `${fileName} 第 ${view.focus.line} 行` : fileName;
+  return <section aria-label="这次提交对文件的修改" data-testid="change-panel" className="flex min-h-0 flex-1 flex-col bg-panel">
+    <div className="flex min-h-11 shrink-0 items-center gap-2.5 border-b border-line pr-3 pl-2.5">
+      <button type="button" onClick={onBack} data-testid="back-to-file" title="回到文件（Esc 或 ⌥⌘1）"
+        className="flex h-7 max-w-[260px] shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
+        <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{backLabel}</span></button>
+      <span aria-hidden="true" className="h-5 w-px shrink-0 bg-line" />
+      {/* When narrow, the author / date and then the title are cut; the OID and "查看完整提交" stay whole. */}
+      <span className="min-w-[60px] shrink truncate text-[13.5px] font-semibold" title={summary}>{summary}</span>
+      {meta ? <span className="min-w-0 shrink-[4] truncate text-xs text-fg3" title={meta}>{meta}</span> : null}
+      <div className="min-w-0 flex-1" />
+      <Button variant="outline" size="sm" className="shrink-0 font-mono" onClick={() => { void window.commitScope.copyText(oid); }} title="复制完整 OID">{shortOid(oid)}</Button>
+      <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit">查看完整提交<ChevronRight className="size-3" strokeWidth={1.75} /></Button>
+    </div>
+    <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-3 pb-6">
+      {view.focus?.originalPath && view.focus.oid === oid ? <p className="m-0 mb-2 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是它在那个路径下的修改。</p> : null}
+      <ChangeBox view={view} actions={actions} entry={entry} />
+    </div>
+  </section>;
+}
+
+/** The right side while a commit is picked in the history column: that commit's change to the path. */
+function CommitPane({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
   const display = useDiffDisplay();
-  const [pinned, setPinned] = React.useState(false);
-  const [floatingOpen, setFloatingOpen] = React.useState(false);
-  const floating = display.layout === "split" && !pinned;
-  React.useEffect(() => { if (!floating) setFloatingOpen(false); }, [floating]);
   const history = view.history;
   const entries = history?.entries ?? [];
   const selected = entries.find(entry => entry.commit.oid === view.selectedCommit) ?? null;
-  const list = <HistoryList view={view} actions={actions} onPick={() => setFloatingOpen(false)} />;
-  return <div className="relative flex min-h-0 flex-1 overflow-hidden">
-    {!floating ? <div className="flex min-h-0 w-[340px] shrink-0 flex-col border-r border-line bg-bg">{list}</div> : null}
-    {floating && floatingOpen ? <div role="dialog" aria-label="文件历史" data-testid="history-float"
-      className="absolute top-[66px] left-5 z-10 flex max-h-[calc(100%-88px)] w-[380px] flex-col rounded-xl border border-line2 bg-panel shadow-pop">
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-line pr-1.5 pl-3.5 text-[13px] font-semibold">
-        <span className="flex-1">文件历史</span>
-        <button type="button" aria-label="固定为侧栏" title="固定为侧栏（左右并排时会挤窄 diff）" onClick={() => setPinned(true)}
-          className="flex size-7 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><Pin className="size-3.5" strokeWidth={1.75} /></button>
-        <button type="button" aria-label="关闭" onClick={() => setFloatingOpen(false)}
-          className="flex size-7 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><X className="size-3.5" strokeWidth={1.75} /></button>
-      </div>
-      {list}
-    </div> : null}
-    <div className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
-      <div className="mx-auto flex max-w-[960px] flex-col gap-3.5 px-8 pt-5 pb-12">
-        {view.focus?.originalPath ? <p className="m-0 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是那个路径的历史。</p> : null}
-        {!selected && view.selectedCommit && history?.state === "ready" ? <p className="m-0 text-xs text-fg3">所选提交 {shortOid(view.selectedCommit)} 不在已加载的历史里。</p> : null}
-        {selected ? <CommitHeader entry={selected} onOpenCommit={() => actions.openCommit(selected.commit.oid)} /> : null}
-        {view.selection?.kind === "directory" && selected ? <p className="m-0 rounded-xl border border-line bg-bg px-4 py-3 text-[13px] text-fg2">
-          这个提交改动了这个目录下 {selected.change.files} 个文件<Counts additions={selected.change.additions} deletions={selected.change.deletions} />。目录没有单独的 diff，打开完整提交查看各个文件。</p> : null}
-        {view.selection?.kind === "file" && view.selectedCommit ? <ChangeBox view={view} actions={actions} entry={selected}
-          floatingButton={floating ? <button type="button" aria-expanded={floatingOpen} aria-haspopup="dialog" onClick={() => setFloatingOpen(open => !open)} data-testid="history-float-toggle"
-            className="flex h-[30px] items-center gap-1.5 rounded-lg border border-line2 bg-panel px-2.5 text-[13px] font-medium aria-expanded:border-transparent aria-expanded:bg-accent-soft aria-expanded:text-accent-fg">
-            <Clock className="size-3.5" strokeWidth={1.75} />历史 {entries.length}{history?.nextCursor ? "+" : ""}<ChevronDown className="size-3" strokeWidth={1.75} />
-          </button> : null} /> : null}
-        {!view.selectedCommit && history?.state === "ready" && entries.length === 0 ? <p className="m-0 text-[13px] text-fg3">{view.historyMessage ? `没有提交消息包含“${view.historyMessage}”的修改。` : "这个版本的可达历史里没有修改过这个路径的提交。"}</p> : null}
-      </div>
+  return <div className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain" data-testid="commit-pane">
+    <div className={cn("mx-auto flex flex-col gap-3.5 px-8 pt-5 pb-12", display.layout === "split" ? "max-w-none" : "max-w-[960px]")}>
+      {view.focus?.originalPath ? <p className="m-0 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，左边是那个路径的历史。</p> : null}
+      {!selected && view.selectedCommit && history?.state === "ready" ? <p className="m-0 text-xs text-fg3">所选提交 {shortOid(view.selectedCommit)} 不在已加载的历史里。</p> : null}
+      {selected ? <CommitHeader entry={selected} onOpenCommit={() => actions.openCommit(selected.commit.oid)} /> : null}
+      {view.selection?.kind === "directory" && view.selectedCommit ? <PathChangeList view={view} actions={actions} /> : null}
+      {view.selection?.kind === "file" && view.selectedCommit ? <ChangeBox view={view} actions={actions} entry={selected} /> : null}
+      {!view.selectedCommit && history?.state === "ready" && entries.length === 0 ? <p className="m-0 text-[13px] text-fg3">{view.historyMessage ? `没有提交消息包含“${view.historyMessage}”的修改。` : "这个版本的可达历史里没有修改过这个路径的提交。"}</p> : null}
     </div>
+  </div>;
+}
+
+/** A directory's changed files in the picked commit; each row opens its own diff in place. */
+function PathChangeList({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
+  const changes = view.pathChanges;
+  const directory = view.selection!.path.display;
+  const relative = (path: GitPath | null) => path ? (directory && path.display.startsWith(`${directory}/`) ? path.display.slice(directory.length + 1) : path.display) : "";
+  if (!changes || changes.state === "loading" && changes.files.length === 0) {
+    return <p role="status" className="m-0 flex items-center gap-1.5 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取这个目录下的改动…</p>;
+  }
+  if (changes.state === "error") {
+    return <div role="alert" className="flex items-center gap-2 text-xs text-bad"><span>{changes.error?.message}</span><Button variant="outline" size="sm" onClick={actions.retryPathChanges}>重试</Button></div>;
+  }
+  return <div className="flex flex-col gap-2" data-testid="path-changes">
+    <span className="text-[13px] text-fg2">这个提交改动了 <span className="font-medium text-fg">{directory || "仓库"}</span> 下 {changes.totalFiles} 个文件<Counts additions={changes.additions} deletions={changes.deletions} /></span>
+    <ul className="m-0 flex list-none flex-col overflow-hidden rounded-xl border border-line bg-bg p-0">
+      {changes.files.map(file => {
+        const path = (file.newPath ?? file.oldPath)!;
+        const open = view.pathOpen === path.rawHex;
+        const name = relative(file.newPath ?? file.oldPath);
+        const slash = name.lastIndexOf("/");
+        return <li key={`${file.oldPath?.rawHex ?? ""}:${file.newPath?.rawHex ?? ""}`} className="border-b border-line last:border-b-0">
+          <button type="button" data-testid="path-change-row" aria-expanded={open} onClick={() => actions.togglePathFile(file)}
+            className="flex min-h-10 w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-hover">
+            {open ? <ChevronDown className="size-3.5 shrink-0 text-fg3" /> : <ChevronRight className="size-3.5 shrink-0 text-fg3" />}
+            <span className="shrink-0 rounded-[5px] bg-sunken px-1.5 text-[11px] leading-5 font-semibold text-fg2">{STATUS_LABEL[file.status]}</span>
+            <span className="min-w-0 flex-1 truncate text-[13px]">
+              <span className="font-medium">{slash >= 0 ? name.slice(slash + 1) : name}</span>
+              {slash >= 0 ? <span className="ml-1.5 text-xs text-fg3">{name.slice(0, slash)}</span> : null}
+              {file.status === "renamed" && file.oldPath ? <span className="ml-1.5 text-xs text-fg3">← {relative(file.oldPath)}</span> : null}
+            </span>
+            <Counts additions={file.additions} deletions={file.deletions} />
+          </button>
+          {open ? <PathFileDiff view={view} /> : null}
+        </li>;
+      })}
+    </ul>
+    {changes.hasMore ? <Button variant="outline" size="sm" className="self-start" disabled={changes.loadingMore} onClick={actions.loadMorePathChanges}>
+      {changes.loadingMore ? "读取中…" : `再显示 ${Math.min(200, changes.totalFiles - changes.files.length)} 个文件（共 ${changes.totalFiles} 个）`}</Button> : null}
+  </div>;
+}
+
+function PathFileDiff({ view }: { view: FilesView }): React.JSX.Element {
+  const change = view.pathChange;
+  if (!change || change.state === "loading") return <p role="status" className="m-0 flex items-center gap-1.5 border-t border-line px-4 py-2.5 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取这次修改…</p>;
+  if (change.state === "error") return <p role="alert" className="m-0 border-t border-line px-4 py-2.5 text-xs text-bad">{change.error?.message}</p>;
+  const value = change.value!;
+  const note = { binary: "二进制文件不展示文本 diff。", gitlink: "这是子模块引用，只显示对象变化。", lfs: "这是 Git LFS 指针；未下载 LFS 内容。", tooLarge: "文件超过读取上限，未生成 diff。", text: "" }[value.kind];
+  return <div className="border-t border-line" data-testid="path-change-diff">
+    {note ? <p className="m-0 px-4 py-2.5 text-xs text-fg3">{note}</p> : null}
+    {value.kind === "text" && value.patch === "" ? <p className="m-0 px-4 py-2.5 text-xs text-fg3">内容相同，只有路径或模式变化。</p> : null}
+    {value.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，只显示读取上限内的部分。</p> : null}
+    {value.kind === "text" && value.patch ? <DiffView patch={value.patch} fullAvailable={false} path={(value.file.newPath ?? value.file.oldPath)?.display ?? null} /> : null}
   </div>;
 }
 
@@ -496,17 +681,35 @@ function Counts({ additions, deletions }: { additions: number | null; deletions:
   return <span className="ml-1.5 font-mono text-[11.5px] whitespace-nowrap tabular-nums"><span className="text-add">+{additions}</span> <span className="text-del">−{deletions}</span></span>;
 }
 
-function HistoryList({ view, actions, onPick }: { view: FilesView; actions: FilesActions; onPick(): void }): React.JSX.Element {
+function HistoryList({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
   const history = view.history;
   const entries = history?.entries ?? [];
   const last = entries.at(-1);
-  return <div className="min-h-0 flex-1 overflow-auto px-2 pt-2 pb-4" data-testid="file-history">
+  const listRef = React.useRef<HTMLDivElement>(null);
+  // A commit picked from elsewhere (a blame line, another page) is scrolled into view in the list.
+  React.useEffect(() => {
+    listRef.current?.querySelector("[data-testid='file-history-row'][aria-pressed='true']")?.scrollIntoView({ block: "nearest" });
+  }, [view.selectedCommit, entries.length]);
+  // With a row focused, ↑ / ↓ step to the previous / next commit and show its change, as in JetBrains' history list.
+  const step = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const rows = [...(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-testid='file-history-row']") ?? [])];
+    const focused = rows.findIndex(row => row === document.activeElement);
+    const from = focused >= 0 ? focused : rows.findIndex(row => row.getAttribute("aria-pressed") === "true");
+    const next = from < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, from + (event.key === "ArrowDown" ? 1 : -1)));
+    const oid = entries[next]?.commit.oid;
+    event.preventDefault();
+    if (!oid || next === from && rows[next]?.getAttribute("aria-pressed") === "true") return;
+    actions.selectCommit(oid);
+    rows[next]?.focus();
+  };
+  return <div ref={listRef} className="min-h-0 flex-1 overflow-auto px-2 pt-2 pb-4" data-testid="file-history" onKeyDown={step}>
     {history?.state === "loading" ? <p role="status" className="m-0 flex items-center gap-1.5 px-2.5 py-3 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取历史…</p> : null}
     {history?.state === "error" ? <div role="alert" className="flex items-center gap-2 px-2.5 py-3 text-xs text-bad"><span>{history.error?.message}</span><Button variant="outline" size="sm" onClick={actions.retryHistory}>重试</Button></div> : null}
     {entries.map(entry => {
-      const selected = entry.commit.oid === view.selectedCommit;
+      const selected = entry.commit.oid === view.selectedCommit && (view.tab === "history" || view.selection?.kind === "directory");
       return <button key={entry.commit.oid} type="button" data-testid="file-history-row" aria-pressed={selected}
-        onClick={() => { actions.selectCommit(entry.commit.oid); onPick(); }}
+        onClick={() => actions.selectCommit(entry.commit.oid)}
         className={cn("flex h-[58px] w-full flex-col justify-center gap-1 rounded-[10px] px-3 text-left hover:bg-hover", selected && "bg-panel shadow-selected hover:bg-panel")}>
         <span className="flex w-full min-w-0 items-center gap-2">
           <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{entry.commit.summary}</span>
@@ -538,12 +741,11 @@ function CommitHeader({ entry, onOpenCommit }: { entry: FileHistoryEntry; onOpen
   </div>;
 }
 
-function ChangeBox({ view, actions, entry, floatingButton }: { view: FilesView; actions: FilesActions; entry: FileHistoryEntry | null; floatingButton: React.ReactNode }): React.JSX.Element {
+function ChangeBox({ view, actions, entry }: { view: FilesView; actions: FilesActions; entry: FileHistoryEntry | null }): React.JSX.Element {
   const change = view.change;
   const parents = entry?.commit.parents ?? [];
   const diff = change?.value;
   const leading = <>
-    {floatingButton}
     {diff ? <span className="mr-1 rounded-[5px] bg-warn-bg px-1.5 text-[11px] leading-5 font-semibold text-warn">{STATUS_LABEL[diff.file.status]}</span> : null}
     {diff ? <Counts additions={diff.file.additions} deletions={diff.file.deletions} /> : null}
     {parents.length > 1 ? <span role="radiogroup" aria-label="对比的父提交" className="ml-2 flex rounded-[9px] bg-sunken p-[3px]">

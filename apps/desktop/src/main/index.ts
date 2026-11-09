@@ -68,6 +68,7 @@ const IPC_FILES_TREE = "commitscope:files:tree";
 const IPC_FILES_CONTENT = "commitscope:files:content";
 const IPC_FILES_HISTORY = "commitscope:files:history";
 const IPC_FILES_CHANGE = "commitscope:files:change";
+const IPC_FILES_PATH_CHANGES = "commitscope:files:path-changes";
 const IPC_FILES_BLAME = "commitscope:files:blame";
 const IPC_FILES_BLAME_CHUNK = "commitscope:files:blame-chunk";
 const IPC_FILES_CANCEL = "commitscope:files:cancel";
@@ -330,6 +331,10 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_FILES_CHANGE, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.readFileChange(params));
+  });
+  ipcMain.handle(IPC_FILES_PATH_CHANGES, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.listPathChanges(params));
   });
   ipcMain.handle(IPC_FILES_BLAME, (event, params: unknown, streamId: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

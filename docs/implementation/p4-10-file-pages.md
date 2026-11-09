@@ -11,9 +11,10 @@
 | 方法 | 参数 | 响应 section | 用途 |
 | --- | --- | --- | --- |
 | `listTree` | `{ commit, pathHex \| null, offset, limit: 1..500 }` | `treePage` | 一个目录的直接子项 |
-| `readFileContent` | `{ commit, pathHex, maxLines: 1..5000 }` | `fileContent` | 「内容」标签页 |
-| `readFileHistory` | `{ commit, pathHex, kind, message, cursor, pageSize: 1..200 }` | `fileHistory` | 「历史」标签页 |
+| `readFileContent` | `{ commit, pathHex, maxLines: 1..5000 }` | `fileContent` | 文件内容 |
+| `readFileHistory` | `{ commit, pathHex, kind, message, cursor, pageSize: 1..200 }` | `fileHistory` | 历史列 |
 | `readFileChange` | `{ oid, parentIndex, pathHex, oldPathHex, fullFile? }` | `fileDiff` | 历史里一次修改的 diff |
+| `listPathChanges` | `{ oid, parentIndex, pathHex, offset, pageSize: 1..200 }` | `changedFiles` | 目录的一次提交改了它下面哪些文件（2026-11-09 新增） |
 
 每个方法只返回一个终态块，`coverage.complete = true`、`processed = 1`、`nextCursor = null`（历史的翻页游标在 `FileHistoryPage.nextCursor` 里）。
 
@@ -50,12 +51,14 @@ type FileHistoryChange = {
 - `readFileContent`：超过 `maxLines` 或约 400 KiB（按 JSON 编码后的字节计，控制字符等转义字符按转义后长度算）时截断并设 `truncated`；daemon 拒绝超过 512 KiB 的响应，所以没有用满 schema 的 1 MiB。8 MiB 以内的 blob 整个读取，`totalLines` 精确；更大的只读开头，`totalLines` 为 null；`totalLines` 尽量给出（流式数换行即可），给不出时为 null。前 8 KiB 含 NUL 判为 `binary`；≤ 1 KiB 且符合 LFS 指针格式判为 `lfs`；gitlink 为 `submodule`；mode 120000 为 `symlink`，`symlinkTarget` 是链接内容，不跟随。路径在该提交里不存在时返回 `kind: "missing"`，不报错（删除的文件可以从旧版本打开）。
 - `readFileHistory`：从 `commit` 出发、按字面路径（`git log <commit> -- <path>`，不加 `--follow`）列出修改过它的提交；`kind = "directory"` 时包括目录下任何文件的修改，`pathHex` 为空字符串表示整个仓库。`message` 非空时只保留提交消息包含它的提交（字面、不区分大小写，与元数据搜索一致）。第一页 `cursor = null`；游标只对相同的 commit / path / kind / message 有效，否则返回 `INVALID_CURSOR`。merge 提交的 `change` 相对第一父提交计算。实现：`git log --raw --numstat --no-renames`，列出的提交与 `git log <commit> -- <path>` 相同；`git log` 不为 merge 输出 diff，本页的 merge 再用一次 `git diff-tree --stdin`（每行“merge 第一父提交”）相对第一父提交计算（2026-11-09 验收时修正：此前加了 `--diff-merges=first-parent`，它也会改变列出哪些 merge，多出相对第一父提交没有改动该路径的 merge）。游标为 `v1:<偏移>:<查询指纹>`；消息过滤用 Git 的 `--fixed-strings --regexp-ignore-case`，在 `LC_ALL=C` 下只对 ASCII 字母忽略大小写，与元数据搜索的 Unicode 大小写折叠略有差别。文件在某次提交里表现为“新增”时，再对该提交做一次 50% 相似度的改名检测，命中则给出 `oldPath`。条目 JSON 累计到约 400 KiB 时提前结束本页并给出游标。
 - `readFileChange`：在 `oid` 与指定父提交（`parentIndex` 为 null 表示根提交与空树比较）之间只比较这一个路径；`oldPathHex` 给出时按改名处理。与 `readDiff` 共用 patch 上限：2000 行 / 128 KiB；`fullFile` 见 [P4-11](p4-11-diff-display.md)。
+- `listPathChanges`：与提交详情的 `listChangedFiles` 同一套比较（含改名检测）和同样的 `ChangedFilesPage` 结构，只保留旧路径或新路径在 `pathHex` 目录下的文件，`overview` 也只统计这些文件；`pathHex` 为空字符串表示整个仓库。根提交必须传 `parentIndex = null`，否则 `INVALID_REQUEST`。与 `listChangedFiles` 不同，它不要求先读提交详情，在 main 里走文件页自己的请求通道，不会取消提交页的读取。
 - 都是只读查询：参数数组、`--literal-pathspecs` 加 `--`、禁用外部 diff 与 textconv、不套用 clean / smudge 过滤器（读的是提交里的对象）。可取消，迟到结果不覆盖新请求，沿用 15 秒截止。
 - 已在 `CoreReady.capabilities` 里加入 `fileBrowsing`。
 
 ## main / preload / renderer（已实现）
 
-- main 对目录、内容、历史、修改各用一个请求通道，新请求取代同通道的旧请求；打开、刷新、切换范围时取消。核心同时最多处理两个请求，renderer 的文件页 store 遇到 `BUSY` 会短暂重试。
+- main 对目录、内容、历史、修改、目录改动各用一个请求通道，新请求取代同通道的旧请求；打开、刷新、切换范围时取消。核心同时最多处理两个请求，renderer 的文件页 store 遇到 `BUSY` 会短暂重试。
 - 目录树版本默认是浏览范围的最新提交（全部分支时用 HEAD），可以从版本选择器换成任一分支或标签，不会 checkout。只有打开过文件页才开始读取。
-- 入口：提交详情的文件行和工作区页的“文件历史”打开对应路径的历史；文件页的“查看完整提交”回到提交页并定位。
+- 入口：提交详情的文件行和工作区页的“文件历史”打开对应路径的历史；文件页的“查看完整提交”回到提交页并定位。跳转后目标页面顶部有返回横幅（见 DESIGN 第 11 节“跨页面返回横幅”）。
+- 布局（2026-11-09 按试用反馈修订）：目录树 | 历史列（可开关、可调宽，状态按查看者记住）| 右侧。右侧默认是文件内容；在历史列里选中提交（或逐行追溯单击）时，这次修改的视图从左侧滑入盖住文件，左上角“← 文件名”、Esc、⌥⌘1 让文件滑回原位置。选中目录时右侧是这次提交在目录下改动的文件列表，每个文件可就地展开 diff。历史列顶部按提交消息筛选，列表获得焦点时 ↑ / ↓ 逐条切换。
 - 「内容」里的 ⌘F 只在已加载的行里查找；文件被截断时计数和空结果都注明“前 N 行”。

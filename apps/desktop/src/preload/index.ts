@@ -61,6 +61,7 @@ const api: CommitScopeApi = {
   readFileContent: params => ipcRenderer.invoke("commitscope:files:content", params),
   readFileHistory: params => ipcRenderer.invoke("commitscope:files:history", params),
   readFileChange: params => ipcRenderer.invoke("commitscope:files:change", params),
+  listPathChanges: params => ipcRenderer.invoke("commitscope:files:path-changes", params),
   readBlame: (params, streamId) => ipcRenderer.invoke("commitscope:files:blame", params, streamId),
   cancelFiles: () => ipcRenderer.invoke("commitscope:files:cancel"),
   onBlameChunk(listener) {

@@ -45,6 +45,7 @@ export type RequestParams =
   | ReadFileContentParams
   | ReadFileHistoryParams
   | ReadFileChangeParams
+  | ListPathChangesParams
   | ReadBlameParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
@@ -253,6 +254,19 @@ export interface ReadFileChangeParams {
    */
   oldPathHex: string | null;
   parentIndex: number | null;
+  pathHex: string;
+}
+/**
+ * Files a commit changed under one directory, against the chosen parent (a root commit compares with the empty tree).
+ */
+export interface ListPathChangesParams {
+  offset: number;
+  oid: string;
+  pageSize: number;
+  parentIndex: number | null;
+  /**
+   * The directory's raw path bytes as hex; empty means the whole repository.
+   */
   pathHex: string;
 }
 /**

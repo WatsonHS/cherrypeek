@@ -14,6 +14,11 @@ const identity = { name: "W", email: "w@example.com", timestamp: 1, offsetMinute
 const summary = (id, parents = [oid("0")]) => ({ oid: id, parents, summary: `commit ${id.slice(0, 4)}`, summaryTruncated: false, author: identity, committer: identity, textLossy: false });
 const historyEntry = (id, extra = {}) => ({ commit: summary(id, extra.parents), change: { status: "modified", oldPath: null, additions: 1, deletions: 1, binary: false, files: 1, ...extra.change } });
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const changedFile = text => ({ status: "modified", oldPath: path(text), newPath: path(text), oldOid: null, newOid: null, oldMode: "100644", newMode: "100644",
+  similarity: null, additions: 1, deletions: 1, binary: false, gitlink: false });
+const pathPage = (commit, files) => ({ oid: commit, parentIndex: 0, parentOid: oid("0"), offset: 0, pageSize: 200, totalFiles: files.length, hasMore: false, files,
+  overview: { totalFiles: files.length, counts: { added: 0, modified: files.length, deleted: 0, renamed: 0, copied: 0, typeChanged: 0 }, additions: files.length, deletions: files.length,
+    binaryFiles: 0, gitlinkFiles: 0, directories: [] } });
 
 function fakeApi() {
   const pending = [];
@@ -25,6 +30,7 @@ function fakeApi() {
     readFileContent: call("content"),
     readFileHistory: call("history"),
     readFileChange: call("change"),
+    listPathChanges: call("pathChanges"),
     readBlame: (params, streamId) => new Promise(resolve => pending.push({ kind: "blame", params, streamId, resolve })),
     onBlameChunk(listener) { blameListener = listener; return () => { blameListener = null; }; },
     cancelFiles: async () => ok({ cancelled: true }),
@@ -123,6 +129,16 @@ test("directories open on history; a file's history selects its newest change an
   const dir = await api.answer("history", ok({ commit: version.commit, path: path("src"), entries: [historyEntry(oid("c"))], nextCursor: null }));
   assert.equal(dir.params.kind, "directory");
   assert.equal(api.pending.filter(item => item.kind === "change").length, 0, "directories have no single-file diff");
+  // The directory's newest commit lists the files it changed under the directory; each opens its own diff.
+  const changes = await api.answer("pathChanges", ok(pathPage(oid("c"), [changedFile("src/x.ts"), changedFile("src/deep/y.ts")])));
+  assert.deepEqual(changes.params, { oid: oid("c"), parentIndex: 0, pathHex: hex("src"), offset: 0, pageSize: 200 });
+  assert.deepEqual(store.getView().pathChanges.files.map(file => file.newPath.display), ["src/x.ts", "src/deep/y.ts"]);
+  store.togglePathFile(store.getView().pathChanges.files[1]);
+  const fileDiff = await api.answer("change", ok({ oid: oid("c") }));
+  assert.deepEqual(fileDiff.params, { oid: oid("c"), parentIndex: 0, pathHex: hex("src/deep/y.ts"), oldPathHex: null });
+  assert.deepEqual([store.getView().pathOpen, store.getView().pathChange.state], [hex("src/deep/y.ts"), "ready"]);
+  store.togglePathFile(store.getView().pathChanges.files[1]);
+  assert.deepEqual([store.getView().pathOpen, store.getView().pathChange], [null, null], "opening it again closes it");
 
   store.select({ path: path("src/a.ts"), kind: "file" }, { tab: "history" });
   await api.answer("tree", ok({ commit: version.commit, path: path("src"), entries: [], offset: 0, total: 0, hasMore: false }));
@@ -184,19 +200,49 @@ test("blame accumulates chunks of the current stream only; a line from before a 
   assert.equal(store.getView().blame.blocks.length, 2);
 
   store.locateFromBlame(2);
-  const view = store.getView();
-  assert.equal(view.tab, "history");
-  assert.equal(view.selection.path.display, "src/old.ts");
+  let view = store.getView();
+  assert.deepEqual([view.tab, view.historyOpen, view.selection.path.display], ["history", true, "src/new.ts"], "the file stays selected and the history column opens");
   assert.deepEqual([view.focus.line, view.focus.originalLine, view.selectedCommit], [2, 11, oid("1")]);
-  const history = await api.answer("history", ok({ commit: version.commit, path: path("src/old.ts"), entries: [historyEntry(oid("1"), { parents: [] })], nextCursor: null }));
-  assert.equal(history.params.pathHex, hex("src/old.ts"));
-  await flush();
-  const change = api.pending.find(item => item.kind === "change");
-  assert.equal(change.params.pathHex, hex("src/old.ts"));
-  assert.equal(change.params.parentIndex, null, "a root commit found through blame compares with the empty tree");
-  assert.equal(store.returnToLine(), 2);
-  assert.equal(store.getView().selection.path.display, "src/new.ts");
-  assert.equal(store.getView().tab, "content");
+  const first = await api.answer("change", fail("INVALID_REQUEST", "Root commits require parentIndex=null"));
+  assert.deepEqual([first.params.pathHex, first.params.parentIndex], [hex("src/old.ts"), 0], "a line from before the rename reads its change under the old path");
+  const retried = await api.answer("change", ok({ oid: oid("1") }));
+  assert.equal(retried.params.parentIndex, null, "with the parents unknown, a root commit is read again against the empty tree");
+  assert.equal(store.getView().change.state, "ready");
+  const history = await api.answer("history", ok({ commit: version.commit, path: path("src/new.ts"), entries: [historyEntry(oid("2"))], nextCursor: null }));
+  assert.equal(history.params.pathHex, hex("src/new.ts"), "the column lists this file's own history");
+
+  store.openOriginalHistory();
+  view = store.getView();
+  assert.deepEqual([view.selection.path.display, view.selectedCommit, view.tab, view.focus.line], ["src/old.ts", oid("1"), "history", 2]);
+  assert.equal(api.pending.filter(item => item.kind === "change").length, 0, "the change already shown is not read again");
+  assert.equal(store.closeChange(), 2);
+  view = store.getView();
+  assert.deepEqual([view.selection.path.display, view.tab, view.focus], ["src/new.ts", "content", null], "going back returns to the file the blame was shown for");
+  store.dispose();
+});
+
+test("the history column sits beside the file: picking a commit opens its change, and closing it shows the file again", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  store.select({ path: path("a.ts"), kind: "file" });
+  await api.answer("content", ok(textContent("a.ts", "x\n")));
+  store.setHistoryOpen(true);
+  await api.answer("history", ok({ commit: version.commit, path: path("a.ts"), entries: [historyEntry(oid("c")), historyEntry(oid("d"))], nextCursor: null }));
+  let view = store.getView();
+  assert.deepEqual([view.tab, view.selectedCommit, view.change], ["content", null, null], "opening the column picks nothing; the file stays");
+  assert.ok(!api.pending.some(item => item.kind === "change"));
+  store.selectCommit(oid("d"));
+  assert.equal(store.getView().tab, "history");
+  const change = await api.answer("change", ok({ oid: oid("d") }));
+  assert.equal(change.params.oid, oid("d"));
+  assert.equal(store.closeChange(), null);
+  view = store.getView();
+  assert.deepEqual([view.tab, view.historyOpen, view.content.state], ["content", true, "ready"], "the file is shown again, with the column still open");
+  store.setHistoryOpen(false);
+  assert.equal(store.getView().historyOpen, false);
   store.dispose();
 });
 
@@ -288,7 +334,8 @@ test("switching the tree version drops content, history and directory answers fo
   await api.answer("history", ok({ commit: version.commit, path: path("src/a.ts"), entries: [historyEntry(oid("c"))], nextCursor: null }), old);
   let view = store.getView();
   assert.equal(view.version, next);
-  assert.equal(view.content, null);
+  assert.ok(view.content.key.startsWith(`${next.commit}:`), "the file is read again at the new version");
+  assert.equal(view.content.state, "loading");
   assert.ok(view.history.key.startsWith(`${next.commit}:`));
   assert.deepEqual([view.history.state, view.history.entries], ["loading", []]);
   assert.deepEqual([view.selectedCommit, view.change], [null, null]);

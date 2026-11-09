@@ -128,7 +128,7 @@ try {
 
     // Clicking a folder only browses: the tree changes, the open file stays on the right.
     const showsAppContent = async label => {
-      assert.equal(await page.getByTestId("files-tab-content").getAttribute("aria-current"), "page", `${label}: still on the content tab`);
+      assert.equal(await page.getByTestId("change-panel").count(), 0, `${label}: no change covers the file`);
       assert.match(await page.locator("nav[aria-label='路径'] [aria-current='page']").textContent() ?? "", /^app\.ts$/u, `${label}: still on app.ts`);
       assert.equal(await page.locator("[data-testid='file-content'] [data-line]").count(), 30, `${label}: the content is still shown`);
     };
@@ -142,10 +142,15 @@ try {
     await tree("app.ts").waitFor();
     assert.equal(await tree("src").getAttribute("aria-expanded"), "true", "the path's folder is shown in the tree");
     await showsAppContent("clicking a folder in the path");
-    // Directory history is its own explicit action.
+    // Directory history is its own explicit action; a picked commit lists the files it changed there, each with its diff.
     await page.locator("[data-testid='tree-row'][data-path-hex='" + Buffer.from("src").toString("hex") + "'] + [data-testid='directory-history']").click();
-    assert.equal(await page.getByTestId("files-tab-history").getAttribute("aria-current"), "page", "the history button opens the folder's history");
+    await page.getByTestId("history-column").waitFor();
     assert.match(await page.locator("nav[aria-label='路径'] [aria-current='page']").textContent() ?? "", /^src$/u);
+    await page.getByTestId("path-change-row").first().waitFor({ timeout: 15_000 });
+    assert.match(await page.getByTestId("path-changes").textContent() ?? "", /src 下 1 个文件/u, "the newest commit under src changed app.ts only");
+    await page.getByTestId("path-change-row").first().click();
+    await page.getByTestId("path-change-diff").waitFor({ timeout: 15_000 });
+    await page.getByTestId("history-toggle").click();
     await tree("app.ts").click();
     await page.locator("[data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
 
@@ -172,79 +177,99 @@ try {
       await page.mouse.move(5, 5);
       await page.getByTestId("blame-card").waitFor({ state: "detached", timeout: 5_000 });
       await page.screenshot({ path: join(screenshotDir, "pages-blame.png") });
-      // Line 1 comes from before the rename: its history is the old path's.
+      // A blame click opens that commit's change over the file, with the history column, and says where the way back is.
       await page.locator("[data-line='1'] [data-testid='blame-cell']").click();
-      await page.getByTestId("return-to-line").waitFor({ timeout: 15_000 });
-      assert.match(await page.locator("nav[aria-label='路径']").textContent() ?? "", /old-name\.ts/u);
+      const back = page.getByTestId("back-to-file");
+      await back.waitFor({ timeout: 15_000 });
+      assert.equal((await back.textContent())?.trim(), "app.ts 第 1 行");
+      await page.getByTestId("history-column").waitFor();
       await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
       await page.locator("[data-marked='true']").first().waitFor({ timeout: 15_000 });
       // The clicked line is only highlighted; its explanation is a tooltip, not text in the code.
       assert.equal(await page.locator("[data-marked='true']").first().getAttribute("title"), "你在内容页点的第 1 行");
       assert.doesNotMatch(await page.getByTestId("diff-lines").textContent() ?? "", /你点的|你在内容页/u);
-      // The way back sits in the fixed subtitle row, so scrolling the diff to the line cannot hide it.
-      const back = page.getByTestId("return-to-line");
-      assert.equal(await back.evaluate(element => element.closest(".overflow-auto") === null), true, "the return button is outside the scrolling area");
-      assert.ok(await back.isVisible());
+      assert.equal(await back.evaluate(element => element.closest(".overflow-auto") === null), true, "the way back is in the header, outside the scrolling diff");
+      // Line 1 comes from before the rename: the column offers the old path's history, where that commit is.
+      await page.getByTestId("renamed-history").click();
+      await page.waitForFunction(() => document.querySelector("nav[aria-label='路径']")?.textContent?.includes("old-name.ts"), null, { timeout: 15_000 });
+      await page.waitForFunction(() => document.querySelector("[data-testid='file-history-row'][aria-pressed='true']") !== null, null, { timeout: 15_000 });
       await page.screenshot({ path: join(screenshotDir, "pages-blame-located.png") });
-      await page.getByTestId("return-to-line").click();
-      await page.getByTestId("file-content").waitFor();
-      assert.match(await page.locator("nav[aria-label='路径']").textContent() ?? "", /app\.ts/u);
+      await back.click();
+      await page.getByTestId("change-panel").waitFor({ state: "detached" });
+      assert.match(await page.locator("nav[aria-label='路径'] [aria-current='page']").textContent() ?? "", /^app\.ts$/u, "back returns to the file the blame was on");
+      await page.locator("[data-testid='file-content'] [data-line='1'][data-marked='true']").waitFor({ timeout: 5_000 });
     }
 
-    await page.getByTestId("files-tab-history").click();
+    // The history column: the literal path's history; ↑ / ↓ step through it, showing each change over the file.
+    if (!await page.getByTestId("history-column").isVisible().catch(() => false)) await page.getByTestId("history-toggle").click();
     await page.getByTestId("file-history-row").first().waitFor({ timeout: 15_000 });
     assert.equal(await page.getByTestId("file-history-row").count(), 2, "literal path history: the rename and the later change");
-    // A narrower window still shows the history search's whole placeholder next to its scope.
+    await page.getByTestId("file-history-row").first().click();
+    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+    await page.keyboard.press("ArrowDown");
+    await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-history-row']")[1]?.getAttribute("aria-pressed") === "true", null, { timeout: 5_000 });
+    assert.match(await page.getByTestId("change-panel").textContent() ?? "", /refactor: rename the module/u, "↓ shows the next commit's change");
+    await page.keyboard.press("ArrowUp");
+    await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-history-row']")[0]?.getAttribute("aria-pressed") === "true", null, { timeout: 5_000 });
+    // A narrower window keeps the change header's commit buttons whole.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1200, 900));
     await page.waitForFunction(() => window.innerWidth === 1200);
     await delay(150);
-    assert.equal((await page.getByTestId("search-scope").first().textContent())?.trim(), "文件历史");
-    const placeholderFits = await page.getByLabel("按提交消息搜索这个路径的历史").evaluate(input => {
-      const context = document.createElement("canvas").getContext("2d");
-      const style = getComputedStyle(input);
-      context.font = `${style.fontSize} ${style.fontFamily}`;
-      return { needed: Math.ceil(context.measureText(input.placeholder).width), available: input.clientWidth };
+    const header = await page.getByTestId("open-full-commit").evaluate(button => {
+      const panel = button.closest("[data-testid='change-panel']").getBoundingClientRect();
+      const box = button.getBoundingClientRect();
+      return { inside: box.right <= panel.right + 0.5, whole: button.scrollWidth <= button.clientWidth + 1 };
     });
-    assert.ok(placeholderFits.needed <= placeholderFits.available, `the placeholder fits at 1200px (${JSON.stringify(placeholderFits)})`);
+    assert.deepEqual(header, { inside: true, whole: true }, "查看完整提交 is not cut at 1200px");
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1440, 900));
     await page.waitForFunction(() => window.innerWidth === 1440);
-    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+    // Side by side, the history column stays a column (no floating list).
     await page.keyboard.press("Alt+d");
-    await page.getByTestId("history-float-toggle").waitFor();
+    await page.locator("[data-testid='diff-view'][data-layout='split']").waitFor({ timeout: 5_000 });
+    assert.ok(await page.getByTestId("history-column").isVisible());
     await page.screenshot({ path: join(screenshotDir, "pages-history-split.png") });
     await page.keyboard.press("Alt+d");
+    await page.keyboard.press("Escape");
+    await page.getByTestId("change-panel").waitFor({ state: "detached" });
 
-    // Entry from the commit details.
+    // Entry from the commit details, with the way back to that commit.
     await page.keyboard.press("Meta+1");
     await page.keyboard.press("Alt+Meta+2");
     await page.getByTestId("open-file-history").first().click();
     assert.equal(await current(), "page-files");
+    await page.getByTestId("to-files-banner").waitFor();
+    assert.match(await page.getByTestId("back-from-files").textContent() ?? "", /回到提交 [0-9a-f]{7,}/u);
     await page.getByTestId("file-history-row").first().waitFor({ timeout: 15_000 });
+    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
 
-    // Round trip: file history → 查看完整提交 → back. The history filter and the chosen entry survive.
-    await page.getByLabel("按提交消息搜索这个路径的历史").fill("adjust");
+    // Round trip: 查看完整提交 → back. The history filter, the chosen entry and the open change survive.
+    await page.getByTestId("history-filter").fill("adjust");
     await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-history-row']").length === 1, null, { timeout: 15_000 });
     await page.getByTestId("file-history-row").first().click();
     await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
     await page.getByTestId("open-full-commit").click();
     assert.equal(await current(), "page-commits");
     await page.waitForFunction(() => document.querySelector("[role='option'][aria-selected='true']")?.textContent?.includes("adjust two values"), null, { timeout: 15_000 });
-    await page.keyboard.press("Meta+2");
-    assert.equal(await page.getByLabel("按提交消息搜索这个路径的历史").inputValue(), "adjust", "the history filter is kept");
+    await page.getByTestId("from-files-banner").waitFor();
+    await page.getByTestId("back-to-files").click();
+    assert.equal(await current(), "page-files");
+    assert.equal(await page.getByTestId("from-files-banner").count(), 0, "the way back is gone once back");
+    assert.equal(await page.getByTestId("history-filter").inputValue(), "adjust", "the history filter is kept");
     assert.equal(await page.getByTestId("file-history-row").count(), 1);
     assert.equal(await page.getByTestId("file-history-row").first().getAttribute("aria-pressed"), "true", "the chosen history entry is kept");
-    await page.getByLabel("按提交消息搜索这个路径的历史").fill("");
+    assert.ok(await page.getByTestId("change-panel").isVisible(), "the open change is kept");
+    await page.getByTestId("history-filter").fill("");
+    await page.getByTestId("back-to-file").click();
 
     // Switching pages keeps the files page's file and scroll position.
     await tree("long.ts").click();
-    await page.getByTestId("files-tab-content").click();
     await page.locator("[data-testid='file-content'] [data-line='400']").waitFor({ timeout: 15_000 });
-    const fileScroll = await page.getByTestId("file-content").evaluate(element => { element.scrollTop = 1500; return element.scrollTop; });
+    const fileScroll = await page.locator("[data-testid='file-view'] [data-testid='file-content']").evaluate(element => { element.scrollTop = 1500; return element.scrollTop; });
     assert.ok(fileScroll > 1000, "the long file scrolls");
     await page.keyboard.press("Meta+1");
     await page.keyboard.press("Meta+2");
     assert.equal(await tree("long.ts").getAttribute("aria-current"), "true");
-    assert.equal(await page.getByTestId("file-content").evaluate(element => element.scrollTop), fileScroll, "the files page keeps its scroll position");
+    assert.equal(await page.locator("[data-testid='file-view'] [data-testid='file-content']").evaluate(element => element.scrollTop), fileScroll, "the files page keeps its scroll position");
 
     // Markup in a file is shown as text, before and after syntax highlighting, and never runs.
     await tree("docs").click();
@@ -271,7 +296,7 @@ try {
     if (!standIn && has("diffFullContext")) {
       // "完整文件" on a file over its limit shows the changes, with a note saying why.
       await tree("huge.ts").click();
-      await page.getByTestId("files-tab-history").click();
+      if (!await page.getByTestId("history-column").isVisible().catch(() => false)) await page.getByTestId("history-toggle").click();
       await page.getByTestId("file-history-row").first().click();
       await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
       assert.equal(await page.getByTestId("diff-full-limited").count(), 0, "no note in the changes-only mode");
@@ -281,6 +306,7 @@ try {
       await page.screenshot({ path: join(screenshotDir, "pages-full-file-limited.png") });
       await page.keyboard.press("Alt+f");
       await page.getByTestId("diff-full-limited").waitFor({ state: "detached", timeout: 15_000 });
+      await page.getByTestId("back-to-file").click();
     }
   }
 
