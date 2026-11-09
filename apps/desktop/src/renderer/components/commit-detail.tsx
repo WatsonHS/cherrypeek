@@ -394,11 +394,32 @@ function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge }
   </Section>;
 }
 
+const CONTAINING_SHOWN = 8;
+
+/** Main lines first, then other local branches, then remote ones, so folding never hides main or origin/main. */
+function containingRank(ref: BranchesContainingResult["branches"][number]): number {
+  const name = shortRefName(ref.name);
+  const mainLine = /^(main|master)$/u.test(name.replace(/^[^/]+\//u, "")) || /\/HEAD$/u.test(name);
+  if (ref.kind === "localBranch") return /^(main|master)$/u.test(name) ? 0 : 1;
+  if (ref.kind === "remoteBranch") return mainLine ? 2 : 3;
+  return 4;
+}
+
+/** Branches containing the commit: local ones first, folded after the first few so a busy remote does not fill the page. */
 function ContainingBranches({ result }: { result: BranchesContainingResult }): React.JSX.Element {
+  const [expanded, setExpanded] = React.useState(false);
+  React.useEffect(() => setExpanded(false), [result]);
+  const branches = React.useMemo(() => [...result.branches].sort((a, b) => containingRank(a) - containingRank(b)), [result.branches]);
+  const hidden = branches.length - CONTAINING_SHOWN;
+  const shown = expanded || hidden <= 0 ? branches : branches.slice(0, CONTAINING_SHOWN);
   return <div data-testid="branches-containing-result" className="flex min-w-0 flex-wrap items-baseline gap-1.5 text-xs text-fg2">
-    {result.branches.length ? result.branches.map(ref => <Badge key={`${ref.kind}:${ref.name}`} title={ref.name}
+    {branches.length ? shown.map(ref => <Badge key={`${ref.kind}:${ref.name}`} title={ref.name}
       className="h-auto min-h-[22px] max-w-full whitespace-normal break-all py-1 leading-tight">{shortRefName(ref.name)}</Badge>)
       : <span>{result.complete ? "没有已确认包含它的分支" : "当前没有已确认的分支；结果不完整"}</span>}
+    {hidden > 0 ? <button type="button" data-testid="branches-containing-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}
+      className="inline-flex h-[22px] items-center gap-1 rounded-full px-2 text-xs font-medium text-accent-fg hover:bg-accent-soft">
+      {expanded ? <>收起<ChevronUp className="size-3" strokeWidth={1.75} /></> : <>还有 {hidden} 个分支<ChevronDown className="size-3" strokeWidth={1.75} /></>}
+    </button> : null}
     {!result.complete || result.refsTruncated || result.boundaryLimited ? <span className="text-fg3">结果不完整{result.boundaryLimited ? " · 浅边界限制" : ""}{result.refsTruncated ? " · 引用列表已截断" : ""}</span> : null}
     <span className="text-fg3">引用快照 {new Date(result.observedAtUnixMs).toLocaleString()}</span>
   </div>;
