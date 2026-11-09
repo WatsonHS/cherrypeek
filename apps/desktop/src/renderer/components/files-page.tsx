@@ -6,6 +6,7 @@ import { momentLabel, parseGitTime, shortOid } from "../lib/format.js";
 import { blameHeat, blameLineIndex, type ChangeView, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
 import { cn } from "../lib/utils.js";
 import { DiffView, useDiffDisplay } from "./diff-view.js";
+import { CommitsIcon } from "./page-switch.js";
 import { FoldedText } from "./fold.js";
 import { SyntaxLine } from "./syntax-text.js";
 import { languageForPath } from "../lib/syntax/languages.js";
@@ -211,6 +212,10 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
       {selection ? <button type="button" aria-label="复制路径" title="复制路径" onClick={() => { void window.commitScope.copyText(selection.path.display); }}
         className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><Copy className="size-[13px]" strokeWidth={1.75} /></button> : null}
       <div className="flex-1" />
+      {/* What the blame shades mean, beside the switch that turned them on. */}
+      {selection?.kind === "file" && view.blameEnabled ? <span className="flex shrink-0 items-center gap-1 text-[11px] text-fg3 @max-4xl:hidden" data-testid="blame-legend" title="逐行追溯的底色：越新的修改颜色越深">
+        旧{HEAT.map(percent => <span key={percent} aria-hidden="true" className="size-[9px] rounded-[2px]" style={{ background: `color-mix(in srgb, var(--accent) ${percent}%, transparent)` }} />)}新
+      </span> : null}
       {selection?.kind === "file" ? <button type="button" aria-pressed={view.blameEnabled} data-testid="blame-toggle"
         disabled={!view.blameSupported} onClick={() => actions.setBlame(!view.blameEnabled)}
         title={view.blameSupported ? "逐行追溯：显示每一行最后由哪个提交修改（git blame，⌥B）" : "逐行追溯需要核心支持（占位 · P4-12）"}
@@ -615,6 +620,7 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
   const summary = entry?.commit.summary ?? blameCommit?.summary ?? shortOid(oid);
   const meta = entry ? `${entry.commit.author.name} · ${when(entry.commit.author)}` : blameCommit ? `${blameCommit.authorName} · ${momentLabel(blameCommit.authorTime * 1000)}` : "";
   const panelRef = React.useRef<HTMLElement>(null);
+  const [controls, setControls] = React.useState<HTMLElement | null>(null);
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -649,12 +655,12 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
       </div>
       <Button variant="outline" size="sm" className="shrink-0 font-mono @max-2xl:hidden" onClick={() => { void window.commitScope.copyText(oid); }} title="复制完整 OID">{shortOid(oid)}</Button>
       <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit" aria-label="在提交页查看" title={`在提交页查看 ${shortOid(oid)}：它在整体历史里的位置、前后提交和分支`}>
-        <span className="@max-xl:hidden">在提交页查看</span><ChevronRight className="size-3" strokeWidth={1.75} /></Button>
+        <CommitsIcon className="size-3.5" /><span className="@max-xl:hidden">在提交页查看</span></Button>
     </div>
-    <CommitBar view={view} actions={actions} />
+    <CommitBar view={view} actions={actions} controlsRef={setControls} />
     <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-3 pb-6">
       {view.focus?.originalPath && view.focus.oid === oid ? <p className="m-0 mb-2 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是它在那个路径下的修改。</p> : null}
-      {view.changeView === "file" ? <RevisionContent view={view} oid={oid} /> : <ChangeBox view={view} actions={actions} entry={entry} />}
+      {view.changeView === "file" ? <RevisionContent view={view} oid={oid} /> : <ChangeBox view={view} actions={actions} entry={entry} controls={controls} />}
     </div>
   </section>;
 }
@@ -683,7 +689,7 @@ function CommitPane({ view, actions }: { view: FilesView; actions: FilesActions 
  * the switcher through the files this commit changed (‹ ›, or pick one from the list). Opened, the details scroll
  * inside a bounded panel so the diff always stays on screen.
  */
-function CommitBar({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
+function CommitBar({ view, actions, controlsRef }: { view: FilesView; actions: FilesActions; controlsRef(element: HTMLElement | null): void }): React.JSX.Element {
   const open = view.commitInfoOpen;
   const info = view.commitInfo?.value ?? null;
   const body = info ? info.messageWithoutTrailers.split("\n").slice(1).join("\n").trim() : "";
@@ -691,14 +697,16 @@ function CommitBar({ view, actions }: { view: FilesView; actions: FilesActions }
   const committer = info?.commit.committer;
   const sameCommitter = author && committer && author.name === committer.name && author.email === committer.email && author.timestamp === committer.timestamp;
   return <div className="shrink-0 border-b border-line bg-bg" data-testid="commit-info">
-    <div className="flex h-9 items-center gap-2 pr-2 pl-1.5">
-      <button type="button" aria-expanded={open} onClick={actions.toggleCommitInfo} data-testid="commit-info-toggle"
-        className="flex h-7 min-w-0 shrink items-center gap-1 rounded-[7px] pr-2 pl-1 text-xs text-fg2 hover:bg-hover">
+    {/* Commit details · this file's status, counts, change stepper and display menu (from the diff) · file switcher. */}
+    <div className="commit-bar flex h-10 items-center gap-1.5 pr-2 pl-1.5">
+      <button type="button" aria-expanded={open} onClick={actions.toggleCommitInfo} data-testid="commit-info-toggle" title="完整消息、作者和父提交"
+        className="flex h-7 shrink-0 items-center gap-1 rounded-[7px] pr-2 pl-1 text-xs text-fg2 hover:bg-hover">
         {open ? <ChevronDown className="size-3.5 shrink-0 text-fg3" /> : <ChevronRight className="size-3.5 shrink-0 text-fg3" />}
         <span className="shrink-0 font-medium text-fg">提交详情</span>
-        {!open ? <span className="min-w-0 truncate text-fg3">完整消息、作者和父提交</span> : null}
       </button>
-      <div className="min-w-0 flex-1" />
+      <span aria-hidden="true" className="h-4 w-px shrink-0 bg-line" />
+      <div ref={controlsRef} data-testid="change-controls" className="flex min-w-0 flex-1 items-center gap-1" />
+      <span aria-hidden="true" className="h-4 w-px shrink-0 bg-line" />
       <CommitFileSwitcher view={view} actions={actions} />
     </div>
     {open ? <div className="flex max-h-[min(38vh,360px)] flex-col gap-3 overflow-auto overscroll-contain border-t border-line px-4 py-3" data-testid="commit-info-panel">
@@ -939,11 +947,23 @@ function CommitHeader({ entry, onOpenCommit }: { entry: FileHistoryEntry; onOpen
   </div>;
 }
 
-function ChangeBox({ view, actions, entry }: { view: FilesView; actions: FilesActions; entry: FileHistoryEntry | null }): React.JSX.Element {
+function ChangeBox({ view, actions, entry, controls }: { view: FilesView; actions: FilesActions; entry: FileHistoryEntry | null; controls?: HTMLElement | null }): React.JSX.Element {
   const change = view.change;
   const parents = entry?.commit.parents ?? [];
   const diff = change?.value;
-  const leading = <>
+  // In the change view the status, counts, merge parent choice, change stepper and display menu sit in the commit bar
+  // above (`controls`), where the commit's details and file switcher already are; elsewhere the card has its header.
+  const compact = controls !== undefined;
+  const leading = compact ? <>
+    {diff ? <span className="mr-1 rounded-[5px] bg-warn-bg px-1.5 text-[11px] leading-5 font-semibold whitespace-nowrap text-warn">{STATUS_LABEL[diff.file.status]}</span> : null}
+    {diff ? <Counts additions={diff.file.additions} deletions={diff.file.deletions} /> : null}
+    {parents.length > 1 ? <span role="radiogroup" aria-label="对比的父提交" className="ml-1.5 flex shrink-0 rounded-[9px] bg-sunken p-[3px]">
+      {parents.map((parent, index) => <button key={parent} type="button" role="radio" aria-checked={view.parentIndex === index}
+        onClick={() => actions.setParentIndex(index)} title={`对比父提交 ${index + 1} · ${shortOid(parent)}`}
+        className="flex h-6 items-center rounded-[7px] px-2 text-xs whitespace-nowrap text-fg2 aria-checked:bg-panel aria-checked:font-semibold aria-checked:text-fg aria-checked:shadow-[0_0_0_1px_var(--line2)]">
+        父 {index + 1}</button>)}
+    </span> : null}
+  </> : <>
     {diff ? <span className="mr-1 rounded-[5px] bg-warn-bg px-1.5 text-[11px] leading-5 font-semibold text-warn">{STATUS_LABEL[diff.file.status]}</span> : null}
     {diff ? <Counts additions={diff.file.additions} deletions={diff.file.deletions} /> : null}
     {parents.length > 1 ? <span role="radiogroup" aria-label="对比的父提交" className="ml-2 flex rounded-[9px] bg-sunken p-[3px]">
@@ -954,12 +974,14 @@ function ChangeBox({ view, actions, entry }: { view: FilesView; actions: FilesAc
     </span> : parents.length === 1 ? <span className="ml-2 text-xs text-fg3">对比父提交 <span className="font-mono">{shortOid(parents[0]!)}</span></span>
       : entry ? <span className="ml-2 text-xs text-fg3">根提交 · 与空树比较</span> : null}
   </>;
+  const headerRow = compact ? controls ? createPortal(<>{leading}<div className="flex-1" /></>, controls) : null
+    : <div className="flex h-9 items-center gap-1 border-b border-line px-3">{leading}</div>;
   if (!change || change.state === "loading" && !diff) {
-    return <div className="rounded-xl border border-line bg-bg"><div className="flex h-9 items-center gap-1 border-b border-line px-3">{leading}</div>
+    return <div className="rounded-xl border border-line bg-bg">{headerRow}
       <p role="status" className="m-0 flex items-center gap-1.5 px-4 py-3 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取这次修改…</p></div>;
   }
   if (change.state === "error") {
-    return <div className="rounded-xl border border-line bg-bg"><div className="flex h-9 items-center gap-1 border-b border-line px-3">{leading}</div>
+    return <div className="rounded-xl border border-line bg-bg">{headerRow}
       <div role="alert" className="flex items-center gap-2 px-4 py-3 text-xs text-bad"><span>{change.error?.message}</span><Button variant="outline" size="sm" onClick={() => entry && actions.selectCommit(entry.commit.oid)}>重试</Button></div></div>;
   }
   const value = diff!;
@@ -972,11 +994,11 @@ function ChangeBox({ view, actions, entry }: { view: FilesView; actions: FilesAc
   }[value.kind];
   const focus = view.focus && view.focus.oid === view.selectedCommit ? { newLine: view.focus.originalLine, label: `你在内容页点的第 ${view.focus.line} 行` } : null;
   return <div className="rounded-xl border border-line bg-bg" data-testid="file-change">
-    {note || value.kind !== "text" || !value.patch ? <div className="flex h-9 items-center gap-1 border-b border-line px-3">{leading}</div> : null}
+    {note || value.kind !== "text" || !value.patch ? headerRow : null}
     {note ? <p className="m-0 px-4 py-3 text-xs text-fg3">{note}</p> : null}
     {value.kind === "text" && value.patch === "" ? <p className="m-0 px-4 py-3 text-xs text-fg3">内容相同，只有路径或模式变化。</p> : null}
     {value.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，只显示读取上限内的部分。</p> : null}
     {value.kind === "text" && value.patch ? <DiffView patch={value.patch} fullAvailable={view.fullFileSupported} fullFileLimited={change.fullFileLimited ?? false} leading={leading} focus={focus}
-      path={(value.file.newPath ?? value.file.oldPath)?.display ?? null} /> : null}
+      path={(value.file.newPath ?? value.file.oldPath)?.display ?? null} controlsTarget={controls} /> : null}
   </div>;
 }

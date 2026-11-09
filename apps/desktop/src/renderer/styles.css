@@ -275,6 +275,12 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .diff-hunk-count,
   .diff-display-label { display: none; }
 }
+/* In the change view those controls sit in the commit bar, beside the file switcher: they give way earlier. */
+.commit-bar { container: commit-bar / inline-size; }
+@container commit-bar (max-width: 720px) {
+  .diff-hunk-count,
+  .diff-display-label { display: none; }
+}
 
 @media (max-width: 900px) {
   .topbar-repository { max-width: 100px; padding-inline: 4px; }

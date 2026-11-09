@@ -91,7 +91,7 @@ try {
   const mergeGroup = page.getByTestId("merge-parent-selector");
   await mergeGroup.waitFor({ state: "visible" });
   await mergeGroup.selectOption("1");
-  await page.getByText("本组 205 个提交。", { exact: false }).waitFor({ state: "visible", timeout: 20_000 });
+  await page.getByText("本组 205 个提交", { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
   const mergePage = page.getByTestId("merge-commit-page");
   await mergePage.waitFor({ state: "visible" });
   assert.equal(await mergePage.getByTestId("merge-commit-row").count(), 200, "a merge group is limited to one 200-summary page");

@@ -70,7 +70,9 @@ export function HistoryDayStrip({ listRef, markers, days, atNewest, onJumpToNewe
   const scrolled = scroll.top > marker.offset + 0.5;
 
   return <div data-testid="history-day-strip" className="pointer-events-none absolute inset-x-0 top-0 z-10" style={{ height: rowHeight }}>
-    <div className="absolute inset-y-0 right-0 bg-bg" style={{ left: labelLeft - 8, transform: push ? `translateY(${push}px)` : undefined }}>
+    <div className={`absolute inset-y-0 right-0 bg-bg ${scrolled ? "shadow-[0_1px_0_var(--line)]" : ""}`} style={{ left: labelLeft - 8, transform: push ? `translateY(${push}px)` : undefined }}>
+      {/* Rows scrolling under the pinned date fade out instead of showing a sliver of their text below it. */}
+      {scrolled ? <div aria-hidden="true" className="absolute inset-x-0 top-full h-1.5" style={{ background: "linear-gradient(var(--bg), transparent)" }} /> : null}
       <Popover open={dateOpen} onOpenChange={setDateOpen}>
         <div className="pointer-events-auto absolute bottom-0.5 left-1 flex items-center gap-1">
           <PopoverTrigger asChild>

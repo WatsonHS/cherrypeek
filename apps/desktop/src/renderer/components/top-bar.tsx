@@ -136,6 +136,11 @@ export const FOCUS_SEARCH_EVENT = "commitscope:focus-search";
  * over the right end of the top bar and focuses it. Esc, ×, or a click outside collapse it again; a search that is
  * still in effect marks the icon.
  */
+/** Below 1100px the search box collapses into an icon (styles.css); only then is there an "expanded" state. */
+function narrowSearch(): boolean {
+  return window.matchMedia("(max-width: 1099px)").matches;
+}
+
 function TopBarSearch({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false);
   const [hasQuery, setHasQuery] = React.useState(false);
@@ -144,8 +149,9 @@ function TopBarSearch({ label, children }: { label: string; children: React.Reac
   const input = () => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body [data-testid='search-input'], .topbar-search-body input:not([type='hidden'])") ?? null;
   const focusInput = React.useCallback(() => {
     // A visible box takes focus at once, so keys typed right after ⌘F are not lost; a collapsed one focuses once shown.
+    // Only a narrow window has a collapsed box: at full width ⌘F just focuses, and Esc keeps its meaning for the page.
     wantsFocus.current = true;
-    setExpanded(true);
+    if (narrowSearch()) setExpanded(true);
     const field = input();
     if (field && field.offsetParent !== null) { field.focus(); wantsFocus.current = false; }
   }, []);
@@ -167,12 +173,14 @@ function TopBarSearch({ label, children }: { label: string; children: React.Reac
   React.useEffect(() => {
     if (!expanded) return;
     const onKey = (event: KeyboardEvent) => {
+      if (!narrowSearch()) { setExpanded(false); return; }
       if (event.key !== "Escape" || event.isComposing || document.querySelector("[data-slot='popover-content'][data-state='open']")) return;
       event.preventDefault();
       event.stopPropagation();
       collapse();
     };
     const onPointer = (event: PointerEvent) => {
+      if (!narrowSearch()) { setExpanded(false); return; }
       const target = event.target as Node | null;
       if (rootRef.current?.contains(target) || (target instanceof Element && target.closest("[data-slot='popover-content']"))) return;
       collapse();

@@ -9,8 +9,9 @@ export const PAGE_SHORTCUTS: Record<AppPage, string> = { commits: "⌘1", files:
 
 const ICON = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" } as const;
 
-function CommitsIcon(): React.JSX.Element {
-  return <svg viewBox="0 0 16 16" aria-hidden="true" className="size-[15px] shrink-0" style={ICON}><circle cx={8} cy={8} r={2.5} /><path d="M1.5 8h4M10.5 8h4" /></svg>;
+/** The commits page's icon; also on buttons that go there, so they read as "to the commits page". */
+export function CommitsIcon({ className = "size-[15px]" }: { className?: string }): React.JSX.Element {
+  return <svg viewBox="0 0 16 16" aria-hidden="true" className={`${className} shrink-0`} style={ICON}><circle cx={8} cy={8} r={2.5} /><path d="M1.5 8h4M10.5 8h4" /></svg>;
 }
 
 function FilesIcon(): React.JSX.Element {

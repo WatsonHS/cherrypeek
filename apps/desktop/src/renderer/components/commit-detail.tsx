@@ -89,27 +89,19 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   }
   const isMerge = commit.parents.length > 1;
   const isHead = !oldDetailContext && repository.headOid === commit.oid;
+  const headRefs = !oldSelection && !oldDetailContext ? refIndex.get(commit.oid) ?? [] : [];
+  const detachedHead = !oldSelection && repository.headReference === null && isHead;
+  const hasLabels = headRefs.length > 0 || detachedHead || Boolean(oldDetailContext && shownDetails?.refs.length) || Boolean(shownDetails?.refsTruncated) || isMerge;
 
   return <section ref={scrollRef} aria-label="提交详情" className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain bg-panel">
     <div className="mx-auto flex max-w-[920px] flex-col gap-5 px-11 pt-7 pb-12">
-      <div className="flex flex-wrap items-center gap-2">
-        {!oldSelection && !oldDetailContext ? <RefTags refs={refIndex.get(commit.oid) ?? []} headReference={repository.headReference}
-          isHeadCommit={repository.headReference === null && isHead} size="default" limit={6} /> : null}
+      {/* Labels get a row of their own only when there are any; the actions sit beside the title. */}
+      {hasLabels ? <div className="flex flex-wrap items-center gap-2" data-testid="commit-labels">
+        {headRefs.length || detachedHead ? <RefTags refs={headRefs} headReference={repository.headReference} isHeadCommit={detachedHead} size="default" limit={6} /> : null}
         {oldDetailContext && shownDetails?.refs.length ? <RefTags refs={shownDetails.refs} headReference={null} size="default" limit={6} /> : null}
         {shownDetails?.refsTruncated ? <span className="text-xs text-fg3">引用列表已截断</span> : null}
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
-        <div className="flex-1" />
-        {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory} title="在完整历史里定位这个结果（⌘L）；定位后 ⌘[ 回到搜索结果">在历史中定位</Button> : null}
-        {onOpenHandoff ? <CommitHandoffMenu oid={commit.oid} isMerge={isMerge} onOpenHandoff={onOpenHandoff}
-          toNewest={!commitsOverride && index > 0
-            ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
-            : null} /> : null}
-        <CopyOidButton oid={commit.oid} />
-        <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
-          onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
-        <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={canMoveNext === undefined ? index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null) : !canMoveNext}
-          onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
-      </div>
+      </div> : null}
 
       {oldSelection ? <p role="status" className="m-0 rounded-md border border-line bg-bg px-3 py-2 text-xs text-fg3">
         这条提交不在当前已加载窗口{preview.oldSelectedObservedAtUnixMs ? `（来自 ${new Date(preview.oldSelectedObservedAtUnixMs).toLocaleString()} 的观察）` : ""}；它可能仍在当前范围的更深位置，这里不推断整个范围的可达性。
@@ -117,7 +109,22 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
 
       <UpdateHint details={detailValue} current={!oldDetailContext} />
       <div className="flex flex-col gap-2">
-        <h1 className="m-0 text-2xl leading-[1.3] font-semibold tracking-[-0.01em] break-words [text-wrap:pretty]">{shownDetails?.message.split(/\r?\n/u, 1)[0] ?? commit.summary}</h1>
+        {/* Title and actions on one line; when the pane is too narrow the actions move above the title (wrap-reverse). */}
+        <div className="flex flex-wrap-reverse items-end justify-between gap-x-4 gap-y-3">
+          <h1 className="m-0 min-w-[min(100%,360px)] flex-1 text-2xl leading-[1.3] font-semibold tracking-[-0.01em] break-words [text-wrap:pretty]">{shownDetails?.message.split(/\r?\n/u, 1)[0] ?? commit.summary}</h1>
+          <div className="ml-auto flex shrink-0 items-center gap-2 pt-0.5" data-testid="commit-actions">
+            {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory} title="在完整历史里定位这个结果（⌘L）；定位后 ⌘[ 回到搜索结果">在历史中定位</Button> : null}
+            {onOpenHandoff ? <CommitHandoffMenu oid={commit.oid} isMerge={isMerge} onOpenHandoff={onOpenHandoff}
+              toNewest={!commitsOverride && index > 0
+                ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
+                : null} /> : null}
+            <CopyOidButton oid={commit.oid} />
+            <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
+              onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
+            <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={canMoveNext === undefined ? index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null) : !canMoveNext}
+              onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
+          </div>
+        </div>
         {(!shownDetails && commit.summaryTruncated) || (shownDetails?.commit.textLossy ?? commit.textLossy) ? <p className="m-0 text-xs text-warn">
           {!shownDetails && commit.summaryTruncated ? "提交摘要过长，已截断。" : ""}{(shownDetails?.commit.textLossy ?? commit.textLossy) ? "提交文本含有无法按 UTF-8 无损解码的数据。" : ""}
         </p> : null}
@@ -220,7 +227,7 @@ function ChangeSummary({ detail, activeDetails, onRetryFiles, onJumpToFiles }: {
     {overview.directories.length > 1 ? <span className="min-w-0 truncate text-xs text-fg3" title={overview.directories.map(item => `${item.path ? displayGitPath(item.path) : "（仓库根目录）"} ${item.totalFiles}`).join("\n")}>
       {directories.map(item => `${item.path ? displayGitPath(item.path) : "（根目录）"} ${item.totalFiles}`).join(" · ")}{overview.directories.length > directories.length ? ` · 另 ${overview.directories.length - directories.length} 个目录` : ""}
     </span> : null}
-    {activeDetails && activeDetails.commit.parents.length > 1 ? <span className="text-xs text-fg3">与{parentLabel(parentIndex)}比较；在下方“文件改动”里切换。</span> : null}
+    {activeDetails && activeDetails.commit.parents.length > 1 ? <span className="text-xs text-fg3">与{parentLabel(parentIndex)} 比较，在下方“文件改动”里切换</span> : null}
     {page && detail.fileParentIndex !== page.parentIndex ? <span className="text-xs text-fg3">新的比较基准尚未读完，以上仍是{parentLabel(page.parentIndex)}的统计。</span> : null}
   </div>;
 }
@@ -244,7 +251,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
     <div className="flex flex-wrap items-center gap-3">
       <h2 className="m-0 text-[17px] font-semibold">文件改动</h2>
       {activeDetails ? <ParentSelector details={activeDetails} value={parentIndex} disabled={false} testId="file-parent-selector" onChange={next => onLoadFiles(next, 0)} /> : null}
-      {page ? <span className="text-xs text-fg3">{activeDetails && activeDetails.commit.parents.length > 1 ? `与 ${parentLabel(page.parentIndex)} 比较 · ` : ""}{page.files.length ? `${page.offset + 1}–${page.offset + page.files.length}` : "0"} / {page.totalFiles}</span> : null}
+      {page ? <span className="text-xs text-fg3">{page.files.length ? `${page.offset + 1}–${page.offset + page.files.length}` : "0"} / {page.totalFiles}</span> : null}
     </div>
     {detail.files.error ? <ErrorLine message={detail.files.error.message} onRetry={onRetryFiles} label="重试读取文件列表" /> : null}
     {!page && detail.files.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取文件清单…</p> : null}
@@ -394,7 +401,7 @@ function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge }
   const mergeParentRef = mergeParentOid ? refsByOid.get(mergeParentOid)?.[0] : undefined;
   const visibleAuthors = page?.authors.slice(0, 24) ?? [];
   return <Section title="Merge 带入">
-    {activeDetails && mergeParents.length === 1 ? <div className="text-xs text-fg3">比较分组 <span className="text-fg">父提交 2 · {shortOid(mergeParents[0]!)}{mergeParentRef ? ` · ${shortRefName(mergeParentRef.name)}` : ""}</span></div> : activeDetails && mergeParents.length > 1 ? <label className="flex items-center gap-2 text-xs text-fg3">比较分组
+    {activeDetails && mergeParents.length === 1 ? <div className="text-xs text-fg3">带入自 <span className="text-fg">父提交 2 · {shortOid(mergeParents[0]!)}{mergeParentRef ? ` · ${shortRefName(mergeParentRef.name)}` : ""}</span></div> : activeDetails && mergeParents.length > 1 ? <label className="flex items-center gap-2 text-xs text-fg3">带入自
       <select data-testid="merge-parent-selector" aria-label="Merge 父提交分组" className="max-w-[320px] rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-fg" value={parent}
         onChange={event => onLoadMerge(Number(event.target.value), 0)}>
         {mergeParents.map((oid, index) => {
@@ -408,11 +415,14 @@ function MergeSection({ detail, activeDetails, refs, onLoadMerge, onRetryMerge }
     {!detail.details.value && detail.details.state === "error" ? <p role="status" className="m-0 text-xs text-fg3">完整详情尚未读取，暂不能读取合并分组。请使用上方“重试读取详情”。</p> : null}
     {detail.merge.error ? <ErrorLine message={detail.merge.error.message} onRetry={onRetryMerge} label="重试读取 Merge 分组" /> : null}
     {!page && detail.merge.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取 Merge 分组…</p> : null}
-    {page ? <div data-testid="merge-commit-page"><>
+    {page ? <div data-testid="merge-commit-page" className="flex flex-col gap-2"><>
       {requestedParent !== page.parentIndex ? <p className="m-0 text-xs text-fg3">当前显示父提交 {page.parentIndex + 1} 的分组；另一分组仍在读取。</p> : null}
-      <p className="m-0 text-xs text-fg3">本组 {page.totalCommits} 个提交。作者统计按本组提交计算，重复作者按原始姓名与邮箱合并。</p>
-      {page.authors.length ? <><ul className="m-0 flex flex-wrap gap-x-4 gap-y-1 pl-4 text-xs text-fg2">{visibleAuthors.map((author, index) => <li key={`${author.email}:${author.name}:${index}`}>{author.name || author.email} · {author.count}</li>)}</ul>{page.authors.length > visibleAuthors.length ? <details className="text-xs text-fg3"><summary>另有 {page.authors.length - visibleAuthors.length} 位作者</summary><ul className="m-0 flex flex-wrap gap-x-4 gap-y-1 pl-4">{page.authors.slice(visibleAuthors.length).map((author, index) => <li key={`${author.email}:${author.name}:${index}`}>{author.name || author.email} · {author.count}</li>)}</ul></details> : null}</> : null}
-      {page.commits.length ? <ul className="m-0 flex flex-col gap-1 pl-4 text-[13px]">{page.commits.map(item => <li data-testid="merge-commit-row" key={item.oid} className="flex min-w-0 gap-2"><span className="shrink-0 font-mono text-xs text-fg3">{shortOid(item.oid)}</span><span className="truncate">{item.summary}</span></li>)}</ul> : <p className="m-0 text-sm text-fg3">这个分组没有带入提交。</p>}
+      {/* One line: how many commits, then who wrote them; how authors are counted is the tooltip. */}
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs text-fg3" title="作者统计按本组提交计算，重复作者按原始姓名与邮箱合并">
+        <span>本组 {page.totalCommits} 个提交</span>{page.authors.length ? <span>· 作者</span> : null}
+      {page.authors.length ? <><ul className="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-xs text-fg2">{visibleAuthors.map((author, index) => <li key={`${author.email}:${author.name}:${index}`}>{author.name || author.email} {author.count}</li>)}</ul>{page.authors.length > visibleAuthors.length ? <details className="text-xs text-fg3"><summary>另有 {page.authors.length - visibleAuthors.length} 位作者</summary><ul className="m-0 flex flex-wrap gap-x-4 gap-y-1 pl-4">{page.authors.slice(visibleAuthors.length).map((author, index) => <li key={`${author.email}:${author.name}:${index}`}>{author.name || author.email} · {author.count}</li>)}</ul></details> : null}</> : null}
+      </div>
+      {page.commits.length ? <ul className="m-0 flex list-none flex-col gap-1 p-0 text-[13px]">{page.commits.map(item => <li data-testid="merge-commit-row" key={item.oid} className="flex min-w-0 items-baseline gap-2.5"><span className="shrink-0 font-mono text-xs text-fg3">{shortOid(item.oid)}</span><span className="truncate">{item.summary}</span></li>)}</ul> : <p className="m-0 text-sm text-fg3">这个分组没有带入提交。</p>}
       {page.offset > 0 || page.hasMore ? <div className="flex items-center justify-between">
         <Button data-testid="merge-page-previous" variant="outline" size="sm" disabled={page.offset === 0 || detail.merge.state === "loading"} onClick={() => onLoadMerge(page.parentIndex, Math.max(0, page.offset - page.pageSize))}>上一页</Button>
         <Button data-testid="merge-page-next" variant="outline" size="sm" disabled={!page.hasMore || detail.merge.state === "loading"} onClick={() => onLoadMerge(page.parentIndex, page.offset + page.commits.length)}>下一页</Button>

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 import { diffDisplay, type DiffDisplay } from "../lib/diff-display.js";
@@ -102,8 +103,10 @@ export interface DiffFocus {
 /**
  * A text diff with a change stepper and the display menu above it. `leading` goes at the start of
  * that header row. With `focus`, only the change containing that line is shown until the rest is expanded.
+ * With `controlsTarget`, the header's contents go into that element instead (a row the page already has), and the
+ * diff has no header row of its own.
  */
-export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimited = false, leading, focus, path }: {
+export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimited = false, leading, focus, path, controlsTarget }: {
   patch: string;
   /** Repository path of the file, used only to pick the syntax highlighting language. */
   path?: string | null;
@@ -112,6 +115,7 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimi
   fullFileLimited?: boolean;
   leading?: React.ReactNode;
   focus?: DiffFocus | null;
+  controlsTarget?: HTMLElement | null;
 }): React.JSX.Element {
   const display = useDiffDisplay();
   const contextFull = React.useContext(DiffFullContext);
@@ -152,8 +156,7 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimi
     rootRef.current?.querySelector(`[data-hunk-start="${target}"]`)?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
   };
   const mark = focus && focusHunk !== null ? focus : null;
-  return <div ref={rootRef} data-testid="diff-view" className="diff-view" data-layout={display.layout} data-wrap={display.wrap ? "true" : "false"}>
-    <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-line px-3 py-1">
+  const header = <>
       {leading}
       <div className="flex-1" />
       {onlyHunk !== null
@@ -166,7 +169,10 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimi
             className="flex size-[26px] items-center justify-center rounded-md text-fg2 hover:bg-hover disabled:text-fg3 disabled:opacity-50"><ChevronDown className="size-3.5" strokeWidth={1.75} /></button>
         </> : null}
       <DiffDisplayMenu fullAvailable={fullAvailable} fullUnavailableReason="完整文件需要核心返回带全文上下文的 diff（占位 · P4-11）" />
-    </div>
+  </>;
+  return <div ref={rootRef} data-testid="diff-view" className="diff-view" data-layout={display.layout} data-wrap={display.wrap ? "true" : "false"}>
+    {controlsTarget === undefined ? <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-line px-3 py-1">{header}</div>
+      : controlsTarget ? createPortal(header, controlsTarget) : null}
     {fullFileLimited && display.scope === "full"
       ? <p role="note" data-testid="diff-full-limited" className="m-0 border-b border-line px-4 py-1.5 text-xs text-fg3">这个文件超过完整显示的上限（任一侧 5,000 行或约 400 KB），只显示改动。</p>
       : null}

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { FileText, Info, LoaderCircle, RefreshCw } from "lucide-react";
 import type { ChangedFileStatus, GitPath, RepositoryInfo, WorkspaceDiff, WorkspaceFile } from "../../../../../packages/protocol/src/generated/server-message.js";
-import { shortOid, shortRefName } from "../lib/format.js";
+import { repositoryName, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { workspaceHeadText } from "../lib/workspace-indicator.js";
 import { workspaceIsClean, workspaceItems, type WorkspaceGroup, type WorkspaceItem, type WorkspaceView } from "../lib/workspace-store.js";
@@ -83,8 +83,10 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
   return <div className="flex min-h-0 flex-1 overflow-hidden" data-testid="workspace-page">
     <nav aria-label="工作区改动的文件" className="flex min-h-0 max-w-[400px] flex-[1_1_340px] flex-col border-r border-line">
       <div className="flex items-center gap-1.5 pt-2 pr-2.5 pb-0.5 pl-[18px]">
-        <span className="min-w-0 flex-1 truncate text-xs text-fg3" title={`${directory} · HEAD ${head}`}>
-          <span className="font-mono">{directory}</span> · {head} · {view.loading && !status ? "正在读取…" : status ? `${clock(status.observedAtUnixMs)} 读取` : ""}
+        {/* The folder's name (the full path is the tooltip); the branch and the read time never give way. */}
+        <span className="flex min-w-0 flex-1 items-baseline text-xs whitespace-nowrap text-fg3" title={`${directory} · HEAD ${head}${status ? ` · ${clock(status.observedAtUnixMs)} 读取` : ""}`}>
+          <span className="min-w-0 truncate font-mono">{repositoryName(directory)}</span>
+          <span className="shrink-0">&nbsp;· {head} · {view.loading && !status ? "正在读取…" : status ? `${clock(status.observedAtUnixMs)} 读取` : ""}</span>
         </span>
         <button type="button" aria-label="重新读取工作区" title="重新读取（文件变化和窗口聚焦时也会自动复核）" onClick={onRefresh}
           className="flex size-7 shrink-0 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg">
@@ -161,6 +163,7 @@ function committed(item: WorkspaceItem): boolean {
 }
 
 function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: WorkspaceItem; view: WorkspaceView; onLoadMore(): void; onRetry(): void; onOpenFile?(): void }): React.JSX.Element {
+  const [controls, setControls] = React.useState<HTMLElement | null>(null);
   const { name, dir } = splitPath(item.entry.path.display);
   const content = view.content;
   const side = item.group === "staged" ? "已暂存 · HEAD → index" : item.group === "unstaged" ? "未暂存 · index → 工作区" : item.group === "untracked" ? "未跟踪 · 只在工作区" : "冲突 · 工作区里带冲突标记的内容";
@@ -173,6 +176,7 @@ function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: W
         <span className="text-[12.5px] text-fg3">{side}{item.change ? <> · <Counts additions={item.change.additions} deletions={item.change.deletions} /></> : null}
           {item.entry.originalPath ? ` · 来自 ${item.entry.originalPath.display}` : ""}</span>
       </div>
+      <div ref={setControls} data-testid="workspace-diff-controls" className="flex shrink-0 items-center gap-1" />
       {onOpenFile ? <Button variant="outline" size="sm" onClick={onOpenFile} data-testid="workspace-open-file" title="在文件页看这个文件在 HEAD 里的版本（这些改动的出发点）和它的历史">
         <FileText className="size-3.5" strokeWidth={1.75} />在文件页打开</Button> : null}
     </div>
@@ -185,14 +189,14 @@ function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: W
         ? <p role="status" className="m-0 flex items-center gap-1.5 px-4 py-3 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取…</p>
         : content.state === "error"
           ? <div role="alert" className="flex items-center gap-2 px-4 py-3 text-xs text-bad"><span>{content.error?.message}</span><Button variant="outline" size="sm" onClick={onRetry}>重试</Button></div>
-          : content.diff ? <WorkspaceDiffBody diff={content.diff} fullFileLimited={content.fullFileLimited ?? false} />
+          : content.diff ? <WorkspaceDiffBody diff={content.diff} fullFileLimited={content.fullFileLimited ?? false} controls={controls} />
             : content.file ? <WorkspaceFileBody file={content.file} conflict={item.group === "conflict"} canLoadMore={view.previewLines < 5_000} onLoadMore={onLoadMore} loading={content.state === "loading"} />
               : null}
     </div>
   </div>;
 }
 
-function WorkspaceDiffBody({ diff, fullFileLimited }: { diff: WorkspaceDiff; fullFileLimited: boolean }): React.JSX.Element {
+function WorkspaceDiffBody({ diff, fullFileLimited, controls }: { diff: WorkspaceDiff; fullFileLimited: boolean; controls: HTMLElement | null }): React.JSX.Element {
   const note = {
     binary: "二进制文件不展示文本 diff。",
     gitlink: "这是子模块引用，只显示对象变化，不读取子模块工作区。",
@@ -205,7 +209,7 @@ function WorkspaceDiffBody({ diff, fullFileLimited }: { diff: WorkspaceDiff; ful
     {diff.kind === "text" && diff.patch === "" && !diff.truncated ? <p className="m-0 px-4 py-3 text-xs text-fg3">内容相同，只有模式变化。</p> : null}
     {diff.textLossy ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 文本含有无法按 UTF-8 无损解码的数据。</p> : null}
     {diff.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，只显示读取上限内的部分。</p> : null}
-    {(diff.kind === "text" || diff.kind === "gitlink") && diff.patch ? <DiffView patch={diff.patch} fullFileLimited={fullFileLimited} path={diff.path.display} /> : null}
+    {(diff.kind === "text" || diff.kind === "gitlink") && diff.patch ? <DiffView patch={diff.patch} fullFileLimited={fullFileLimited} path={diff.path.display} controlsTarget={controls} /> : null}
   </div>;
 }
 
