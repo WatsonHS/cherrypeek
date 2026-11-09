@@ -232,15 +232,18 @@ try {
     await page.keyboard.press("Escape");
     await page.getByTestId("change-panel").waitFor({ state: "detached" });
 
-    // Entry from the commit details, with the way back to that commit.
+    // From a commit's changed file to the file itself on the files page, with the way back to that commit.
     await page.keyboard.press("Meta+1");
     await page.keyboard.press("Alt+Meta+2");
-    await page.getByTestId("open-file-history").first().click();
+    await page.getByTestId("open-in-files").first().click();
     assert.equal(await current(), "page-files");
     await page.getByTestId("to-files-banner").waitFor();
     assert.match(await page.getByTestId("back-from-files").textContent() ?? "", /回到提交 [0-9a-f]{7,}/u);
+    assert.doesNotMatch(await page.getByTestId("to-files-banner").textContent() ?? "", /的历史/u, "it opened the file, not its history");
+    await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
+    assert.equal(await page.getByTestId("change-panel").count(), 0, "the file itself is shown, not a change");
+    if (!await page.getByTestId("history-column").isVisible().catch(() => false)) await page.getByTestId("history-toggle").click();
     await page.getByTestId("file-history-row").first().waitFor({ timeout: 15_000 });
-    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
 
     // Round trip: 查看完整提交 → back. The history filter, the chosen entry and the open change survive.
     await page.getByTestId("history-filter").fill("adjust");

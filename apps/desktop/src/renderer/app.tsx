@@ -23,7 +23,7 @@ import { DiffFullContext, useDiffDisplayShortcuts } from "./components/diff-view
 import { FilesPage, type FilesActions, type VersionOption } from "./components/files-page.js";
 import { FilesStore, type TreeVersion } from "./lib/files-store.js";
 import { diffDisplay } from "./lib/diff-display.js";
-import type { GitPath } from "../../../../packages/protocol/src/generated/server-message.js";
+import type { ChangedFile, GitPath } from "../../../../packages/protocol/src/generated/server-message.js";
 import { workspaceBadge, workspaceBranchLabel } from "./lib/workspace-indicator.js";
 import { WorkspaceStore, workspaceIndicatorFor } from "./lib/workspace-store.js";
 import { cn } from "./lib/utils.js";
@@ -223,7 +223,7 @@ export function App(): React.JSX.Element {
   /** Set when "查看完整提交" on the files page brought the user here; the commits page offers the way back. */
   const [fromFiles, setFromFiles] = React.useState<{ name: string } | null>(null);
   /** Set when "文件历史" on the commits or workspace page opened the files page; it offers the way back. */
-  const [toFiles, setToFiles] = React.useState<{ page: "commits" | "workspace"; label: string; name: string } | null>(null);
+  const [toFiles, setToFiles] = React.useState<{ page: "commits" | "workspace"; label: string; name: string; history: boolean } | null>(null);
   const [activityStats, setActivityStats] = React.useState<{ key: string; value: ActivityStats } | null>(null);
   const [activityError, setActivityError] = React.useState<string | null>(null);
   const [activityLoading, setActivityLoading] = React.useState(false);
@@ -866,12 +866,24 @@ export function App(): React.JSX.Element {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
   const openFileHistory = React.useCallback((path: GitPath, oid: string | undefined, from: "commits" | "workspace") => {
-    setToFiles({ page: from, label: from === "workspace" ? "工作区" : oid ? `提交 ${shortOid(oid)}` : "提交页", name: path.display.split("/").at(-1) ?? path.display });
+    setToFiles({ page: from, label: from === "workspace" ? "工作区" : oid ? `提交 ${shortOid(oid)}` : "提交页", name: path.display.split("/").at(-1) ?? path.display, history: true });
     filesVisited.current = true;
     filesStore.setVersion(filesVersion);
     setPage("files");
     filesStore.select({ path, kind: "file" }, { tab: "history", commit: oid });
   }, [filesStore, filesVersion]);
+  /** "在文件页打开" on a commit's changed file: the file at the tree version, or its history at this commit if the commit deleted it. */
+  const openFileFromCommit = React.useCallback((file: ChangedFile, oid: string) => {
+    if (!file.newPath) {
+      if (file.oldPath) openFileHistory(file.oldPath, oid, "commits");
+      return;
+    }
+    setToFiles({ page: "commits", label: `提交 ${shortOid(oid)}`, name: file.newPath.display.split("/").at(-1) ?? file.newPath.display, history: false });
+    filesVisited.current = true;
+    filesStore.setVersion(filesVersion);
+    setPage("files");
+    filesStore.select({ path: file.newPath, kind: "file" });
+  }, [filesStore, filesVersion, openFileHistory]);
   const openCommitFromFiles = React.useCallback(async (oid: string) => {
     const path = filesStore.getView().selection?.path.display ?? "";
     setFromFiles({ name: path.split("/").at(-1) || "文件页" });
@@ -1092,7 +1104,7 @@ export function App(): React.JSX.Element {
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
             selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
-            onOpenFileHistory={filesView.supported ? (path, oid) => openFileHistory(path, oid, "commits") : undefined}
+            onOpenFile={filesView.supported ? openFileFromCommit : undefined}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}
             timeField={searchView.active ? searchView.query.timeField : undefined}
@@ -1119,7 +1131,7 @@ export function App(): React.JSX.Element {
       {filesAvailable && (page === "files" || filesVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "files" && "invisible absolute inset-0")}
         inert={page !== "files"} data-testid="files-page-slot">
         {toFiles ? <ReturnBanner testId="to-files-banner" backTestId="back-from-files" backTitle={toFiles.page === "workspace" ? "回到工作区（⌘3）" : "回到提交页（⌘1）"}
-          text={<>从{toFiles.label}打开了 <span className="font-medium text-fg">{toFiles.name}</span> 的历史；{toFiles.page === "workspace" ? "工作区" : "提交页"}保持原样。</>}
+          text={<>从{toFiles.label}打开了 <span className="font-medium text-fg">{toFiles.name}</span>{toFiles.history ? " 的历史" : ""}；{toFiles.page === "workspace" ? "工作区" : "提交页"}保持原样。</>}
           backLabel={`回到${toFiles.label}`} onBack={() => changePage(toFiles.page)} onDismiss={() => setToFiles(null)} /> : null}
         <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount}
           historyQuery={filesHistoryQuery} onHistoryQuery={setFilesHistoryQuery} />

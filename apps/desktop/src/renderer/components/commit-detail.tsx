@@ -1,6 +1,6 @@
 import * as React from "react";
-import { Check, ChevronDown, ChevronUp, Clock, Copy, LoaderCircle } from "lucide-react";
-import type { BranchesContainingResult, ChangedFilesPage, CommitDetails, CommitIdentity, CommitSummary, GitPath, MergeCommitsPage, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
+import { Check, ChevronDown, ChevronUp, Copy, FileText, LoaderCircle } from "lucide-react";
+import type { BranchesContainingResult, ChangedFile, ChangedFilesPage, CommitDetails, CommitIdentity, CommitSummary, GitPath, MergeCommitsPage, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
 import type { CommitDetailView } from "../lib/commit-detail-store.js";
@@ -15,7 +15,7 @@ import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
-export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, selectedTab = "overview", onTabChange, onOpenFileHistory }: {
+export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, selectedTab = "overview", onTabChange, onOpenFile }: {
   preview: RepositoryView;
   detail: CommitDetailView;
   onRetryDetails(): void;
@@ -39,7 +39,8 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   selectedTab?: string;
   onTabChange?(tab: string): void;
   /** Opens the files page on a path's history with this commit selected (P4-10). */
-  onOpenFileHistory?(path: GitPath, oid: string): void;
+  /** Opens a changed file on the files page (its history at this commit when this commit deleted it). */
+  onOpenFile?(file: ChangedFile, oid: string): void;
 }): React.JSX.Element {
   const commits = commitsOverride ?? preview.commits;
   const index = commits.findIndex(commit => commit.oid === selectedOid);
@@ -164,7 +165,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
           </div>
         </TabsContent>
         <TabsContent value="changes"><ChangesPanel detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} onToggleDiff={onToggleDiff}
-          onOpenFileHistory={onOpenFileHistory ? path => onOpenFileHistory(path, commit.oid) : undefined} /></TabsContent>
+          onOpenFile={onOpenFile ? file => onOpenFile(file, commit.oid) : undefined} /></TabsContent>
       </Tabs>
     </div>
   </section>;
@@ -222,13 +223,13 @@ function ChangeOverviewSection({ detail, activeDetails, onLoadFiles, onRetryFile
   </Section>;
 }
 
-function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onToggleDiff, onOpenFileHistory }: {
+function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onToggleDiff, onOpenFile }: {
   detail: CommitDetailView;
   activeDetails: CommitDetails | null;
   onLoadFiles(parentIndex: number | null, offset: number): void;
   onRetryFiles(): void;
   onToggleDiff(file: ChangedFilesPage["files"][number], parentIndex: number | null): void;
-  onOpenFileHistory?(path: GitPath): void;
+  onOpenFile?(file: ChangedFile): void;
 }): React.JSX.Element {
   const page = detail.files.value;
   const parentIndex = page?.parentIndex ?? detail.fileParentIndex;
@@ -250,7 +251,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
           return <FileRow key={`${file.oldPath?.rawHex ?? ""}:${file.newPath?.rawHex ?? ""}:${index}`} file={file}
             expanded={expanded} disabled={!canToggle} onToggle={() => onToggleDiff(file, page.parentIndex)}
             diff={expanded ? detail.diff : null} fullFileLimited={expanded && detail.diffFullFileLimited} onRetry={() => onToggleDiff(file, page.parentIndex)}
-            onOpenHistory={onOpenFileHistory && (file.newPath ?? file.oldPath) ? () => onOpenFileHistory((file.newPath ?? file.oldPath)!) : undefined} />;
+            onOpenFile={onOpenFile && (file.newPath ?? file.oldPath) ? () => onOpenFile(file) : undefined} />;
         })
           : <p className="m-0 px-4 py-5 text-sm text-fg3">这个比较没有文件改动。</p>}
       </div>
@@ -262,7 +263,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
   </div>;
 }
 
-function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, onRetry, onOpenHistory }: {
+function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, onRetry, onOpenFile }: {
   file: ChangedFilesPage["files"][number];
   expanded: boolean;
   disabled: boolean;
@@ -270,18 +271,19 @@ function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, on
   diff: CommitDetailView["diff"] | null;
   fullFileLimited: boolean;
   onRetry(): void;
-  onOpenHistory?(): void;
+  onOpenFile?(): void;
 }): React.JSX.Element {
   const oldPath = file.oldPath ? displayGitPath(file.oldPath) : null;
   const newPath = file.newPath ? displayGitPath(file.newPath) : null;
   const primary = newPath ?? oldPath ?? "（路径不可用）";
   const status = { added: "新增", modified: "修改", deleted: "删除", renamed: "重命名", copied: "复制", typeChanged: "类型变化" }[file.status];
   return <div data-testid="changed-file-row" className="relative border-b border-line last:border-b-0">
-    {onOpenHistory ? <button type="button" aria-label={`查看 ${primary} 的文件历史`} title="文件历史：打开文件页的“历史”，并选中这次修改"
-      onClick={onOpenHistory} data-testid="open-file-history"
-      className="absolute top-2 right-[88px] z-[1] flex size-7 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><Clock className="size-3.5" strokeWidth={1.75} /></button> : null}
+    {onOpenFile ? <button type="button" aria-label={`在文件页打开 ${primary}`}
+      title={file.newPath ? "在文件页打开这个文件（目录树版本里的内容）" : "这个提交删除了它：在文件页打开它的历史，并选中这次修改"}
+      onClick={onOpenFile} data-testid="open-in-files"
+      className="absolute top-2 right-[88px] z-[1] flex size-7 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><FileText className="size-3.5" strokeWidth={1.75} /></button> : null}
     <button type="button" aria-expanded={expanded} data-testid="changed-file-toggle" disabled={disabled} onClick={onToggle}
-      className={cn("flex w-full min-w-0 items-start gap-3 px-3 py-2.5 text-left hover:bg-bg/70 disabled:cursor-default disabled:hover:bg-transparent", onOpenHistory && "pr-[130px]")}>
+      className={cn("flex w-full min-w-0 items-start gap-3 px-3 py-2.5 text-left hover:bg-bg/70 disabled:cursor-default disabled:hover:bg-transparent", onOpenFile && "pr-[130px]")}>
       <Badge size="sm">{status}</Badge>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="break-all font-mono text-[12.5px] text-fg" title={[file.oldPath?.rawHex, file.newPath?.rawHex].filter(Boolean).join(" → ")}>{primary}{file.oldPath?.textLossy || file.newPath?.textLossy ? " · 路径含有非 UTF-8 字节" : ""}</span>
