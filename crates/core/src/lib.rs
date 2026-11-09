@@ -2110,6 +2110,7 @@ pub struct RefMergeStatus {
 #[serde(rename_all = "camelCase")]
 pub enum MergeStatus {
     Merged,
+    PatchEquivalent,
     NotMerged,
     Unavailable,
 }

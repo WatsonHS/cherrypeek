@@ -8,6 +8,7 @@ mod handoff;
 mod history;
 mod metadata_index;
 mod navigation;
+mod patch_equivalence;
 mod repository;
 mod runtime;
 mod search;

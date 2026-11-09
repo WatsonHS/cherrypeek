@@ -73,7 +73,7 @@ export function cleanupAvailable(facts: HandoffPromptFacts | null): boolean {
   const branch = facts?.branch ?? null;
   const base = facts?.base ?? null;
   return Boolean(branch?.kind === "localBranch" && base
-    && facts?.mergeStatus === "merged"
+    && (facts?.mergeStatus === "merged" || facts?.mergeStatus === "patchEquivalent")
     && facts?.checkedOutByComplete === true
     && branch.name !== base.name
     && branch.name !== facts?.windowWorktree?.headReference);
@@ -186,6 +186,7 @@ function promptBody(facts: HandoffPromptFacts | null, request: HandoffRequest): 
     case "cleanup":
       return [
         "请核对并清理 R1 中的本地分支 B1。观察时间、时区和未 fetch 的本地引用快照见参考数据。",
+        ...(facts?.mergeStatus === "patchEquivalent" ? ["当前依据是补丁等价（patchEquivalent），不是提交祖先关系。重新用 git cherry / git patch-id 比对每个独有提交或分支整体改动，确认基准当前内容仍包含这些改动，未被后续提交撤销。比对不完整、存在额外改动或不能确认时停止并询问；git branch -d 拒绝时说明原因，请用户确认后才能考虑强制删除。"] : []),
         "先确认 B1 相对 D1 仍明确已合入；远端跟踪基准先 fetch 对应 remote，再重新确认。检查检出 B1 的全部 worktree；主 worktree 不移除。存在未提交/未推送改动、锁定状态或事实不符时停止。只移除明确列出的可清理 linked worktree，不用 force 绕过保护。使用 git branch -d 删除 B1；不要仅依据旧快照使用 -D。不得删除远端分支或影响其他分支和 worktree。汇报删除项与保留项。",
       ].join("\n\n");
     case "stale-worktree":

@@ -184,3 +184,18 @@ test("octopus groups retain every parent and cleanup requires complete safe fact
   assert.equal(cleanupAvailable(facts), false, "the current window HEAD branch cannot be offered for cleanup");
   assert.equal(cleanupAvailable(null), false);
 });
+
+test("patch-equivalent cleanup requires fresh content verification and never silently forces deletion", () => {
+  const facts = baseFacts();
+  facts.mergeStatus = "patchEquivalent";
+  assert.equal(cleanupAvailable(facts), true);
+  const prompt = buildHandoffPrompt(facts, { scenario: "cleanup", target: { kind: "branch", ref: facts.branch.name } });
+  assert.equal(JSON.parse(prompt.referenceData).mergeStatus, "patchEquivalent");
+  assert.match(bodyOf(prompt), /不是提交祖先关系/u);
+  assert.match(bodyOf(prompt), /未被后续提交撤销/u);
+  assert.match(bodyOf(prompt), /请用户确认后/u);
+  facts.mergeStatus = "unavailable";
+  assert.equal(cleanupAvailable(facts), false);
+  facts.mergeStatus = "notMerged";
+  assert.equal(cleanupAvailable(facts), false);
+});

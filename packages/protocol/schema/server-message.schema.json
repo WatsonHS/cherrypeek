@@ -1861,6 +1861,7 @@
     "MergeStatus": {
       "enum": [
         "merged",
+        "patchEquivalent",
         "notMerged",
         "unavailable"
       ],

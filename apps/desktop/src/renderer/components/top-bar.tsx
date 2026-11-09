@@ -502,10 +502,10 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                 </span>
                 {isHead ? <Badge variant="head" size="sm">本窗口 HEAD</Badge> : null}
                 {merged === "merged" ? <Badge size="sm">已合入</Badge> : null}
-                {merged === "unavailable" ? <span className="text-[11px] text-fg3">状态不可用</span> : null}
+                {merged === "patchEquivalent" && navigation?.defaultBase ? <Badge size="sm" className="max-w-[180px]" title="已找到等价补丁；清理前需要重新核对当前内容"><span className="truncate">内容已在 {shortRefName(navigation.defaultBase.name)}</span></Badge> : null}
                 <code className="shrink-0 font-mono text-xs text-fg3">{shortOid(ref.peeledOid ?? ref.oid)}</code>
                 </>, sameScope(scope, { ref: ref.name }))}</div>
-                {kind === "localBranch" && merged === "merged" && !isHead && ref.name !== navigation?.defaultBase?.name
+                {kind === "localBranch" && (merged === "merged" || merged === "patchEquivalent") && !isHead && ref.name !== navigation?.defaultBase?.name
                   ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
                     aria-label={`交给 Agent 清理已合入的分支 ${shortRefName(ref.name)}`} title="交给 Agent 核对后删除这个已合入的分支"
                     onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); }}>清理</Button> : null}

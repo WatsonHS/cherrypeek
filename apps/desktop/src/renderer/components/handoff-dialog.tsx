@@ -218,7 +218,7 @@ function subjectRows(target: HandoffTarget, facts: HandoffPromptFacts, scenario:
   }
   if (scenario === "cleanup" && facts.branch) {
     rows.push(["分支", facts.branch.name.replace(/^refs\/heads\//u, "")]);
-    if (facts.base) rows.push(["基准", `${facts.base.name.replace(/^refs\/(?:heads|remotes)\//u, "")}${facts.mergeStatus === "merged" ? " · 已合入" : ""}`]);
+    if (facts.base) rows.push(["基准", `${facts.base.name.replace(/^refs\/(?:heads|remotes)\//u, "")}${facts.mergeStatus === "merged" ? " · 已合入" : facts.mergeStatus === "patchEquivalent" ? " · 已找到等价补丁" : ""}`]);
     const linked = facts.checkedOutBy.filter(worktree => !worktree.isMain);
     rows.push(["worktree", linked.length ? linked.map(worktree => worktree.path).join("、") : "没有 linked worktree 检出它"]);
   }

@@ -242,7 +242,21 @@ pub fn ref_merge_status(
                 match output {
                     Ok(output) if output.status.success() => MergeStatus::Merged,
                     Ok(output) if output.status.code() == Some(1) && !history_boundary_limited => {
-                        MergeStatus::NotMerged
+                        match crate::patch_equivalence::compare(
+                            &git,
+                            Path::new(repository_path),
+                            &base.oid,
+                            &reference.oid,
+                            cancelled,
+                            deadline,
+                        ) {
+                            Ok(true) => MergeStatus::PatchEquivalent,
+                            Ok(false) => MergeStatus::NotMerged,
+                            Err(error @ (GitFailure::Cancelled | GitFailure::Timeout)) => {
+                                return Err(map_git_error(error));
+                            }
+                            Err(_) => MergeStatus::Unavailable,
+                        }
                     }
                     Ok(output) if output.status.code() == Some(1) => MergeStatus::Unavailable,
                     Err(GitFailure::Cancelled) => {
@@ -716,6 +730,195 @@ mod tests {
             &["merge-base", "--is-ancestor", "refs/heads/merged", &base],
         );
         assert!(independent.is_empty());
+    }
+
+    #[test]
+    fn merge_status_recognizes_rewritten_patches_without_changing_repository() {
+        for scenario in [
+            "merge",
+            "squash",
+            "rebase",
+            "cherry-pick",
+            "modified-squash",
+            "partial",
+            "empty",
+        ] {
+            let (_repo, path) = fixture();
+            let root = commit(&path, "root\n", "root");
+            run_git(&path, &["checkout", "-q", "-b", "feature"]);
+            let first = if scenario == "empty" {
+                run_git(&path, &["commit", "-q", "--allow-empty", "-m", "empty"]);
+                run_git(&path, &["rev-parse", "HEAD"])
+            } else {
+                commit(&path, "root\nfirst\n", "first feature change")
+            };
+            let tip = if scenario == "empty" {
+                first.clone()
+            } else {
+                commit(&path, "root\nfirst\nsecond\n", "second feature change")
+            };
+            run_git(&path, &["checkout", "-q", "main"]);
+            fs::write(path.join("unrelated.txt"), "main advanced\n").unwrap();
+            run_git(&path, &["add", "unrelated.txt"]);
+            run_git(&path, &["commit", "-q", "-m", "base advanced"]);
+            match scenario {
+                "merge" => {
+                    run_git(&path, &["merge", "-q", "--no-ff", "feature", "-m", "merge"]);
+                }
+                "squash" | "modified-squash" => {
+                    run_git(&path, &["merge", "-q", "--squash", "feature"]);
+                    if scenario == "modified-squash" {
+                        fs::write(path.join("extra.txt"), "additional changes while merging\n")
+                            .unwrap();
+                        run_git(&path, &["add", "extra.txt"]);
+                    }
+                    run_git(
+                        &path,
+                        &["commit", "-q", "-m", "squashed with different message"],
+                    );
+                }
+                "cherry-pick" => {
+                    run_git(&path, &["cherry-pick", &first, &tip]);
+                }
+                "partial" => {
+                    run_git(&path, &["cherry-pick", &first]);
+                }
+                "rebase" => {
+                    run_git(&path, &["checkout", "-q", "-b", "rebased", "feature"]);
+                    run_git(&path, &["rebase", "main"]);
+                    run_git(&path, &["checkout", "-q", "main"]);
+                    run_git(&path, &["merge", "--ff-only", "rebased"]);
+                }
+                _ => {}
+            }
+            let base = run_git(&path, &["rev-parse", "main"]);
+            run_git(&path, &["update-ref", "refs/remotes/origin/main", &base]);
+            let discovered = discover(&path);
+            // Moving live refs after capture must not affect the old comparison.
+            run_git(&path, &["update-ref", "refs/remotes/origin/main", &root]);
+            let before = [
+                run_git(&path, &["show-ref"]),
+                run_git(&path, &["status", "--porcelain=v1"]),
+                run_git(&path, &["count-objects", "-v"]),
+            ];
+            let result = ref_merge_status(
+                &git_path(),
+                &path.to_string_lossy(),
+                discovered.navigation.as_ref().unwrap(),
+                &["refs/heads/feature".into()],
+                discovered.oid_length,
+                false,
+                &AtomicBool::new(false),
+                Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+            let expected = match scenario {
+                "merge" => MergeStatus::Merged,
+                "squash" | "rebase" | "cherry-pick" => MergeStatus::PatchEquivalent,
+                _ => MergeStatus::NotMerged,
+            };
+            assert_eq!(result.statuses[0].status, expected, "{scenario}");
+            assert_eq!(
+                before,
+                [
+                    run_git(&path, &["show-ref"]),
+                    run_git(&path, &["status", "--porcelain=v1"]),
+                    run_git(&path, &["count-objects", "-v"])
+                ]
+            );
+            let cherry = run_git(&path, &["cherry", &base, &tip]);
+            if matches!(scenario, "rebase" | "cherry-pick") {
+                assert_eq!(cherry.lines().count(), 2);
+                assert!(
+                    cherry.lines().all(|line| line.starts_with("- ")),
+                    "{cherry}"
+                );
+            } else if matches!(scenario, "squash" | "modified-squash" | "partial") {
+                assert!(cherry.lines().any(|line| line.starts_with("+ ")));
+            }
+            if matches!(scenario, "squash" | "modified-squash") {
+                use std::io::Write;
+                use std::process::Stdio;
+                let independent_id = |patch: String| {
+                    let mut child = Command::new("git")
+                        .args(["patch-id", "--stable"])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    child
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(patch.as_bytes())
+                        .unwrap();
+                    let output = child.wait_with_output().unwrap();
+                    assert!(output.status.success());
+                    String::from_utf8(output.stdout)
+                        .unwrap()
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                };
+                let aggregate = independent_id(run_git(&path, &["diff", &root, &tip]));
+                let base_patch = independent_id(run_git(&path, &["show", "--format=", &base]));
+                assert_eq!(aggregate == base_patch, scenario == "squash");
+            }
+        }
+    }
+
+    #[test]
+    fn patch_comparison_limits_and_cancellation_are_inconclusive() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let (_repo, path) = fixture();
+        let root = commit(&path, "root\n", "root");
+        let mut input = String::new();
+        for index in 0..513 {
+            input.push_str("commit refs/heads/large\ncommitter Test <test@example.test> 1700000000 +0000\ndata 5\nempty\n");
+            if index == 0 {
+                input.push_str(&format!("from {root}\n"));
+            }
+            input.push('\n');
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let discovered = discover(&path);
+        let result = ref_merge_status(
+            &git_path(),
+            &path.to_string_lossy(),
+            discovered.navigation.as_ref().unwrap(),
+            &["refs/heads/large".into()],
+            discovered.oid_length,
+            false,
+            &AtomicBool::new(false),
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(result.statuses[0].status, MergeStatus::Unavailable);
+        let git = ReadOnlyGit::new(git_path()).unwrap();
+        let cancelled = crate::patch_equivalence::compare(
+            &git,
+            &path,
+            &root,
+            &root,
+            &AtomicBool::new(true),
+            Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(matches!(cancelled, Err(GitFailure::Cancelled)));
     }
 
     #[test]
