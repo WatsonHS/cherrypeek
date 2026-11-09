@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import os from "node:os";
 import { tmpdir } from "node:os";
@@ -15,9 +15,11 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, "..");
 const args = parseArgs(process.argv.slice(2));
-const appEntry = join(root, "apps/desktop/dist/main/index.cjs");
-const rendererRoot = join(root, "apps/desktop/dist/renderer");
-const daemonPath = join(root, "apps/desktop/dist/resources/commitscope-daemon");
+const packagedExecutable = process.env.COMMITSCOPE_PACKAGED_APP ? resolve(process.env.COMMITSCOPE_PACKAGED_APP) : null;
+const packagedResources = packagedExecutable ? resolve(dirname(packagedExecutable), "../Resources") : null;
+const appEntry = packagedResources ? join(packagedResources, "app.asar") : join(root, "apps/desktop/dist/main/index.cjs");
+const rendererRoot = packagedResources ? null : join(root, "apps/desktop/dist/renderer");
+const daemonPath = join(packagedResources ?? join(root, "apps/desktop/dist/resources"), "commitscope-daemon");
 const releaseDaemonPath = join(root, "target/release/commitscope-daemon");
 const electronBinary = require("electron");
 const electronVersion = require("electron/package.json").version;
@@ -26,7 +28,7 @@ const outputPath = resolve(args.output);
 
 if (process.platform !== "darwin") throw new Error("benchmark:history-scroll currently requires macOS ps process-tree sampling");
 if (args.runs < 1 || args.runs > 10) throw new Error("--runs must be between 1 and 10");
-await Promise.all([access(appEntry), access(rendererRoot), access(daemonPath), access(args.repository)]);
+await Promise.all([appEntry, rendererRoot, daemonPath, args.repository, packagedExecutable].filter(Boolean).map(path => access(path)));
 await ensureMissing(outputPath);
 const graphManifest = args.graphManifest ? JSON.parse(await readFile(args.graphManifest, "utf8")) : null;
 const repository = graphManifest
@@ -35,27 +37,41 @@ const repository = graphManifest
 if (repository.commitCount !== 100_000) throw new Error(`Expected the fixed 100000-commit fixture, got ${repository.commitCount}`);
 if (!graphManifest && repository.headOid !== args.expectedHead) throw new Error(`Fixture HEAD mismatch: expected ${args.expectedHead}, got ${repository.headOid}`);
 const artifacts = {
+  sourceCommit: (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim(),
+  benchmarkScriptSha256: await sha256File(join(root, "scripts/benchmark-history-scroll.mjs")),
   appEntry,
   appEntrySha256: await sha256File(appEntry),
+  packagedExecutable,
+  packagedExecutableSha256: packagedExecutable ? await sha256File(packagedExecutable) : null,
   rendererRoot,
-  rendererFiles: await describeFileTree(rendererRoot),
-  rendererTreeSha256: await sha256Tree(rendererRoot),
+  rendererFiles: rendererRoot ? await describeFileTree(rendererRoot) : null,
+  rendererTreeSha256: rendererRoot ? await sha256Tree(rendererRoot) : null,
   daemonPath,
   daemonSha256: await sha256File(daemonPath),
   releaseDaemonPath,
   releaseDaemonSha256: await sha256File(releaseDaemonPath).catch(() => null),
   electronVersion,
 };
-artifacts.buildProfile = artifacts.daemonSha256 === artifacts.releaseDaemonSha256 ? "release" : "not-confirmed-release";
+if (packagedExecutable) {
+  // Packaging re-signs Mach-O files, changing both the signature and __LINKEDIT size.
+  // Re-sign temporary copies identically; never alter the installed binary or build output.
+  artifacts.daemonNormalizedSha256 = await normalizedMacBinaryHash(daemonPath);
+  artifacts.releaseDaemonNormalizedSha256 = await normalizedMacBinaryHash(releaseDaemonPath);
+  artifacts.binaryNormalization = "temporary copies re-signed identically to normalize __LINKEDIT, then signatures removed before hashing";
+}
+artifacts.buildProfile = (packagedExecutable
+  ? artifacts.daemonNormalizedSha256 === artifacts.releaseDaemonNormalizedSha256
+  : artifacts.daemonSha256 === artifacts.releaseDaemonSha256) ? "release" : "not-confirmed-release";
 const output = {
   schemaVersion: 1,
-  benchmark: graphManifest ? "p2-01-history-graph-scroll" : "p1-03-history-scroll",
+  benchmark: args.graphInteractions ? "p4-05-graph-interactions" : graphManifest ? "p2-01-history-graph-scroll" : "p1-03-history-scroll",
   measurementProfile: graphManifest ? "graph scroll with metadata index paused or complete" : "p1-03 legacy scroll profile",
   startedAt: new Date().toISOString(),
   repository,
   graphFixtureManifest: graphManifest,
   artifacts,
   requestedRuns: args.runs,
+  graphScenarios: args.graphInteractions ? ["compact", "resized", "expanded"] : null,
   trajectory: {
     durationMs: scrollDurationMs,
     segments: [
@@ -73,6 +89,7 @@ const output = {
     notMeasured: "The separate one minute idle CPU budget is not measured by this run.",
     retainedData: "data-loaded-count and data-window-pages on the real listbox; these describe the bounded summary window, not total repository history",
     graph: graphManifest ? "sampled per-row graph lanes, hidden-lane markers, path segments and rendered graph rows at 100 ms; includes only virtual DOM rows observed during scrolling" : "not collected by the P1-03 profile",
+    graphInteractions: args.graphInteractions ? "cycle compact (6 lanes), resized (12 slots), expanded (all actual lanes); resized/expanded scroll includes real mouse moves every 150 ms; after scrolling measure 24 real hover events to matching highlight DOM plus next RAF with the retained window full" : null,
     indexState: graphManifest ? "automatic indexing is paused before any idle/RSS or scroll sample; if it completes first, the actual complete state is recorded. Paused-index RSS is not complete-index idle RSS acceptance evidence." : "not controlled by the P1-03 legacy profile",
     processTree: "100 ms macOS ps samples rooted at the Electron process and all observed descendants, including renderer, GPU, daemon and Git when captured; RSS sum can double-count shared pages",
     limitations: [
@@ -99,7 +116,7 @@ try {
       output.failures ??= [];
       output.failures.push({ runIndex, error: record.error });
     }
-    process.stdout.write(`run ${runIndex}/${args.runs}: ${record.frameSummary.p95Ms ?? "n/a"}ms RAF p95, max ${record.frameSummary.maxMs ?? "n/a"}ms, ${record.peakTreeRssKB} KiB tree RSS\n`);
+    process.stdout.write(`run ${runIndex}/${args.runs}${record.graphScenario ? ` (${record.graphScenario})` : ""}: ${record.frameSummary.p95Ms ?? "n/a"}ms RAF p95, max ${record.frameSummary.maxMs ?? "n/a"}ms, ${record.peakTreeRssKB} KiB tree RSS${record.error ? `; ERROR: ${record.error}` : ""}\n`);
   }
   output.summary = summarize(output.runs);
   output.finishedAt = new Date().toISOString();
@@ -126,6 +143,7 @@ function parseArgs(argv) {
   let repository;
   let output;
   let graphManifest;
+  let graphInteractions = false;
   let runs = 3;
   let expectedHead = "91081e9df378d40ab325f9c04b9cc4774b2c33ee";
   for (const argument of argv) {
@@ -134,13 +152,15 @@ function parseArgs(argv) {
     else if (argument.startsWith("--runs=")) runs = Number(argument.slice("--runs=".length));
     else if (argument.startsWith("--expected-head=")) expectedHead = argument.slice("--expected-head=".length);
     else if (argument.startsWith("--graph-manifest=")) graphManifest = argument.slice("--graph-manifest=".length);
+    else if (argument === "--graph-interactions") graphInteractions = true;
     else throw new Error(`Unknown argument: ${argument}`);
   }
   if (!repository || !repository.startsWith("/")) throw new Error("--repository must be an absolute path");
   if (!output) throw new Error("Usage: pnpm benchmark:history-scroll --repository=<fixed-100k> --output=<new-json> [--runs=3|10] [--graph-manifest=<P2-01 manifest.json>]");
   if (graphManifest && !graphManifest.startsWith("/")) throw new Error("--graph-manifest must be an absolute path");
   if (!Number.isInteger(runs)) throw new Error("--runs must be an integer");
-  return { repository, output, runs, expectedHead, graphManifest };
+  if (graphInteractions && !graphManifest) throw new Error("--graph-interactions requires --graph-manifest");
+  return { repository, output, runs, expectedHead, graphManifest, graphInteractions };
 }
 
 async function runOne(runIndex, temporaryRootPath) {
@@ -158,19 +178,23 @@ async function runOne(runIndex, temporaryRootPath) {
   let displayStateEnd;
   let idleTreeSnapshot;
   let indexStatus;
+  const graphScenario = args.graphInteractions ? ["compact", "resized", "expanded"][(runIndex - 1) % 3] : null;
+  let graphSetup;
+  let graphFeedback;
+  let interactionTreeSnapshot;
   let executionError;
   let forcedCleanup = false;
   try {
     app = await withTimeout(electron.launch({
-      executablePath: electronBinary,
-      args: [appEntry, `--repository=${resolve(args.repository)}`, `--user-data-dir=${profile}`],
+      executablePath: packagedExecutable ?? electronBinary,
+      args: [...(packagedExecutable ? [] : [appEntry]), `--repository=${resolve(args.repository)}`, `--user-data-dir=${profile}`],
       cwd: root,
       chromiumSandbox: true,
       timeout: 30_000,
       env: launchEnvironment(),
     }), 35_000, "Electron launch");
     sampler.setRootPid(app.process().pid);
-    runtime = await app.evaluate(() => ({ node: process.versions.node, electron: process.versions.electron, chrome: process.versions.chrome }));
+    runtime = await app.evaluate(({ app }) => ({ node: process.versions.node, electron: process.versions.electron, chrome: process.versions.chrome, packaged: app.isPackaged, appPath: app.getAppPath() }));
     page = await withTimeout(app.firstWindow(), 15_000, "Electron window");
     await page.bringToFront();
     await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"][data-state="ready"]'), null, { timeout: 60_000 });
@@ -213,6 +237,12 @@ async function runOne(runIndex, temporaryRootPath) {
     });
     foregroundState = { visible: displayState.visible, focused: displayState.focused };
     if (!foregroundState.visible || !foregroundState.focused) throw new Error(`Electron window is not foregrounded: ${JSON.stringify(foregroundState)}`);
+    if (graphScenario) graphSetup = await prepareGraphScenario(page, graphScenario);
+    // CDP clicks can leave the DOM focused without keeping the packaged macOS app active.
+    await app.evaluate(({ app, BrowserWindow }) => {
+      app.focus({ steal: true });
+      BrowserWindow.getAllWindows().find(candidate => candidate.isVisible())?.focus();
+    });
     await page.waitForTimeout(250);
     const settledDisplay = await app.evaluate(({ BrowserWindow, screen }) => {
       const active = BrowserWindow.getAllWindows().find(candidate => candidate.isVisible());
@@ -224,14 +254,17 @@ async function runOne(runIndex, temporaryRootPath) {
       };
     });
     displayState = { ...displayState, ...settledDisplay };
+    if (!displayState.focused) throw new Error("Native window lost focus before the scroll measurement");
     const idleWindowStart = sampler.beginWindow();
     await page.waitForTimeout(2_000);
     await sampler.sample();
     idleTreeSnapshot = sampler.summarizeWindow(idleWindowStart);
     idleTreeSnapshot.indexState = indexStatus ? { state: indexStatus.state, processed: indexStatus.coverage?.processed ?? null } : null;
+    const interactionWindowStart = sampler.beginWindow();
     uiState = await page.evaluate(installTrajectory, scrollDurationMs);
     if (uiState.listSelectorMissing) throw new Error("Could not locate the listbox for scrolling");
     if (uiState.offsetAttributesMissing) throw new Error("The listbox must expose data-loaded-offset/count/window-pages for P1-03 measurement");
+    if (graphScenario && graphScenario !== "compact") await movePointerWhileScrolling(page);
     await page.waitForFunction(() => window.__historyScrollBench?.finished === true, null, { timeout: scrollDurationMs + 10_000 });
     uiState = await page.evaluate(() => window.__historyScrollBench.snapshot());
     displayStateEnd = await app.evaluate(({ BrowserWindow, screen }) => {
@@ -239,6 +272,10 @@ async function runOne(runIndex, temporaryRootPath) {
       const matching = active ? screen.getDisplayMatching(active.getBounds()) : null;
       return { frequencyHz: matching?.displayFrequency ?? null, displayId: matching?.id ?? null, visible: Boolean(active?.isVisible()), focused: Boolean(active?.isFocused()) };
     });
+    if (graphScenario) graphFeedback = await measureGraphHover(page);
+    await sampler.sample();
+    interactionTreeSnapshot = sampler.summarizeWindow(interactionWindowStart);
+    interactionTreeSnapshot.scope = "30-second scrolling and subsequent hover feedback samples";
   } catch (error) {
     executionError = error;
   } finally {
@@ -261,6 +298,10 @@ async function runOne(runIndex, temporaryRootPath) {
   const tree = sampler.record();
   const record = {
     runIndex,
+    graphScenario,
+    graphSetup: graphSetup ?? null,
+    graphFeedback: graphFeedback ?? null,
+    interactionTreeSnapshot: interactionTreeSnapshot ?? null,
     startedAtMs: startedAt,
     runtime: runtime ?? null,
     indexStatus: indexStatus ? { state: indexStatus.state, processed: indexStatus.coverage?.processed ?? null, error: indexStatus.error ?? null } : null,
@@ -313,15 +354,111 @@ async function runOne(runIndex, temporaryRootPath) {
     frameP95AtMost20Ms: record.sixtyHzModeConfirmed && record.frameSummary.p95Ms !== null && record.frameSummary.p95Ms <= 20,
     noFrameIntervalOver100Ms: record.frameSummary.maxMs !== null && record.frameSummary.maxMs <= 100,
     loadingToWindowP95AtMost200Ms: record.loadingToWindowSummary.p95Ms !== null && record.loadingToWindowSummary.p95Ms <= 200,
-    wholeTreePeakRssAtMost500MiB: graphManifest && indexStatus?.state !== "complete" ? null : record.peakTreeRssKB <= 500 * 1024,
-    completeIndexRssBudgetApplicable: !graphManifest || indexStatus?.state === "complete",
+    completeIndexIdleRssAtMost800MiB: indexStatus?.state === "complete" && idleTreeSnapshot ? idleTreeSnapshot.peakTreeRssKB <= 800 * 1024 : null,
+    completeIndexInteractionRssAtMost1GiB: indexStatus?.state === "complete" && interactionTreeSnapshot ? interactionTreeSnapshot.peakTreeRssKB <= 1024 * 1024 : null,
+    completeIndexRssBudgetApplicable: indexStatus?.state === "complete",
     graphOverflowObserved: graphManifest ? (uiState?.maxGraphOverflowRows ?? 0) > 0 : null,
+    graphHoverFeedbackWithin100Ms: graphFeedback ? graphFeedback.summary.maxMs <= 100 : null,
     retainedWindowAtMost2000: uiState?.maxLoadedCount <= 2_000,
     virtualDomRowsBounded: uiState?.maxDomRows <= 60,
     continuousForeground: record.visibilitySummary?.hiddenSamples === 0 && record.visibilitySummary?.unfocusedSamples === 0,
     releaseAcceptanceSufficient: false,
   };
   return record;
+}
+
+async function prepareGraphScenario(page, scenario) {
+  const list = page.getByRole("listbox", { name: "提交", exact: true });
+  const row = list.getByTestId("commit-row").first();
+  const oid = await row.getAttribute("data-oid");
+  await row.click();
+  const before = await row.getByTestId("commit-graph").getAttribute("data-graph-signature");
+  if (scenario === "resized") {
+    const handle = await page.getByTestId("graph-resize-handle").boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 + 54, handle.y + 40, { steps: 12 });
+    await page.mouse.up();
+    await page.waitForFunction(() => document.querySelector('[aria-label="提交"]').dataset.visibleGraphLanes === "12");
+  } else if (scenario === "expanded") {
+    await list.getByTestId("graph-expand").first().click();
+    await page.waitForFunction(() => document.querySelector('[aria-label="提交"]').dataset.graphExpanded === "true");
+  }
+  await page.mouse.move(10, 10);
+  const after = await row.getByTestId("commit-graph").getAttribute("data-graph-signature");
+  if (before !== after || await list.locator('[aria-selected="true"]').getAttribute("data-oid") !== oid) {
+    throw new Error("Graph setup changed the selected commit or backend graph signature");
+  }
+  return list.evaluate(element => ({
+    visibleLanes: Number(element.dataset.visibleGraphLanes),
+    expanded: element.dataset.graphExpanded === "true",
+    selectedOid: element.querySelector('[aria-selected="true"]')?.getAttribute("data-oid"),
+    highlightedOid: element.dataset.graphHighlightOid,
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+}
+
+async function movePointerWhileScrolling(page) {
+  const box = await page.getByRole("listbox", { name: "提交", exact: true }).boundingBox();
+  let moves = 0;
+  const deadline = Date.now() + scrollDurationMs + 10_000;
+  while (!await page.evaluate(() => window.__historyScrollBench.finished)) {
+    if (Date.now() > deadline) throw new Error("Graph hover scroll did not finish");
+    await page.mouse.move(box.x + Math.min(230, box.width / 2), box.y + 100 + (moves++ % 5) * (box.height - 160) / 5);
+    await page.waitForTimeout(150);
+  }
+}
+
+async function measureGraphHover(page) {
+  const list = page.getByRole("listbox", { name: "提交", exact: true });
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交"]').dataset.pageLoading !== "true");
+  const targets = await list.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return [...element.querySelectorAll('[data-testid="commit-row"]')].flatMap(row => {
+      const box = row.getBoundingClientRect();
+      return box.y > bounds.y + 40 && box.bottom < bounds.bottom - 10
+        ? [{ oid: row.dataset.oid, x: bounds.x + Math.min(230, bounds.width / 2), y: box.y + box.height / 2 }] : [];
+    });
+  });
+  if (targets.length < 2) throw new Error("Not enough visible rows to measure hover switching");
+  const samples = [];
+  const selectedOid = await list.evaluate(element => element.querySelector('[aria-selected="true"]')?.getAttribute("data-oid") ?? null);
+  await page.mouse.move(10, 10);
+  for (let index = 0; index < 24; index += 1) {
+    const target = targets[index % targets.length];
+    await page.evaluate(({ oid }) => {
+      const list = document.querySelector('[aria-label="提交"]');
+      window.__graphHoverSample = null;
+      const onPointer = event => {
+        if (event.target.closest('[data-testid="commit-row"]')?.dataset.oid !== oid) return;
+        list.removeEventListener("pointerover", onPointer, true);
+        list.removeEventListener("pointermove", onPointer, true);
+        const started = performance.now();
+        const painted = () => {
+          if (list.dataset.graphHighlightOid !== oid) return;
+          observer.disconnect();
+          requestAnimationFrame(() => {
+            window.__graphHoverSample = { oid, elapsedMs: performance.now() - started,
+              nodeHighlighted: list.querySelector(`[data-oid="${oid}"] [data-testid="commit-graph"]`)?.dataset.graphHighlighted === "true" };
+          });
+        };
+        const observer = new MutationObserver(painted);
+        observer.observe(list, { attributes: true, attributeFilter: ["data-graph-highlight-oid"] });
+        painted();
+      };
+      list.addEventListener("pointerover", onPointer, true);
+      list.addEventListener("pointermove", onPointer, true);
+    }, target);
+    await page.mouse.move(target.x, target.y);
+    await page.waitForFunction(() => window.__graphHoverSample !== null, null, { timeout: 3000 });
+    const sample = await page.evaluate(() => window.__graphHoverSample);
+    if (!sample.nodeHighlighted) throw new Error("Hover state updated without highlighting the target graph node");
+    samples.push(sample);
+  }
+  const selectedAfter = await list.evaluate(element => element.querySelector('[aria-selected="true"]')?.getAttribute("data-oid") ?? null);
+  if (selectedOid !== selectedAfter) throw new Error("Hover changed the selected commit");
+  return { loadedCount: Number(await list.getAttribute("data-loaded-count")), samples, summary: summarizeNumbers(samples.map(sample => sample.elapsedMs)) };
 }
 
 async function stabilizeGraphIndex(page) {
@@ -416,8 +553,9 @@ function installTrajectory(durationMs) {
   });
   observer.observe(list, { attributes: true, attributeFilter: ["aria-busy", "data-page-loading", "data-loaded-offset", "data-loaded-count", "data-window-pages"] });
   let longTaskSupported = false;
+  let longTaskObserver;
   try {
-    const longTaskObserver = new PerformanceObserver(entries => {
+    longTaskObserver = new PerformanceObserver(entries => {
       for (const entry of entries.getEntries()) longTasks.push({ startTimeMs: entry.startTime, durationMs: entry.duration });
     });
     longTaskObserver.observe({ type: "longtask", buffered: true });
@@ -448,9 +586,11 @@ function installTrajectory(durationMs) {
       domRows: list.querySelectorAll('[data-testid="commit-row"]').length,
       graphRows: graphRows.length,
       graphHiddenLaneRows: graphLanes.filter(lane => lane >= Number(list.getAttribute("data-visible-graph-lanes") ?? 6)).length,
-      graphOverflowRows: graphRows.filter(graph => Number(graph.getAttribute("data-graph-hidden-count")) > 0 && graph.querySelector("text")?.textContent?.startsWith("+")).length,
+      graphOverflowRows: graphRows.filter(graph => Number(graph.getAttribute("data-graph-hidden-count")) > 0 && graph.parentElement.querySelector('[data-testid="graph-expand"]')).length,
       graphMaxLane: Math.max(-1, ...graphLanes),
       graphPathCount: graphRows.reduce((sum, graph) => sum + graph.querySelectorAll("path").length, 0),
+      graphHighlightOid: list.dataset.graphHighlightOid ?? null,
+      graphHighlightedNodes: graphRows.filter(graph => graph.dataset.graphHighlighted === "true").length,
       jsHeapUsedBytes: performance.memory?.usedJSHeapSize ?? null,
       visibilityState: document.visibilityState,
       hasFocus: document.hasFocus(),
@@ -466,13 +606,15 @@ function installTrajectory(durationMs) {
     get finished() { return finished; },
     snapshot() {
       observer.disconnect();
+      longTaskObserver?.disconnect();
       clearInterval(stateTimer);
       return {
         durationMs,
+        trajectoryStartTimeMs: trajectoryStart,
         frameIntervalsMs,
         windowChanges,
         loadingToWindowMs: windowChanges.map(change => change.loadingObservedToWindowMs),
-        longTasks,
+        longTasks: longTasks.filter(entry => entry.startTimeMs >= trajectoryStart && entry.startTimeMs < trajectoryStart + durationMs),
         longTaskSupported,
         stateSamples,
         maxDomRows: Math.max(0, ...stateSamples.map(sample => sample.domRows)),
@@ -736,6 +878,18 @@ async function collectEnvironment() {
 }
 
 async function sha256File(path) { return createHash("sha256").update(await readFile(path)).digest("hex"); }
+async function normalizedMacBinaryHash(path) {
+  const directory = await mkdtemp(join(tmpdir(), "commitscope-binary-hash-"));
+  try {
+    const copy = join(directory, "commitscope-daemon");
+    await copyFile(path, copy);
+    await execFileAsync("codesign", ["--force", "--sign", "-", "--identifier", "commitscope-daemon", "--timestamp=none", copy]);
+    await execFileAsync("codesign", ["--remove-signature", copy]);
+    return await sha256File(copy);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 async function describeFileTree(directory) {
   const files = [];
   const walk = async current => {

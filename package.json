@@ -43,6 +43,7 @@
     "test:smoke:pages:stand-in": "node tests/smoke/pages-smoke.mjs --stand-in",
     "fixtures:graph-benchmark": "node scripts/generate-graph-benchmark-fixture.mjs",
     "benchmark:history-scroll:graph": "node scripts/benchmark-history-scroll.mjs",
+    "benchmark:graph-interactions": "node scripts/benchmark-history-scroll.mjs --graph-interactions",
     "benchmark:history": "node scripts/benchmark-history.mjs",
     "benchmark:history-scroll": "node scripts/benchmark-history-scroll.mjs",
     "test:renderer": "node scripts/test-renderer.mjs"
