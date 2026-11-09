@@ -349,11 +349,28 @@ impl HistoryState {
         deadline: Instant,
         emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<T, PreviewError> {
+        let mut oid = params.oid.to_ascii_lowercase();
+        if oid.len() < 4 || oid.len() > discovered.oid_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid_request("提交 hash 至少需要 4 位十六进制字符"));
+        }
+        if oid.len() < discovered.oid_length {
+            let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+            let output = git.run(
+                Path::new(&discovered.info.path),
+                &[string_arg("rev-parse"), string_arg("--verify"), string_arg("--end-of-options"), string_arg(format!("{oid}^{{commit}}"))],
+                None, 16 * 1024, cancelled, deadline,
+            ).map_err(map_git_failure)?;
+            let resolved = String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase();
+            if !output.status.success() || !resolved.starts_with(&oid) {
+                return Err(invalid_request("找不到唯一的提交，请检查或补全 hash"));
+            }
+            oid = resolved;
+        }
         self.with_located_target(
             executable,
             discovered,
             LocatedCommit {
-                oid: params.oid.clone(),
+                oid,
                 page_offset: None,
             },
             params.page_size,
@@ -2059,6 +2076,12 @@ mod tests {
         let first = read_page(&state, &discovered, None, 2).expect("first page");
         let target = run_git(&path, &["rev-parse", "HEAD~8"]);
         let located = locate_page(&state, &discovered, &target, 2).expect("locate commit");
+        let prefix = locate_page(&state, &discovered, &target[..8].to_ascii_uppercase(), 2).expect("locate abbreviated commit without an index");
+        assert_eq!(prefix.offset, located.offset);
+        assert!(prefix.commits.iter().any(|commit| commit.commit.oid == target));
+        for invalid in ["abc", "HEAD~1", "00000000"] {
+            assert_eq!(locate_page(&state, &discovered, invalid, 2).unwrap_err().code, ErrorCode::InvalidRequest);
+        }
         assert_eq!(located.offset, 8);
         assert!(
             located

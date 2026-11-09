@@ -22,6 +22,7 @@ import { RecentList, storeStatusText, type RecentState } from "./recent-reposito
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
+import { OPEN_COMMAND_PALETTE } from "./command-palette.js";
 
 const NAV_CLASS = "flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent";
 const HINT_CLASS = "flex h-7 max-w-[clamp(96px,14vw,200px)] items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95";
@@ -111,6 +112,8 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
         onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} /> : pageSearch}
     </TopBarSearch>
     <ShortcutGuide />
+    <Button variant="ghost" size="sm" title="快速跳转（⌘K / Ctrl+K）" aria-label="快速跳转" className="shrink-0 px-2 font-mono text-xs text-fg3"
+      onClick={() => window.dispatchEvent(new Event(OPEN_COMMAND_PALETTE))}>{/Mac|iPhone|iPad/u.test(navigator.platform) ? "⌘K" : "Ctrl+K"}</Button>
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
@@ -211,6 +214,7 @@ function ShortcutGuide(): React.JSX.Element {
   const altCmd = mac ? "⌥⌘" : "Ctrl+Alt+";
   const groups: { title: string; rows: [string, string][] }[] = [
     { title: "全局", rows: [
+      ["快速跳转", `${cmd}K`],
       ["切换页面：提交 / 文件 / 工作区", `${cmd}1 / 2 / 3`],
       ["后退 / 前进", `${cmd}[ / ]`],
       ["聚焦搜索", `${cmd}F`],

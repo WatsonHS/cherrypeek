@@ -29,6 +29,7 @@
   --skel: #ecebe6;
   --shadow-selected: 0 1px 2px rgba(20, 20, 18, 0.06), 0 4px 14px rgba(20, 20, 18, 0.07);
   --shadow-pop: 0 16px 40px rgba(20, 20, 18, 0.16);
+  --scrim: rgba(20, 20, 18, 0.32);
   --l0: #2b59d9; --l1: #d0661a; --l2: #8a4fd0; --l3: #12806a; --l4: #c2366b; --l5: #8a7400;
   --add: #1c6b3e; --del: #a8281d; --add-bg: #eaf6ee; --del-bg: #fcedeb; --hunk-bg: #f0f3fa;
   --syn-keyword: #6e2fad; --syn-string: #0a5e52; --syn-number: #8a4100;
@@ -73,6 +74,7 @@
   /* On a near-black ground a shadow does not show; a 1px ring marks the selected row. */
   --shadow-selected: 0 0 0 1px #4a4c46, 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.5);
   --l0: #8ba8ff; --l1: #f0a15e; --l2: #c29bf5; --l3: #4fc7a9; --l4: #f27aa6; --l5: #d9c24a;
   --add: #86d9a2; --del: #ff9c93; --add-bg: #14261a; --del-bg: #2d1717; --hunk-bg: #1c2233;
   --syn-keyword: #d2b0fa; --syn-string: #7adbc8; --syn-number: #f5b077;

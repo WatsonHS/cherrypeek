@@ -516,7 +516,8 @@ export class RepositorySessionStore {
         return false;
       }
       const page = result.value;
-      if (!validHistoryPage(page, this.view.pageSize) || !page.commits.some(commit => commit.oid === oid)) {
+      const targets = page.commits.filter(commit => commit.oid.startsWith(oid.toLowerCase()));
+      if (!validHistoryPage(page, this.view.pageSize) || targets.length !== 1) {
         this.update({ ...this.view, pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
           pageError: { code: "PROTOCOL_ERROR", message: "定位结果没有包含目标提交" }, pageErrorKind: "location", retryLocationOid: oid });
         return false;
@@ -524,8 +525,8 @@ export class RepositorySessionStore {
       this.pages = [page];
       this.activePageCursor = page.cursor;
       this.markerUnavailable = page.newSinceLastSeenStatus === "unavailable";
-      this.selectedOid = oid;
-      this.viewportAnchorOid = oid;
+      this.selectedOid = targets[0]!.oid;
+      this.viewportAnchorOid = targets[0]!.oid;
       this.applyWindow(session, this.pages, "ready", {
         pageRevision: this.view.pageRevision + 1,
         oldSelectedCommit: null,

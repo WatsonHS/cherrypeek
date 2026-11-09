@@ -89,6 +89,8 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 
 ## 本地运行
 
+按 `⌘K`（Windows 快捷键为 `Ctrl+K`）或点击顶栏的快速跳转按钮，可输入提交 hash、分支、标签、worktree，或搜索打开仓库、切换页面、复制提交等命令。短 hash 至少 4 位，直接在当前快照范围内定位；不需要等待索引完成。
+
 当前验证环境为 macOS 27.0.1 / Apple Silicon，使用 Node 26.0.0、pnpm 10.28.1、Rust 1.95.0；版本分别由 `.node-version`、`packageManager` 和 `rust-toolchain.toml` 固定。准备这些工具后，在项目根目录执行：
 
 ```sh

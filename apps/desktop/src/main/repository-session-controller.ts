@@ -334,8 +334,8 @@ export class RepositorySessionController {
     const intent = ++this.pageIntent;
     const session = this.requireHistoryCapability();
     if (!isRecord(params) || !hasExactKeys(params, ["oid", "pageSize"]) ||
-      typeof params.oid !== "string" || !/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) ||
-      params.oid.length !== (session.repository.objectFormat === "sha1" ? 40 : 64) ||
+      typeof params.oid !== "string" || !/^[0-9a-fA-F]{4,64}$/.test(params.oid) ||
+      params.oid.length > (session.repository.objectFormat === "sha1" ? 40 : 64) ||
       !Number.isInteger(params.pageSize) || (params.pageSize as number) < 1 || (params.pageSize as number) > MAX_HISTORY_PAGE) {
       throw new ProtocolClientError("INVALID_REQUEST", "历史定位参数无效");
     }
@@ -2173,7 +2173,7 @@ function completeHistoryPage(
   const page = state.page;
   if (!page || !state.sawTerminalPage || !coverage.complete || coverage.processed !== state.commits.length ||
     (nextCursor !== null && !page.hasMore) || (nextCursor === null && page.hasMore) ||
-    (expectedOid !== undefined && !state.commits.some(commit => commit.oid === expectedOid))) {
+    (expectedOid !== undefined && state.commits.filter(commit => commit.oid.startsWith(expectedOid)).length !== 1)) {
     throw invalidSessionResponse("核心返回了不完整或不一致的历史页");
   }
   return { ...page, commits: state.commits, nextCursor };

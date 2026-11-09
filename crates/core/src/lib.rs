@@ -460,7 +460,7 @@ pub struct ReadHistoryPageParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocateCommitParams {
-    #[schemars(length(min = 40, max = 64))]
+    #[schemars(length(min = 4, max = 64))]
     pub oid: String,
     #[schemars(range(min = 1, max = 500))]
     pub page_size: u16,

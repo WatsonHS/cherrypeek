@@ -254,7 +254,7 @@
       "properties": {
         "oid": {
           "maxLength": 64,
-          "minLength": 40,
+          "minLength": 4,
           "type": "string"
         },
         "pageSize": {

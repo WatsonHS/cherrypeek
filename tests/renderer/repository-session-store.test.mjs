@@ -149,6 +149,18 @@ async function openReady(fake, store, id, pageOptions = {}) {
   return session;
 }
 
+test("a short hash location accepts the canonical commit returned by the core", async () => {
+  const fake = fakeApi();
+  const store = new RepositorySessionStore(fake.api);
+  const session = await openReady(fake, store, "a");
+  const target = { ...makePreview(session).commits[0], oid: "abcd".repeat(10) };
+  const locating = store.locateCommit("ABCDABCD");
+  await fake.answer("locateCommit", ok(makeHistoryPage(session, { commits: [target] })));
+  assert.equal(await locating, true);
+  assert.equal(store.getView().commits[0].oid, target.oid);
+  assert.equal(store.getView().pageError, null);
+});
+
 test("open shows the session once its first page arrives", async () => {
   const fake = fakeApi();
   const store = new RepositorySessionStore(fake.api);

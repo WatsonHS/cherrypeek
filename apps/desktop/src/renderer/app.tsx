@@ -38,6 +38,8 @@ import { inputDateRange } from "./lib/search-date.js";
 import { CommitDetailStore } from "./lib/commit-detail-store.js";
 import { Button } from "./components/ui/button.js";
 import { HandoffDialog } from "./components/handoff-dialog.js";
+import { CommandPalette } from "./components/command-palette.js";
+import type { PaletteAction } from "./lib/command-palette.js";
 
 export interface RepositoryActions {
   path: string;
@@ -496,7 +498,7 @@ export function App(): React.JSX.Element {
     setSelectedOid(undefined);
     const found = await store.locateCommit(oid);
     if (intent !== locationIntent.current) return;
-    if (found) setSelectedOid(oid);
+    if (found) setSelectedOid(store.getView().commits.find(commit => commit.oid.startsWith(oid.toLowerCase()))?.oid);
     const pageError = store.getView().pageError;
     setHistoryLocation(current => current?.sessionKey === sessionKey ? {
       ...current, loading: false, error: found ? null : pageError?.code === "SCOPE_UNAVAILABLE"
@@ -950,7 +952,7 @@ export function App(): React.JSX.Element {
     }
     selectionIntent.invalidate();
     const found = await store.locateCommit(oid);
-    if (found) setSelectedOid(oid);
+    if (found) setSelectedOid(store.getView().commits.find(commit => commit.oid.startsWith(oid.toLowerCase()))?.oid);
   }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
   const openCommitFromFiles = React.useCallback(async (oid: string) => {
     setJumpOrigin(recordJump());
@@ -1121,6 +1123,23 @@ export function App(): React.JSX.Element {
   ].filter((message): message is string => Boolean(message));
   const notice = view.notice;
   const displayedOid = searchView.active ? searchView.selectedOid : selectedOid;
+  const paletteSelectedOid = page === "files"
+    ? filesView.tab === "history" ? filesView.selectedCommit : filesView.version?.commit ?? null
+    : page === "commits" ? displayedOid ?? null : null;
+  const executePalette = (action: PaletteAction) => {
+    if (action.kind === "commit") {
+      setJumpOrigin(recordJump());
+      setPage("commits");
+      void showCommit(action.oid);
+    } else if (action.kind === "scope") {
+      if (page === "workspace") changePage("commits");
+      void actions.switchScope(action.scope);
+    } else if (action.command === "openRepository") {
+      void actions.choose();
+    } else if (action.command === "copyCommit") {
+      if (paletteSelectedOid) void run(() => window.commitScope.copyText(paletteSelectedOid));
+    } else changePage(action.command);
+  };
   const displayedCommit = searchView.active
     ? searchView.window?.commits.find(commit => commit.oid === displayedOid) ?? searchView.oldSelectedCommit
     : null;
@@ -1297,6 +1316,12 @@ export function App(): React.JSX.Element {
           await searchStore.retry();
         }
       }} />
+    <CommandPalette sessionKey={currentSessionKey} loading={view.navigationLoading} error={view.navigationError?.message}
+      context={{ refs: view.navigation?.refs ?? view.refs, worktrees: view.navigation?.worktrees ?? [],
+        repositoryReady: view.state === "ready" && !view.opening && !view.refreshing && !view.scopeSwitching,
+        coreReady: ready, filesAvailable, workspaceAvailable: !workspaceUnavailable,
+        selectedOid: paletteSelectedOid, oidLength: view.repository?.objectFormat === "sha256" ? 64 : 40 }}
+      onLoadNavigation={() => { if (!store.getView().navigation) void loadNavigation(); }} onExecute={executePalette} />
     <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} request={handoffRequest} sessionKey={detailSessionKey}
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />

@@ -556,7 +556,7 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.cursor === null || typeof params.cursor === "string") &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (method === "locateCommit" && isRecord(params) && hasExactKeys(params, ["oid", "pageSize"]) &&
-    typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid) &&
+    typeof params.oid === "string" && /^[0-9a-fA-F]{4,64}$/.test(params.oid) &&
     Number.isInteger(params.pageSize) && (params.pageSize as number) >= 1 && (params.pageSize as number) <= 500) return true;
   if (method === "locateHistoryDate" && isRecord(params) &&
     hasExactKeys(params, params.knownCursors === undefined ? ["beforeTimestamp", "pageSize"] : ["beforeTimestamp", "pageSize", "knownCursors"]) &&

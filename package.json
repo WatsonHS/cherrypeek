@@ -12,6 +12,7 @@
     "build:release": "node scripts/build.mjs --release",
     "package:mac": "node scripts/package-macos.mjs",
     "test:smoke:package": "node tests/smoke/packaged-app-smoke.mjs",
+    "test:smoke:command-palette": "node tests/smoke/command-palette-smoke.mjs",
     "dev": "node scripts/launch.mjs --build",
     "start": "node scripts/launch.mjs",
     "test:smoke": "node tests/smoke/electron-smoke.mjs",

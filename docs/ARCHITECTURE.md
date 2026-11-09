@@ -82,6 +82,8 @@ P0-03 的仓库预览契约见[代码级计划](implementation/p0-03-repository-
 
 ## 查询接口与数据模型
 
+P4-07 的快速跳转仅在打开时从当前导航快照生成有界结果，不引入新的仓库读取接口。`locateCommit` 接受 4 位以上十六进制 OID 前缀，Rust 使用只读 `rev-parse --verify --end-of-options <prefix>^{commit}` 解析，确认结果匹配前缀后沿用当前范围的历史定位；完整 OID 沿用原路径。返回页仍包含完整 OID，main 验证唯一匹配，renderer 用完整值更新选择。缺失、歧义、范围外与取消不替换当前历史页。
+
 首批接口：`openRepository`、`closeRepository`、`listRefs`、`listWorktrees`、`readHistoryPage`、`searchCommits`、`getActivity`、`getCommit`、`listChangedFiles`、`readDiff`、`locateCommit`、`refreshRepository`、`cancelRequest`，以及界面 v3 需要的 `refMergeStatus`、`branchesContaining`（见下方“引用关系”）、`diffRefSnapshots`（见“上次查看与更新明细”）和 `getHandoffFacts`（见“交给 Agent”）。
 
 - `Repository` 分开记录规范化目录、gitDir、commonDir、worktreeId、objectFormat 和能力边界。linked worktree 的共享对象与独立 HEAD 不能混为同一视图。[Git worktree 文档](https://git-scm.com/docs/git-worktree)。
