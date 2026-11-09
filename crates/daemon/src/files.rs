@@ -571,6 +571,8 @@ fn history_key(commit: &str, kind: SearchPathKind, path_hex: &str, message: &str
 #[derive(Debug, Default)]
 struct HistoryRecord {
     oid: String,
+    /// Set only for merges; their change is read separately against this parent.
+    first_parent_of_merge: Option<String>,
     statuses: Vec<u8>,
     additions: u64,
     deletions: u64,
@@ -578,13 +580,16 @@ struct HistoryRecord {
 }
 
 fn parse_history_log(bytes: &[u8], oid_length: usize) -> FilesResult<Vec<HistoryRecord>> {
+    let malformed = || detail_error(ErrorCode::GitError, "Malformed history record", false);
     let mut records: Vec<HistoryRecord> = Vec::new();
     for line in bytes.split(|byte| *byte == b'\n') {
-        if let Some(oid) = line.strip_prefix(&[1u8]) {
-            let oid = std::str::from_utf8(oid).map_err(|_| {
-                detail_error(ErrorCode::GitError, "Malformed history record", false)
-            })?;
-            if oid.len() != oid_length {
+        if let Some(header) = line.strip_prefix(&[1u8]) {
+            // "\x01<oid> <parent> <parent>..."
+            let header = std::str::from_utf8(header).map_err(|_| malformed())?;
+            let mut fields = header.split(' ').filter(|field| !field.is_empty());
+            let oid = fields.next().ok_or_else(malformed)?;
+            let parents: Vec<&str> = fields.collect();
+            if oid.len() != oid_length || parents.iter().any(|parent| parent.len() != oid_length) {
                 return Err(detail_error(
                     ErrorCode::GitError,
                     "Malformed history object ID",
@@ -593,45 +598,121 @@ fn parse_history_log(bytes: &[u8], oid_length: usize) -> FilesResult<Vec<History
             }
             records.push(HistoryRecord {
                 oid: oid.to_owned(),
+                first_parent_of_merge: (parents.len() > 1).then(|| parents[0].to_owned()),
                 ..HistoryRecord::default()
             });
             continue;
         }
-        let Some(record) = records.last_mut() else {
-            continue;
-        };
-        if line.first() == Some(&b':') {
-            // ":<old mode> <new mode> <old oid> <new oid> <status>\t<path>"
-            let meta = line.split(|byte| *byte == b'\t').next().unwrap_or(line);
-            if let Some(status) = meta
-                .rsplit(|byte| *byte == b' ')
-                .next()
-                .and_then(|field| field.first())
-            {
-                record.statuses.push(*status);
-            }
-        } else if let Some(tab) = line.iter().position(|byte| *byte == b'\t') {
-            let mut fields = line.splitn(3, |byte| *byte == b'\t');
-            let (Some(added), Some(deleted)) = (fields.next(), fields.next()) else {
-                continue;
-            };
-            let _ = tab;
-            if added == b"-" || deleted == b"-" {
-                record.binary = true;
-            } else {
-                let parse = |value: &[u8]| {
-                    std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|text| text.parse::<u64>().ok())
-                };
-                if let (Some(added), Some(deleted)) = (parse(added), parse(deleted)) {
-                    record.additions += added;
-                    record.deletions += deleted;
-                }
-            }
+        if let Some(record) = records.last_mut() {
+            add_diff_line(record, line);
         }
     }
     Ok(records)
+}
+
+/// Adds one `--raw` or `--numstat` line to the record's change.
+fn add_diff_line(record: &mut HistoryRecord, line: &[u8]) {
+    if line.first() == Some(&b':') {
+        // ":<old mode> <new mode> <old oid> <new oid> <status>\t<path>"
+        let meta = line.split(|byte| *byte == b'\t').next().unwrap_or(line);
+        if let Some(status) = meta
+            .rsplit(|byte| *byte == b' ')
+            .next()
+            .and_then(|field| field.first())
+        {
+            record.statuses.push(*status);
+        }
+        return;
+    }
+    if !line.contains(&b'\t') {
+        return;
+    }
+    let mut fields = line.splitn(3, |byte| *byte == b'\t');
+    let (Some(added), Some(deleted)) = (fields.next(), fields.next()) else {
+        return;
+    };
+    if added == b"-" || deleted == b"-" {
+        record.binary = true;
+        return;
+    }
+    let parse = |value: &[u8]| {
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+    };
+    if let (Some(added), Some(deleted)) = (parse(added), parse(deleted)) {
+        record.additions += added;
+        record.deletions += deleted;
+    }
+}
+
+/// `git log` prints no diff for merges, so their change against the first parent comes from one
+/// `git diff-tree --stdin` run. Passing the parent explicitly makes Git compare against it alone.
+#[allow(clippy::too_many_arguments)]
+fn add_merge_changes(
+    git: &ReadOnlyGit,
+    repo: &Path,
+    commit: &str,
+    path_hex: &str,
+    oid_length: usize,
+    records: &mut [HistoryRecord],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> FilesResult<()> {
+    let mut input = Vec::new();
+    let mut index_by_oid = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if let Some(parent) = &record.first_parent_of_merge {
+            input.extend_from_slice(format!("{} {parent}\n", record.oid).as_bytes());
+            index_by_oid.insert(record.oid.clone(), index);
+        }
+    }
+    if input.is_empty() {
+        return Ok(());
+    }
+    let mut args = commit_args(commit);
+    args.extend([
+        string_arg("diff-tree"),
+        string_arg("--stdin"),
+        string_arg("-r"),
+        string_arg("--raw"),
+        string_arg("--numstat"),
+        string_arg("--no-renames"),
+        string_arg("--no-abbrev"),
+        string_arg("--no-ext-diff"),
+        string_arg("--no-textconv"),
+        string_arg("--"),
+    ]);
+    if !path_hex.is_empty() {
+        args.push(raw_path_arg(path_hex)?);
+    }
+    let output = git
+        .run(
+            repo,
+            &args,
+            Some(&input),
+            HISTORY_OUTPUT_LIMIT,
+            cancelled,
+            deadline,
+        )
+        .map_err(from_git)?;
+    if !output.status.success() {
+        return Err(git_output_error(&output.stderr));
+    }
+    // diff-tree prints the merge's ID on its own line before that merge's changes.
+    let mut current = None;
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        if line.len() == oid_length && line.iter().all(u8::is_ascii_hexdigit) {
+            current = std::str::from_utf8(line)
+                .ok()
+                .and_then(|oid| index_by_oid.get(oid).copied());
+            continue;
+        }
+        if let Some(index) = current {
+            add_diff_line(&mut records[index], line);
+        }
+    }
+    Ok(())
 }
 
 fn status_from_letter(letter: u8) -> ChangedFileStatus {
@@ -693,11 +774,11 @@ pub(crate) fn read_file_history_at(
     let mut args = commit_args(&commit);
     args.extend([
         string_arg("log"),
-        string_arg("--format=format:%x01%H"),
+        string_arg("--format=format:%x01%H %P"),
         string_arg("--raw"),
         string_arg("--numstat"),
         string_arg("--no-renames"),
-        string_arg("--diff-merges=first-parent"),
+        // No --diff-merges here: it also changes which merges are listed, unlike `git log -- <path>`.
         string_arg("--no-abbrev"),
         string_arg("--no-ext-diff"),
         string_arg("--no-textconv"),
@@ -725,6 +806,16 @@ pub(crate) fn read_file_history_at(
     let mut records = parse_history_log(&output.stdout, oid_length)?;
     let mut has_more = records.len() > page_size;
     records.truncate(page_size);
+    add_merge_changes(
+        &git,
+        repo,
+        &commit,
+        &path_hex,
+        oid_length,
+        &mut records,
+        cancelled,
+        deadline,
+    )?;
     let oids: Vec<String> = records.iter().map(|record| record.oid.clone()).collect();
     let summaries: HashMap<String, commitscope_core::CommitSummary> =
         repository::read_commits(&git, repo, &oids, oid_length, cancelled, deadline)

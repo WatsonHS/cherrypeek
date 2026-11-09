@@ -86,6 +86,8 @@ try {
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");
   assert.match(diagnostics.csp ?? "", /default-src 'none'/);
   assert.match(diagnostics.csp ?? "", /connect-src 'none'/);
+  assert.match(diagnostics.csp ?? "", /script-src 'self'(;|$)/, "scripts load only from the app bundle");
+  assert.doesNotMatch(diagnostics.csp ?? "", /unsafe-inline|unsafe-eval|wasm-unsafe-eval/, "the policy is not relaxed for highlighting or anything else");
   assert.equal(new URL(diagnostics.href).protocol, "file:");
 
   const electronSecurity = await normal.evaluate(({ BrowserWindow }) => {

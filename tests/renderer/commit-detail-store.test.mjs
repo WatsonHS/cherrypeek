@@ -309,3 +309,27 @@ test("changing the file parent clears its patch, while an old-context patch rema
   assert.equal(api.calls.length, callsBefore);
   assert.equal(store.getView().diff.value, null, "the retained patch can be collapsed without a new-context query");
 });
+
+test("a file over the whole-file limit falls back to the changes-only diff", async () => {
+  const api = deferredApi();
+  const store = new CommitDetailStore(api.api, () => true);
+  store.bind("repo:g1:head", "a", true);
+  await api.answer("getCommit", details("a", ["p0"]));
+  await api.answer("listChangedFiles", files("a"));
+  const file = changedFile("big.txt");
+  const read = store.toggleDiff(file, 0);
+  await settled();
+  const full = api.calls.at(-1);
+  assert.equal(full.name, "readDiff");
+  assert.deepEqual(full.params, { oid: "a", parentIndex: 0, oldPathHex: file.oldPath.rawHex, newPathHex: file.newPath.rawHex, fullFile: true });
+  await api.answerResult("readDiff", err("RESOURCE_LIMIT"));
+  const changesOnly = api.calls.at(-1);
+  assert.notEqual(changesOnly, full, "the diff is read again");
+  assert.deepEqual(changesOnly.params, { oid: "a", parentIndex: 0, oldPathHex: file.oldPath.rawHex, newPathHex: file.newPath.rawHex }, "without fullFile");
+  assert.deepEqual([store.getView().diff.state, store.getView().diff.error], ["loading", null], "the limit is not shown as an error");
+  await api.answer("readDiff", diffFor(file, "@@ -1 +1 @@\n-old\n+new"));
+  await read;
+  const diff = store.getView().diff;
+  assert.deepEqual([diff.state, diff.error, diff.value.patch], ["ready", null, "@@ -1 +1 @@\n-old\n+new"]);
+  assert.equal(store.getView().diffFullFileLimited, true, "the panel is told the file is over the whole-file limit");
+});

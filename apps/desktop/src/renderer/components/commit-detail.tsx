@@ -249,7 +249,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
           const canToggle = Boolean(activeDetails && detail.files.state !== "loading") || expanded && Boolean(detail.diff.value);
           return <FileRow key={`${file.oldPath?.rawHex ?? ""}:${file.newPath?.rawHex ?? ""}:${index}`} file={file}
             expanded={expanded} disabled={!canToggle} onToggle={() => onToggleDiff(file, page.parentIndex)}
-            diff={expanded ? detail.diff : null} onRetry={() => onToggleDiff(file, page.parentIndex)}
+            diff={expanded ? detail.diff : null} fullFileLimited={expanded && detail.diffFullFileLimited} onRetry={() => onToggleDiff(file, page.parentIndex)}
             onOpenHistory={onOpenFileHistory && (file.newPath ?? file.oldPath) ? () => onOpenFileHistory((file.newPath ?? file.oldPath)!) : undefined} />;
         })
           : <p className="m-0 px-4 py-5 text-sm text-fg3">这个比较没有文件改动。</p>}
@@ -262,12 +262,13 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
   </div>;
 }
 
-function FileRow({ file, expanded, disabled, onToggle, diff, onRetry, onOpenHistory }: {
+function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, onRetry, onOpenHistory }: {
   file: ChangedFilesPage["files"][number];
   expanded: boolean;
   disabled: boolean;
   onToggle(): void;
   diff: CommitDetailView["diff"] | null;
+  fullFileLimited: boolean;
   onRetry(): void;
   onOpenHistory?(): void;
 }): React.JSX.Element {
@@ -290,11 +291,11 @@ function FileRow({ file, expanded, disabled, onToggle, diff, onRetry, onOpenHist
       <span className="shrink-0 font-mono text-xs tabular-nums"><span className="text-add">{file.additions === null ? "—" : `+${file.additions}`}</span> <span className="text-del">{file.deletions === null ? "—" : `−${file.deletions}`}</span></span>
       <span className="shrink-0 text-xs text-fg3">{expanded ? "收起 diff" : "查看 diff"}</span>
     </button>
-    {expanded && diff ? <DiffPanel file={file} state={diff} onRetry={onRetry} /> : null}
+    {expanded && diff ? <DiffPanel file={file} state={diff} fullFileLimited={fullFileLimited} onRetry={onRetry} /> : null}
   </div>;
 }
 
-function DiffPanel({ file, state, onRetry }: { file: ChangedFilesPage["files"][number]; state: CommitDetailView["diff"]; onRetry(): void }): React.JSX.Element {
+function DiffPanel({ file, state, fullFileLimited, onRetry }: { file: ChangedFilesPage["files"][number]; state: CommitDetailView["diff"]; fullFileLimited: boolean; onRetry(): void }): React.JSX.Element {
   if (state.state === "loading") return <p role="status" className="m-0 border-t border-line bg-bg px-4 py-3 text-xs text-fg3">正在读取只读 diff…</p>;
   if (state.state === "error") return <div role="alert" className="flex items-center gap-2 border-t border-line bg-bg px-4 py-3 text-xs text-bad"><span>{state.error?.message}</span><Button variant="outline" size="sm" onClick={onRetry}>重试 diff</Button></div>;
   const diff = state.value;
@@ -311,7 +312,7 @@ function DiffPanel({ file, state, onRetry }: { file: ChangedFilesPage["files"][n
     {diff.kind === "text" && diff.patch === "" && !diff.truncated ? <p className="m-0 px-4 py-3 text-xs text-fg3">文件内容相同，仅路径或模式变化。</p> : null}
     {diff.textLossy ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 文本含有无法按 UTF-8 无损解码的数据。</p> : null}
     {diff.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，仅显示读取预算内的部分。</p> : null}
-    {diff.kind === "text" && diff.patch ? <DiffView patch={diff.patch} path={(file.newPath ?? file.oldPath)?.display ?? null} /> : null}
+    {diff.kind === "text" && diff.patch ? <DiffView patch={diff.patch} fullFileLimited={fullFileLimited} path={(file.newPath ?? file.oldPath)?.display ?? null} /> : null}
     <span className="sr-only">{file.status} file diff</span>
   </div>;
 }

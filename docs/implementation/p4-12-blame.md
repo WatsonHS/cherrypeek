@@ -1,6 +1,6 @@
 # P4-12：逐行追溯
 
-日期：2026-11-09。状态：接口、main / preload / renderer 与 daemon 均已实现，核心声明 `blame`（`crates/daemon/src/blame.rs`）。核心未声明该能力时，“逐行追溯”按钮置灰并标“占位”。
+日期：2026-11-09。状态：已验收（2026-11-09，证据见 PLAN 对应任务的“验收”）。接口、main / preload / renderer 与 daemon 均已实现，核心声明 `blame`（`crates/daemon/src/blame.rs`）。核心未声明该能力时，“逐行追溯”按钮置灰并标“占位”。
 
 ## 能力与方法
 

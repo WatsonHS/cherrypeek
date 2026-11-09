@@ -53,7 +53,7 @@ export function workspaceBadge(indicator: WorkspaceIndicator, repository: Reposi
   const spokenBranch = branchLabel ? `：${branchLabel}` : "";
   switch (indicator.state) {
     case "bare":
-      return { kind: "none", text: "", ariaLabel: "工作区：bare 仓库没有工作区", title: "bare 仓库没有工作区", disabled: true };
+      return { kind: "none", text: "", ariaLabel: "工作区：无工作区（bare 仓库）", title: "无工作区（bare 仓库）", disabled: true };
     case "unavailable":
       return { kind: "none", text: "", ariaLabel: `工作区${spokenBranch}，状态尚未读取`, title: `${where} · ${indicator.reason}（${shortcut}）`, disabled: false };
     case "loading":

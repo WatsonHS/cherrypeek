@@ -599,11 +599,18 @@ fn read_diff_at(
     } else {
         (record.index_oid.clone(), None)
     };
-    let old_size = old_oid
-        .as_deref()
-        .map(|oid| blob_size(&git, tree, oid, cancelled, deadline))
-        .transpose()?;
-    let new_size = if staged {
+    // A gitlink names a commit in the submodule's own repository; there is no blob here to measure.
+    let old_size = if gitlink {
+        None
+    } else {
+        old_oid
+            .as_deref()
+            .map(|oid| blob_size(&git, tree, oid, cancelled, deadline))
+            .transpose()?
+    };
+    let new_size = if gitlink {
+        None
+    } else if staged {
         new_oid
             .as_deref()
             .map(|oid| blob_size(&git, tree, oid, cancelled, deadline))
@@ -660,7 +667,9 @@ fn read_diff_at(
     } else {
         FileDiffKind::Text
     };
-    if diff.kind != FileDiffKind::Text {
+    // A gitlink still gets its "Subproject commit" lines (--submodule=short): they are the only place the
+    // workspace page can show which commit the reference moved between.
+    if !matches!(diff.kind, FileDiffKind::Text | FileDiffKind::Gitlink) {
         return Ok(diff);
     }
     let mut args: Vec<OsString> = vec![

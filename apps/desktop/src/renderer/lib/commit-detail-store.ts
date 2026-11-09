@@ -18,6 +18,8 @@ export interface CommitDetailView {
   fileOffset: number;
   diff: DetailLoad<FileDiff>;
   diffKey: string | null;
+  /** The file was over the whole-file limit, so `diff` holds only the changes. */
+  diffFullFileLimited: boolean;
   merge: DetailLoad<MergeCommitsPage>;
   mergeParentIndex: number | null;
   mergeOffset: number;
@@ -31,7 +33,7 @@ const PAGE_SIZE = 200;
 const idle = <T>(): DetailLoad<T> => ({ state: "idle", value: null, error: null });
 const initialView = (): CommitDetailView => ({
   sessionKey: null, oid: undefined, detailsSessionKey: null, details: idle(), files: idle(), fileParentIndex: null, fileOffset: 0,
-  diff: idle(), diffKey: null, merge: idle(), mergeParentIndex: null, mergeOffset: 0, containing: idle(),
+  diff: idle(), diffKey: null, diffFullFileLimited: false, merge: idle(), mergeParentIndex: null, mergeOffset: 0, containing: idle(),
 });
 
 export class CommitDetailStore {
@@ -193,18 +195,21 @@ export class CommitDetailStore {
     const selection = this.selectionIntent;
     const sequence = ++this.sequenceIntent;
     this.diffFile = { file, parentIndex };
-    this.update({ ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key });
+    this.update({ ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key, diffFullFileLimited: false });
     await this.cancelActiveRequest("diff");
     if (!this.isCurrent(selection, sequence, sessionKey, oid) || this.view.diffKey !== key) return;
     this.view = { ...this.view, diff: { state: "loading", value: null, error: null }, diffKey: key };
     this.emit();
     const full = this.fullFile();
+    let limited = false;
     await this.perform(selection, sequence, sessionKey, oid, "diff", async () => {
       const result = await this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex, ...(full ? { fullFile: true } : {}) });
-      // Files over the whole-file limit fall back to the changes only.
-      return full && !result.ok && result.error.code === "RESOURCE_LIMIT" ? this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex }) : result;
+      // Files over the whole-file limit fall back to the changes only, and the view says so.
+      if (!full || result.ok || result.error.code !== "RESOURCE_LIMIT") return result;
+      limited = true;
+      return this.api.readDiff({ oid, parentIndex, oldPathHex, newPathHex });
     }, result => {
-      this.update({ ...this.view, diff: ready(result), diffKey: key });
+      this.update({ ...this.view, diff: ready(result), diffKey: key, diffFullFileLimited: limited });
     });
   }
 

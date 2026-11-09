@@ -493,7 +493,7 @@ function ChangeBox({ view, actions, entry, floatingButton }: { view: FilesView; 
     {note ? <p className="m-0 px-4 py-3 text-xs text-fg3">{note}</p> : null}
     {value.kind === "text" && value.patch === "" ? <p className="m-0 px-4 py-3 text-xs text-fg3">内容相同，只有路径或模式变化。</p> : null}
     {value.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，只显示读取上限内的部分。</p> : null}
-    {value.kind === "text" && value.patch ? <DiffView patch={value.patch} fullAvailable={view.fullFileSupported} leading={leading} focus={focus}
+    {value.kind === "text" && value.patch ? <DiffView patch={value.patch} fullAvailable={view.fullFileSupported} fullFileLimited={change.fullFileLimited ?? false} leading={leading} focus={focus}
       path={(value.file.newPath ?? value.file.oldPath)?.display ?? null} /> : null}
   </div>;
 }

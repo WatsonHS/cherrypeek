@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const { WorkspaceStore, workspaceItems, workspaceIndicatorFor } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "workspace-store.mjs")));
+const { WorkspaceStore, workspaceItems, workspaceIndicatorFor, workspaceIsClean } = await import(pathToFileURL(join(process.env.COMMITSCOPE_RENDERER_BUILD_DIR, "workspace-store.mjs")));
 
 const hex = text => Buffer.from(text, "utf8").toString("hex");
 const path = text => ({ display: text, rawHex: hex(text), textLossy: false });
@@ -29,6 +29,20 @@ function fakeApi() {
       const index = pending.findIndex(item => item.kind === kind);
       assert.ok(index >= 0, `a pending ${kind} request`);
       const [item] = pending.splice(index, 1);
+      item.resolve(value);
+      await new Promise(resolve => setImmediate(resolve));
+      return item;
+    },
+    /** Answers the nth still-pending request of a kind (0 = oldest), so reads can be answered out of order. */
+    async resolveNth(kind, nth, value) {
+      const ofKind = pending.filter(item => item.kind === kind);
+      assert.ok(nth < ofKind.length, `a pending ${kind} request #${nth}`);
+      return api.resolveItem(ofKind[nth], value);
+    },
+    async resolveItem(item, value) {
+      const index = pending.indexOf(item);
+      assert.ok(index >= 0, "the request is still pending");
+      pending.splice(index, 1);
       item.resolve(value);
       await new Promise(resolve => setImmediate(resolve));
       return item;
@@ -177,5 +191,142 @@ test("a hidden window only marks the status stale on change hints", async () => 
   visible = true;
   store.markChanged();
   assert.equal(store.hasScheduledRead, true);
+  store.dispose();
+});
+
+const shownPaths = view => workspaceItems(view.status).map(item => `${item.group}:${item.entry.path.display}`);
+
+test("an older status read that answers after a newer one cannot replace it", async () => {
+  const api = fakeApi();
+  const store = new WorkspaceStore(api, () => 10_000);
+  store.bind("repo", true, false);
+  await api.resolveNext("status", ok(status([entry("a.rs", { unstaged: change() })], { observedAtUnixMs: 1_000 })));
+  const older = store.readStatus(true);
+  const newer = store.readStatus(true);
+  const newest = status([entry("c.rs", { untracked: true, untrackedSize: 3 })], { observedAtUnixMs: 3_000 });
+  await api.resolveNth("status", 1, ok(newest));
+  await newer;
+  assert.equal(store.getView().status, newest);
+  await api.resolveNth("status", 0, ok(status([entry("b.rs", { staged: change("added") })], { observedAtUnixMs: 2_000 })));
+  await older;
+  const view = store.getView();
+  assert.equal(view.status, newest, "the older answer is dropped");
+  assert.equal(view.status.observedAtUnixMs, 3_000);
+  assert.equal(workspaceIndicatorFor(view).observedAtUnixMs, 3_000, "the badge keeps the newer observation time");
+  assert.deepEqual(shownPaths(view), ["untracked:c.rs"]);
+  assert.deepEqual(view.selection, { group: "untracked", pathHex: hex("c.rs") });
+  assert.deepEqual([view.loading, view.error, view.stale], [false, null, false]);
+  assert.equal(api.calls.some(([kind, params]) => kind !== "status" && params.pathHex === hex("b.rs")), false, "nothing is read for the older answer's files");
+  store.dispose();
+});
+
+test("a status read for the previous repository never shows up for the next one", async () => {
+  const api = fakeApi();
+  const store = new WorkspaceStore(api, () => 10_000);
+  store.bind("repo-a", true, false);
+  store.bind("repo-b", true, false);
+  await api.resolveNth("status", 0, ok(status([entry("only-in-a.rs", { unstaged: change() })])));
+  let view = store.getView();
+  assert.equal(view.repoKey, "repo-b");
+  assert.deepEqual([view.status, view.selection, view.content, view.loading], [null, null, null, true], "B is still waiting for its own read");
+  assert.equal(workspaceIndicatorFor(view).state, "loading", "the badge shows no count from A");
+  assert.equal(api.calls.filter(([kind]) => kind !== "status").length, 0, "no diff is read for A's file");
+  const forB = status([entry("only-in-b.rs", { staged: change("added") })], { observedAtUnixMs: 2_000 });
+  await api.resolveNth("status", 0, ok(forB));
+  view = store.getView();
+  assert.equal(view.status, forB);
+  assert.deepEqual(view.selection, { group: "staged", pathHex: hex("only-in-b.rs") });
+
+  // A failing re-read and a late diff for B do not show up for C either.
+  const rereadB = store.readStatus(true);
+  store.bind("repo-c", true, false);
+  await api.resolveNth("status", 0, fail("GIT_FAILED", "B failed"));
+  await rereadB;
+  await api.resolveNext("diff", ok({ side: "staged", path: path("only-in-b.rs"), oldPath: null, kind: "text", patch: "b", truncated: false, textLossy: false, oldSize: null, newSize: 1 }));
+  view = store.getView();
+  assert.equal(view.repoKey, "repo-c");
+  assert.deepEqual([view.status, view.error, view.selection, view.content, view.loading], [null, null, null, null, true]);
+  store.dispose();
+});
+
+test("repeated file changes: re-reads answered out of order leave only the newest result on screen", async () => {
+  const api = fakeApi();
+  const store = new WorkspaceStore(api, () => 10_000);
+  store.bind("repo", true, false);
+  const first = status([entry("a.rs", { unstaged: change() })], { observedAtUnixMs: 1_000 });
+  await api.resolveNext("status", ok(first));
+  const reads = [];
+  const answers = [];
+  for (let round = 1; round <= 4; round += 1) {
+    store.markChanged();
+    reads.push(store.readStatus(true, "hint"));
+    answers.push(status([entry("a.rs", { unstaged: { ...change(), additions: round } }), ...Array.from({ length: round - 1 }, (_, index) => entry(`new-${index}.md`, { untracked: true, untrackedSize: 1 }))],
+      { observedAtUnixMs: 1_000 + round * 1_000 }));
+  }
+  const inFlight = api.pending.filter(item => item.kind === "status");
+  assert.equal(inFlight.length, 4);
+  await api.resolveItem(inFlight[1], ok(answers[1]));
+  await api.resolveItem(inFlight[0], ok(answers[0]));
+  let view = store.getView();
+  assert.equal(view.status, first, "older re-reads do not replace the shown result");
+  assert.deepEqual([view.stale, view.loading], [true, true], "the numbers stay marked as out of date until the newest read lands");
+  await api.resolveItem(inFlight[3], ok(answers[3]));
+  await api.resolveItem(inFlight[2], ok(answers[2]));
+  await Promise.all(reads);
+  view = store.getView();
+  assert.equal(view.status, answers[3]);
+  assert.deepEqual([view.stale, view.loading, view.error], [false, false, null]);
+  assert.deepEqual(shownPaths(view), ["unstaged:a.rs", "untracked:new-0.md", "untracked:new-1.md", "untracked:new-2.md"]);
+  const badge = workspaceIndicatorFor(view);
+  assert.deepEqual([badge.state, badge.files, badge.observedAtUnixMs, badge.stale], ["changes", 4, 5_000, false]);
+  store.dispose();
+});
+
+test("the page says clean only while the latest finished read was clean and has not failed or gone stale", async () => {
+  const api = fakeApi();
+  const store = new WorkspaceStore(api, () => 10_000);
+  store.bind("repo", true, false);
+  assert.equal(workspaceIsClean(store.getView()), false, "nothing read yet");
+  await api.resolveNext("status", ok(status([])));
+  assert.equal(workspaceIsClean(store.getView()), true);
+
+  const focusRead = store.readStatus(true);
+  assert.equal(store.getView().loading, true);
+  assert.equal(workspaceIsClean(store.getView()), true, "a running re-read (e.g. on focus) keeps the confirmed result instead of flashing");
+  assert.equal(workspaceIndicatorFor(store.getView()).state, "loading", "the badge shows the re-read");
+  await api.resolveNext("status", fail("GIT_FAILED", "git status failed"));
+  await focusRead;
+  let view = store.getView();
+  assert.equal(view.status.entries.length, 0, "the previous empty result is kept");
+  assert.equal(workspaceIndicatorFor(view).state, "error");
+  assert.equal(workspaceIsClean(view), false, "a failed re-read after a clean one is not shown as clean");
+
+  const retry = store.readStatus(true);
+  assert.equal(workspaceIsClean(store.getView()), false, "still not clean while retrying after the failure");
+  await api.resolveNext("status", ok(status([], { observedAtUnixMs: 2_000 })));
+  await retry;
+  view = store.getView();
+  assert.equal(view.error, null);
+  assert.equal(workspaceIsClean(view), true, "a successful re-read confirms it again");
+  store.markChanged();
+  assert.equal(workspaceIsClean(store.getView()), false, "a change hint makes it unconfirmed");
+  assert.equal(workspaceIsClean({ ...view, status: status([], { complete: false, totalPaths: 2001 }) }), false, "an incomplete read is never clean");
+  store.dispose();
+});
+
+test("a workspace file over the whole-file limit falls back to the changes-only diff", async () => {
+  const api = fakeApi();
+  const store = new WorkspaceStore(api, () => 10_000, () => true);
+  store.bind("repo", true, false);
+  await api.resolveNext("status", ok(status([entry("big.rs", { unstaged: change() })])));
+  const full = await api.resolveNext("diff", fail("RESOURCE_LIMIT", "内容超出读取上限"));
+  assert.deepEqual(full.params, { side: "unstaged", pathHex: hex("big.rs"), oldPathHex: null, fullFile: true });
+  assert.equal(store.getView().content.state, "loading", "the limit is not shown as an error");
+  const diff = { side: "unstaged", path: path("big.rs"), oldPath: null, kind: "text", patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, textLossy: false, oldSize: 1, newSize: 1 };
+  const fallback = await api.resolveNext("diff", ok(diff));
+  assert.deepEqual(fallback.params, { side: "unstaged", pathHex: hex("big.rs"), oldPathHex: null }, "read again without fullFile");
+  const content = store.getView().content;
+  assert.deepEqual([content.state, content.error, content.diff], ["ready", null, diff]);
+  assert.equal(content.fullFileLimited, true, "the page is told the file is over the whole-file limit");
   store.dispose();
 });

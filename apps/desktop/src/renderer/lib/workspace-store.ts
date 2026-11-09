@@ -35,6 +35,8 @@ export interface WorkspaceContent {
   diff: WorkspaceDiff | null;
   file: WorkspaceFile | null;
   error: { code: string; message: string } | null;
+  /** The file was over the whole-file limit, so `diff` holds only the changes. */
+  fullFileLimited?: boolean;
 }
 
 export interface WorkspaceView {
@@ -87,6 +89,16 @@ export function workspaceIndicatorFor(view: WorkspaceView): WorkspaceIndicator {
     return view.stale || view.loading ? { state: "loading" } : { state: "clean", observedAtUnixMs: status.observedAtUnixMs };
   }
   return { state: "changes", files: status.totalPaths, conflicts: status.conflictCount, complete: status.complete, stale: view.stale, observedAtUnixMs: status.observedAtUnixMs };
+}
+
+/**
+ * Whether the page may say "工作区干净": the latest finished read was complete and empty, and it has not
+ * failed or gone stale since. A re-read in progress (e.g. on focus) keeps the confirmed result on the page;
+ * the badge shows the activity, so the page does not flash on every focus.
+ */
+export function workspaceIsClean(view: WorkspaceView): boolean {
+  const status = view.status;
+  return !view.bare && view.supported && !view.error && !view.stale && status !== null && status.complete && status.entries.length === 0;
 }
 
 const selectionKey = (selection: WorkspaceSelection, previewLines: number) => `${selection.group}:${selection.pathHex}:${previewLines}`;
@@ -234,9 +246,12 @@ export class WorkspaceStore {
     const readDiff = (side: "staged" | "unstaged", withFull: boolean) => settle(this.api.readWorkspaceDiff({ side, pathHex: entry.path.rawHex,
       oldPathHex: side === "staged" ? entry.originalPath?.rawHex ?? null : null, ...(withFull ? { fullFile: true } : {}) }));
     let result: RepositorySessionResult<WorkspaceDiff | WorkspaceFile>;
+    let limited = false;
     if (selection.group === "staged" || selection.group === "unstaged") {
       result = await readDiff(selection.group, full);
-      if (full && !result.ok && result.error.code === "RESOURCE_LIMIT") result = await readDiff(selection.group, false);
+      // Files over the whole-file limit fall back to the changes only, and the view says so.
+      limited = full && !result.ok && result.error.code === "RESOURCE_LIMIT";
+      if (limited) result = await readDiff(selection.group, false);
     } else {
       result = await settle(this.api.readWorkspaceFile({ pathHex: entry.path.rawHex, maxLines: this.view.previewLines }));
     }
@@ -247,7 +262,7 @@ export class WorkspaceStore {
     }
     const value = result.value;
     this.update({ ...this.view, content: "side" in value
-      ? { key, state: "ready", diff: value, file: null, error: null }
+      ? { key, state: "ready", diff: value, file: null, error: null, fullFileLimited: limited }
       : { key, state: "ready", diff: null, file: value, error: null } });
   }
 

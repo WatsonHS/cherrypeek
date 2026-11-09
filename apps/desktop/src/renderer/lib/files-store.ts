@@ -83,7 +83,8 @@ export interface FilesView {
   history: HistoryState | null;
   selectedCommit: string | null;
   parentIndex: number | null;
-  change: Load<FileDiff> | null;
+  /** `fullFileLimited`: the file was over the whole-file limit, so `value` holds only the changes. */
+  change: (Load<FileDiff> & { fullFileLimited?: boolean }) | null;
   blameEnabled: boolean;
   blame: BlameState | null;
   focus: BlameFocus | null;
@@ -387,12 +388,13 @@ export class FilesStore {
     const oldPathHex = entry?.change.oldPath ? entry.change.oldPath.rawHex : null;
     let result = await this.retrying(() => this.api.readFileChange({ oid: selectedCommit, parentIndex, pathHex, oldPathHex, ...(full ? { fullFile: true } : {}) }),
       () => intent === this.intents.change);
-    // Files over the whole-file limit fall back to the changes only.
-    if (full && result && !result.ok && result.error.code === "RESOURCE_LIMIT") {
+    // Files over the whole-file limit fall back to the changes only, and the view says so.
+    const limited = Boolean(full && result && !result.ok && result.error.code === "RESOURCE_LIMIT");
+    if (limited) {
       result = await this.retrying(() => this.api.readFileChange({ oid: selectedCommit, parentIndex, pathHex, oldPathHex }), () => intent === this.intents.change);
     }
     if (!result || intent !== this.intents.change || this.view.change?.key !== key) return;
-    this.update({ ...this.view, change: result.ok ? { key, state: "ready", value: result.value, error: null } : { key, state: "error", value: null, error: errorOf(result) } });
+    this.update({ ...this.view, change: result.ok ? { key, state: "ready", value: result.value, error: null, fullFileLimited: limited } : { key, state: "error", value: null, error: errorOf(result) } });
   }
 
   private async loadBlame(): Promise<void> {

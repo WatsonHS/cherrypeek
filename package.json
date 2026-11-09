@@ -35,6 +35,7 @@
     "test:details": "node scripts/test-details.mjs",
     "test:smoke:commit-details": "node tests/smoke/commit-details-smoke.mjs",
     "test:smoke:history-graph": "node tests/smoke/history-graph-smoke.mjs",
+    "test:pages": "node scripts/test-pages.mjs",
     "test:smoke:pages": "node tests/smoke/pages-smoke.mjs",
     "test:smoke:pages:stand-in": "node tests/smoke/pages-smoke.mjs --stand-in",
     "fixtures:graph-benchmark": "node scripts/generate-graph-benchmark-fixture.mjs",

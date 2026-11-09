@@ -4,7 +4,7 @@ import type { ChangedFileStatus, GitPath, RepositoryInfo, WorkspaceDiff, Workspa
 import { shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { workspaceHeadText } from "../lib/workspace-indicator.js";
-import { workspaceItems, type WorkspaceGroup, type WorkspaceItem, type WorkspaceView } from "../lib/workspace-store.js";
+import { workspaceIsClean, workspaceItems, type WorkspaceGroup, type WorkspaceItem, type WorkspaceView } from "../lib/workspace-store.js";
 import { DiffView } from "./diff-view.js";
 import { SyntaxLine } from "./syntax-text.js";
 import { languageForPath } from "../lib/syntax/languages.js";
@@ -99,11 +99,13 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
           <Button variant="outline" size="sm" className="self-start" onClick={onRefresh}>重试</Button>
         </div> : null}
         {!status && view.loading ? <p role="status" className="m-0 flex items-center gap-1.5 px-2.5 py-3 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取工作区…</p> : null}
-        {status && status.complete && status.entries.length === 0 && !view.stale ? <div data-testid="workspace-clean" className="flex flex-col items-center gap-2.5 px-5 pt-8 pb-7 text-center">
+        {status && workspaceIsClean(view) ? <div data-testid="workspace-clean" className="flex flex-col items-center gap-2.5 px-5 pt-8 pb-7 text-center">
           <span aria-hidden="true" className="flex size-10 items-center justify-center rounded-full bg-ok-bg text-ok"><svg viewBox="0 0 16 16" className="size-5" style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5 }}><path d="M3.5 8.5l3 3 6-7" /></svg></span>
           <span className="text-[15px] font-semibold">工作区干净</span>
           <span className="max-w-[240px] text-[12.5px] text-fg2">{clock(status.observedAtUnixMs)} 完整读取：没有已暂存、未暂存、未跟踪或冲突的文件。忽略的文件不计入。</span>
-        </div> : null}
+        </div>
+          // An empty result that is being re-read, failed to re-read or is stale is not a claim of "clean".
+          : status && status.entries.length === 0 ? <p className="m-0 px-2.5 py-3 text-xs text-fg3" data-testid="workspace-empty-unconfirmed">{clock(status.observedAtUnixMs)} 读取时没有改动的文件。</p> : null}
         {status && needle && shown.length === 0 && items.length > 0 ? <p className="m-0 px-2.5 py-3 text-xs text-fg3">没有路径包含“{filter.trim()}”的改动文件。</p> : null}
         {groups.map(({ group, items: groupItems }) => {
           const additions = groupItems.reduce((sum, item) => sum + (item.change?.additions ?? 0), 0);
@@ -175,14 +177,14 @@ function SelectedFile({ item, view, onLoadMore, onRetry, onOpenHistory }: { item
         ? <p role="status" className="m-0 flex items-center gap-1.5 px-4 py-3 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取…</p>
         : content.state === "error"
           ? <div role="alert" className="flex items-center gap-2 px-4 py-3 text-xs text-bad"><span>{content.error?.message}</span><Button variant="outline" size="sm" onClick={onRetry}>重试</Button></div>
-          : content.diff ? <WorkspaceDiffBody diff={content.diff} />
+          : content.diff ? <WorkspaceDiffBody diff={content.diff} fullFileLimited={content.fullFileLimited ?? false} />
             : content.file ? <WorkspaceFileBody file={content.file} conflict={item.group === "conflict"} canLoadMore={view.previewLines < 5_000} onLoadMore={onLoadMore} loading={content.state === "loading"} />
               : null}
     </div>
   </div>;
 }
 
-function WorkspaceDiffBody({ diff }: { diff: WorkspaceDiff }): React.JSX.Element {
+function WorkspaceDiffBody({ diff, fullFileLimited }: { diff: WorkspaceDiff; fullFileLimited: boolean }): React.JSX.Element {
   const note = {
     binary: "二进制文件不展示文本 diff。",
     gitlink: "这是子模块引用，只显示对象变化，不读取子模块工作区。",
@@ -195,7 +197,7 @@ function WorkspaceDiffBody({ diff }: { diff: WorkspaceDiff }): React.JSX.Element
     {diff.kind === "text" && diff.patch === "" && !diff.truncated ? <p className="m-0 px-4 py-3 text-xs text-fg3">内容相同，只有模式变化。</p> : null}
     {diff.textLossy ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 文本含有无法按 UTF-8 无损解码的数据。</p> : null}
     {diff.truncated ? <p className="m-0 px-4 py-2 text-xs text-warn">diff 已截断，只显示读取上限内的部分。</p> : null}
-    {diff.kind === "text" && diff.patch ? <DiffView patch={diff.patch} path={diff.path.display} /> : null}
+    {(diff.kind === "text" || diff.kind === "gitlink") && diff.patch ? <DiffView patch={diff.patch} fullFileLimited={fullFileLimited} path={diff.path.display} /> : null}
   </div>;
 }
 

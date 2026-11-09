@@ -222,6 +222,7 @@ export function App(): React.JSX.Element {
   const [filesFindCount, setFilesFindCount] = React.useState(0);
   const [filesHistoryQuery, setFilesHistoryQuery] = React.useState("");
   const filesVisited = React.useRef(false);
+  const workspaceVisited = React.useRef(false);
   const [historyScrubbing, setHistoryScrubbing] = React.useState(false);
   const locationIntent = React.useRef(0);
   const anchorBeforeRefresh = React.useRef<{ oid: string; offset: number } | undefined>(undefined);
@@ -596,10 +597,13 @@ export function App(): React.JSX.Element {
   }, [filesStore, workspaceRepo, filesCapabilities.files, filesCapabilities.blame, filesCapabilities.fullFile]);
   React.useEffect(() => {
     filesVisited.current = false;
+    workspaceVisited.current = false;
     setFilesVersionPinned(null);
     setFilesFind({ query: "", current: 0 });
     setFilesHistoryQuery("");
   }, [workspaceRepo]);
+  // Declared after the reset above so a repository switch on this page keeps the page mounted.
+  React.useEffect(() => { if (page === "workspace") workspaceVisited.current = true; }, [page, workspaceRepo]);
   const scopeTreeVersion = React.useMemo(() => treeVersionForScope(view), [view.session, view.repository, view.refs, view.navigation]);
   const filesVersion = filesVersionPinned ?? scopeTreeVersion;
   React.useEffect(() => {
@@ -1054,11 +1058,18 @@ export function App(): React.JSX.Element {
             }} />
         </HistorySplitView>
       </div>
-      {page === "files" ? <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount} /> : null}
-      {page === "workspace" ? <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
-        onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
-        onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
-        onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path) : undefined} /> : null}
+      {/* The files and workspace pages mount on first visit and then stay, hidden, like the commits page. */}
+      {filesAvailable && (page === "files" || filesVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "files" && "invisible absolute inset-0")}
+        inert={page !== "files"} data-testid="files-page-slot">
+        <FilesPage view={filesView} actions={filesActions} versionOptions={versionOptions} find={filesFind} onFindCount={setFilesFindCount} />
+      </div> : null}
+      {!workspaceUnavailable && (page === "workspace" || workspaceVisited.current) ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "workspace" && "invisible absolute inset-0")}
+        inert={page !== "workspace"} data-testid="workspace-page-slot">
+        <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
+          onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
+          onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
+          onRetryContent={() => workspaceStore.retryContent()} onOpenFileHistory={filesView.supported ? path => openFileHistory(path) : undefined} />
+      </div> : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}

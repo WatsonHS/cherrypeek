@@ -66,6 +66,14 @@ fixture 优先本地生成，保留种子、提交数量、分支数量、对象
 - **引用关系**：基准按 origin/HEAD → origin/main → origin/master 解析，没有远端跟踪分支时退回本地 main → master；切换任一 worktree 的 HEAD 不改变基准，外部 fetch 更新 origin/main 后只在刷新到新快照时重新计算。合入状态的可达判断与独立 `git merge-base --is-ancestor <分支> <基准>` 一致，MVP 中不可达的分支不显示标签；M4 加入补丁比对后，与独立 `git cherry` / `git patch-id` 一致，fixture 分别覆盖普通 merge、squash、rebase、cherry-pick 合并，以及合并时改过内容的 squash（应不显示标签而非误判）；比对超限或未完成时不出现否定结论，也不触发仓库写入。“包含它的分支”与独立 `git branch --contains` / `git branch -r --contains` 一致。两者都绑定当前浏览快照、可取消，外部引用变化不改写已显示的结果。worktree 检出标注与 `git worktree list --porcelain` 一致。
 - **上次查看与更新明细**：“上次查看后新增”与独立 `git rev-list <当前 tips> --not <上次 tips>` 一致，覆盖新增提交在拓扑顺序中不连续的情况（只标圆点、不画分隔线）；上次记录缺失或损坏时不标记、不报错。更新明细的快进 / 改写分类与独立 `git merge-base --is-ancestor <旧> <新>` 一致，被替换数与 `git rev-list <旧> --not <新>` 一致，新建与删除不遗漏；查看明细不改变当前浏览状态。
 - **交给 Agent**：prompt 中的观察时间、OID、领先 / 落后数与独立 `git rev-list --left-right --count` 一致，两侧改动文件与独立 `git diff --name-only <分叉点> <各侧尖端>` 的交集一致。用含“忽略之前要求”等伪指令、含伪造分隔标记的提交标题、分支名和路径做 fixture，确认它们只出现在参考数据段内且分隔标记无法被提前闭合；全部仓库名称与列表仅在序列化参考数据中出现，正文编号均可解析。覆盖当前 worktree 与浏览分支不一致、多条 prunable 记录、三父 merge、空仓库、detached、无基准和未知计数；prune 不扩大目标集合。复制前后仓库快照不变，复制动作不启动新进程；取事实可启动受约束的只读 Git。
+- **工作区、文件页与逐行追溯**（`pnpm test:pages`，真实 daemon）：
+  - **工作区状态**：与 `git diff --cached --raw -M`、`git diff --raw`、`git ls-files -u`、`git ls-files --others --exclude-standard` 一致。覆盖部分暂存、删除、重命名、模式变化、二进制、超限、gitlink、各类冲突、空仓库、linked worktree；bare 仓库没有工作区。
+  - **目录、内容与文件历史**：分别与 `git ls-tree`、`git cat-file`、`git rev-list <commit> -- <path>` 一致。
+  - **单次修改**：与 `git diff <父> <提交> -- <path>` 的 hunk 一致。
+  - **完整文件模式**：由 patch 重建出两侧 blob，hunk 头行数与 blob 一致。
+  - **逐行追溯**：与 `git blame --porcelain` 逐行一致，覆盖改名、merge、根提交、空文件、超限、多段推送。缓存命中不启动 Git。
+  - **取消**：用持住指定子命令的 Git 包装，确认读取被取消后子进程在 1 秒内被 daemon 回收。
+  - **只读**：读取前后仓库快照（含 `.git`）不变。
 - **详情扩展**：trailer 解析与 `git interpret-trailers --parse` 一致，正文中间形似 trailer 的行不被拆出；merge 带入的提交与独立 `git rev-list <第 N 父> --not <第一父>` 一致，octopus 按父提交分组。
 - **竞态**：人为延迟旧查询，依次切换筛选、仓库并主动刷新快照；被替代请求的响应不能覆盖新状态。仅收到外部新快照通知时，当前浏览请求的响应仍须正常接收。搜索定位与返回保留原范围、快照、查询和锚点；覆盖后续加入的路径筛选。
 - **固定快照与刷新**：外部提交间隔短于一次完整搜索 / 统计所需时间，验证当前快照查询仍能完成，不反复取消，也不自动混入新提交。点击刷新后统一采用新快照；保持有效的选择与锚点，锚点或所选引用失效时明确提示。另测无关分支更新不打断查询。

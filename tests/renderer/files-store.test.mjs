@@ -178,3 +178,150 @@ test("blame lines map to their blocks and age levels spread from oldest to newes
   const heat = blameHeat({ a: { authorTime: 10 }, b: { authorTime: 20 }, c: { authorTime: 30 } });
   assert.deepEqual([heat.a, heat.b, heat.c], [0, 2, 4]);
 });
+
+const textContent = (file, text, commit = version.commit) => ({ commit, path: path(file), kind: "text", text, lines: 1, totalLines: 1, truncated: false, size: text.length, textLossy: false, symlinkTarget: null, blobOid: null });
+
+test("a history answer for a path that is no longer selected is dropped", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  store.select({ path: path("a.ts"), kind: "file" }, { tab: "history" });
+  store.select({ path: path("b.ts"), kind: "file" }, { tab: "history" });
+  await api.answer("history", ok({ commit: version.commit, path: path("a.ts"), entries: [historyEntry(oid("c"))], nextCursor: "more-of-a" }),
+    item => item.params.pathHex === hex("a.ts"));
+  let view = store.getView();
+  assert.equal(view.selection.path.display, "b.ts");
+  assert.ok(view.history.key.includes(hex("b.ts")));
+  assert.deepEqual([view.history.state, view.history.entries, view.history.nextCursor], ["loading", [], null]);
+  assert.equal(view.selectedCommit, null, "a.ts's newest commit is not selected for b.ts");
+  assert.equal(api.pending.some(item => item.kind === "change"), false, "no diff is read for a.ts's commit");
+  await api.answer("history", ok({ commit: version.commit, path: path("b.ts"), entries: [historyEntry(oid("d"))], nextCursor: null }));
+  view = store.getView();
+  assert.deepEqual(view.history.entries.map(entry => entry.commit.oid), [oid("d")]);
+  assert.equal(view.selectedCommit, oid("d"));
+  assert.deepEqual(api.pending.filter(item => item.kind === "change").map(item => item.params.pathHex), [hex("b.ts")]);
+  store.dispose();
+});
+
+test("a change answer for a commit that is no longer selected is dropped", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  store.select({ path: path("a.ts"), kind: "file" }, { tab: "history" });
+  await api.answer("history", ok({ commit: version.commit, path: path("a.ts"), entries: [historyEntry(oid("d")), historyEntry(oid("e"))], nextCursor: null }));
+  assert.equal(store.getView().selectedCommit, oid("d"));
+  store.selectCommit(oid("e"));
+  await api.answer("change", ok({ oid: oid("d"), kind: "text", patch: "D" }), item => item.params.oid === oid("d"));
+  let view = store.getView();
+  assert.equal(view.selectedCommit, oid("e"));
+  assert.ok(view.change.key.startsWith(`${oid("e")}:`));
+  assert.deepEqual([view.change.state, view.change.value], ["loading", null], "d's diff is not shown for e");
+  await api.answer("change", ok({ oid: oid("e"), kind: "text", patch: "E" }));
+  view = store.getView();
+  assert.deepEqual([view.change.state, view.change.value.oid, view.change.value.patch], ["ready", oid("e"), "E"]);
+  store.dispose();
+});
+
+test("switching the tree version drops content, history and directory answers for the old version", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  store.select({ path: path("src/a.ts"), kind: "file" });
+  store.setTab("history");
+  await flush();
+  assert.deepEqual(api.pending.map(item => item.kind).sort(), ["content", "history", "tree"], "content, history and the root directory are in flight");
+  const next = { commit: oid("f"), label: "v2" };
+  store.setVersion(next);
+  const old = item => item.params.commit === version.commit;
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [{ name: "src" }], offset: 0, total: 1, hasMore: false }), old);
+  await api.answer("content", ok(textContent("src/a.ts", "old\n")), old);
+  await api.answer("history", ok({ commit: version.commit, path: path("src/a.ts"), entries: [historyEntry(oid("c"))], nextCursor: null }), old);
+  let view = store.getView();
+  assert.equal(view.version, next);
+  assert.equal(view.content, null);
+  assert.ok(view.history.key.startsWith(`${next.commit}:`));
+  assert.deepEqual([view.history.state, view.history.entries], ["loading", []]);
+  assert.deepEqual([view.selectedCommit, view.change], [null, null]);
+  assert.deepEqual(view.directories[""], { state: "loading", entries: [], total: 0, hasMore: false, error: null });
+  assert.equal(view.directories[hex("src")], undefined, "the old version's queued read of src does not land either");
+  assert.equal(api.pending.some(item => item.kind === "change"), false);
+  assert.deepEqual(api.pending.filter(item => item.kind === "tree").map(item => [item.params.commit, item.params.pathHex]), [[next.commit, null]],
+    "only the new version's root is read");
+  await api.answer("tree", ok({ commit: next.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  await api.answer("history", ok({ commit: next.commit, path: path("src/a.ts"), entries: [historyEntry(oid("9"))], nextCursor: null }));
+  view = store.getView();
+  assert.equal(view.directories[""].state, "ready");
+  assert.deepEqual(view.history.entries.map(entry => entry.commit.oid), [oid("9")]);
+  store.setTab("content");
+  const content = await api.answer("content", ok(textContent("src/a.ts", "new\n", next.commit)));
+  assert.equal(content.params.commit, next.commit);
+  assert.equal(store.getView().content.value.text, "new\n");
+  store.dispose();
+});
+
+const blameCommit = id => ({ oid: id, summary: "s", summaryTruncated: false, authorName: "W", authorEmail: "w@x", authorTime: 1, textLossy: false });
+const blameBlock = (line, id) => ({ startLine: line, lineCount: 1, oid: id, originalStartLine: line, originalPath: null });
+const blameChunk = (file, totalLines, lines, id) => ({ commit: version.commit, path: path(file), totalLines, blocks: lines.map(line => blameBlock(line, id)), commits: [blameCommit(id)] });
+
+for (const [what, leave, expectedKey] of [
+  ["another file", store => store.select({ path: path("b.ts"), kind: "file" }), `${version.commit}:${hex("b.ts")}`],
+  ["another tree version", store => store.setVersion({ commit: oid("f"), label: "v2" }), `${oid("f")}:${hex("a.ts")}`],
+]) {
+  test(`blame left mid-stream for ${what} cannot add blocks to, or complete, the next blame`, async () => {
+    const api = fakeApi();
+    const store = new FilesStore(api);
+    store.bind("repo", capabilities);
+    store.setVersion(version);
+    store.select({ path: path("a.ts"), kind: "file" });
+    store.setBlame(true);
+    const first = api.pending.find(item => item.kind === "blame");
+    api.emitBlame({ streamId: first.streamId, chunk: blameChunk("a.ts", 2, [1], oid("1")) });
+    assert.equal(store.getView().blame.blocks.length, 1);
+
+    leave(store);
+    const second = api.pending.find(item => item.kind === "blame" && item !== first);
+    assert.ok(second, "the next blame starts");
+    assert.notEqual(second.streamId, first.streamId);
+    assert.equal(store.getView().blame.key, expectedKey);
+    api.emitBlame({ streamId: second.streamId, chunk: blameChunk("b.ts", 3, [1, 2], oid("b")) });
+    // The first stream's remaining chunk and its final reply arrive late. Had the reply been taken,
+    // it would declare two blocks and finish the second blame, which has two of its three.
+    api.emitBlame({ streamId: first.streamId, chunk: blameChunk("a.ts", 2, [2], oid("2")) });
+    await api.answer("blame", ok({ totalLines: 2, blocks: 2 }), item => item === first);
+    let blame = store.getView().blame;
+    assert.equal(blame.key, expectedKey);
+    assert.equal(blame.state, "loading", "the first stream's reply does not complete the second");
+    assert.equal(blame.totalLines, 3);
+    assert.deepEqual(blame.blocks.map(block => [block.startLine, block.oid]), [[1, oid("b")], [2, oid("b")]]);
+    assert.deepEqual(Object.keys(blame.commits), [oid("b")]);
+
+    api.emitBlame({ streamId: second.streamId, chunk: blameChunk("b.ts", 3, [3], oid("b")) });
+    await api.answer("blame", ok({ totalLines: 3, blocks: 3 }), item => item === second);
+    blame = store.getView().blame;
+    assert.equal(blame.state, "ready");
+    assert.deepEqual(blame.blocks.map(block => block.oid), [oid("b"), oid("b"), oid("b")]);
+    store.dispose();
+  });
+}
+
+test("a file over the whole-file limit falls back to the changes-only diff in its history", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api, () => true);
+  store.bind("repo", { ...capabilities, fullFile: true });
+  store.setVersion(version);
+  store.select({ path: path("big.ts"), kind: "file" }, { tab: "history" });
+  await api.answer("history", ok({ commit: version.commit, path: path("big.ts"), entries: [historyEntry(oid("d"))], nextCursor: null }));
+  const full = await api.answer("change", fail("RESOURCE_LIMIT", "内容超出读取上限"));
+  assert.equal(full.params.fullFile, true);
+  assert.equal(store.getView().change.state, "loading", "the limit is not shown as an error");
+  const diff = { oid: oid("d"), kind: "text", patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false };
+  const fallback = await api.answer("change", ok(diff));
+  assert.deepEqual(fallback.params, { oid: oid("d"), parentIndex: 0, pathHex: hex("big.ts"), oldPathHex: null }, "read again without fullFile");
+  const change = store.getView().change;
+  assert.deepEqual([change.state, change.error, change.value], ["ready", null, diff]);
+  assert.equal(change.fullFileLimited, true, "the page is told the file is over the whole-file limit");
+  store.dispose();
+});

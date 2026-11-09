@@ -103,11 +103,13 @@ export interface DiffFocus {
  * A text diff with a change stepper and the display menu above it. `leading` goes at the start of
  * that header row. With `focus`, only the change containing that line is shown until the rest is expanded.
  */
-export function DiffView({ patch, fullAvailable: fullAvailableProp, leading, focus, path }: {
+export function DiffView({ patch, fullAvailable: fullAvailableProp, fullFileLimited = false, leading, focus, path }: {
   patch: string;
   /** Repository path of the file, used only to pick the syntax highlighting language. */
   path?: string | null;
   fullAvailable?: boolean;
+  /** "完整文件" was asked for, but the file is over its limit, so this patch has only the changes. */
+  fullFileLimited?: boolean;
   leading?: React.ReactNode;
   focus?: DiffFocus | null;
 }): React.JSX.Element {
@@ -165,6 +167,9 @@ export function DiffView({ patch, fullAvailable: fullAvailableProp, leading, foc
         </> : null}
       <DiffDisplayMenu fullAvailable={fullAvailable} fullUnavailableReason="完整文件需要核心返回带全文上下文的 diff（占位 · P4-11）" />
     </div>
+    {fullFileLimited && display.scope === "full"
+      ? <p role="note" data-testid="diff-full-limited" className="m-0 border-b border-line px-4 py-1.5 text-xs text-fg3">这个文件超过完整显示的上限（任一侧 5,000 行或约 400 KB），只显示改动。</p>
+      : null}
     <TokensContext.Provider value={tokensFor}>
       {rows ? display.wrap ? <SplitWrapped rows={rows} mark={mark} /> : <SplitColumns rows={rows} mark={mark} /> : <Unified lines={lines} wrap={display.wrap} mark={mark} />}
     </TokensContext.Provider>
