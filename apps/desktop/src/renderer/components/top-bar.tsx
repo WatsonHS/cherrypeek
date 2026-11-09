@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, Cloud, CornerUpLeft, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Cloud, CornerUpLeft, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag, X } from "lucide-react";
 import type { NavigationView } from "../lib/navigation-history.js";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
@@ -132,34 +132,63 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
 export const FOCUS_SEARCH_EVENT = "commitscope:focus-search";
 
 /**
- * The search slot. Below 1100px it collapses into an icon button (CSS in styles.css);
- * the button or ⌘F expands it over the right end of the top bar, Esc or leaving it empty collapses it.
+ * The search slot. Below 1100px it collapses into an icon button (CSS in styles.css); the button or ⌘F expands it
+ * over the right end of the top bar and focuses it. Esc, ×, or a click outside collapse it again; a search that is
+ * still in effect marks the icon.
  */
 function TopBarSearch({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false);
+  const [hasQuery, setHasQuery] = React.useState(false);
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const wantsFocus = React.useRef(false);
+  const input = () => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body [data-testid='search-input'], .topbar-search-body input:not([type='hidden'])") ?? null;
   const focusInput = React.useCallback(() => {
+    // A visible box takes focus at once, so keys typed right after ⌘F are not lost; a collapsed one focuses once shown.
+    wantsFocus.current = true;
     setExpanded(true);
-    // A visible box takes focus at once, so keys typed right after ⌘F are not lost; a collapsed one focuses after it opens.
-    const input = rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input");
-    input?.focus();
-    if (document.activeElement !== input) requestAnimationFrame(() => rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input")?.focus());
+    const field = input();
+    if (field && field.offsetParent !== null) { field.focus(); wantsFocus.current = false; }
   }, []);
+  React.useLayoutEffect(() => {
+    if (!expanded || !wantsFocus.current) return;
+    wantsFocus.current = false;
+    input()?.focus();
+  }, [expanded]);
   React.useEffect(() => {
     window.addEventListener(FOCUS_SEARCH_EVENT, focusInput);
     return () => window.removeEventListener(FOCUS_SEARCH_EVENT, focusInput);
   }, [focusInput]);
-  const collapseIfEmpty = () => {
-    const input = rootRef.current?.querySelector<HTMLInputElement>(".topbar-search-body input");
-    if (!input?.value) setExpanded(false);
-  };
-  return <div ref={rootRef} className="topbar-search contents" data-expanded={expanded ? "true" : "false"}
-    onKeyDown={event => { if (event.key === "Escape" && expanded) { setExpanded(false); (event.target as HTMLElement).blur(); } }}
-    onBlur={event => { if (!rootRef.current?.contains(event.relatedTarget as Node | null) && !document.querySelector("[data-slot='popover-content'][data-state='open']")) collapseIfEmpty(); }}>
-    <Button variant="ghost" size="icon" className="topbar-search-toggle" aria-label={label} title={`${label}（⌘F）`} onClick={focusInput}>
+  const collapse = React.useCallback(() => {
+    setHasQuery(Boolean(input()?.value));
+    setExpanded(false);
+    if (rootRef.current?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+  }, []);
+  // While expanded, Esc anywhere closes the box (and goes no further), and so does a click outside it.
+  React.useEffect(() => {
+    if (!expanded) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || document.querySelector("[data-slot='popover-content'][data-state='open']")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      collapse();
+    };
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (rootRef.current?.contains(target) || (target instanceof Element && target.closest("[data-slot='popover-content']"))) return;
+      collapse();
+    };
+    window.addEventListener("keydown", onKey, true);
+    document.addEventListener("pointerdown", onPointer, true);
+    return () => { window.removeEventListener("keydown", onKey, true); document.removeEventListener("pointerdown", onPointer, true); };
+  }, [collapse, expanded]);
+  return <div ref={rootRef} className="topbar-search contents" data-expanded={expanded ? "true" : "false"}>
+    <Button variant="ghost" size="icon" className="topbar-search-toggle" data-active={hasQuery ? "true" : undefined} aria-label={label}
+      title={hasQuery ? `${label}（搜索仍在生效，⌘F）` : `${label}（⌘F）`} onClick={focusInput}>
       <Search className="size-4" strokeWidth={1.75} />
     </Button>
-    <div className="topbar-search-body flex min-w-0 items-center">{children}</div>
+    <div className="topbar-search-body flex min-w-0 items-center">{children}
+      <button type="button" className="topbar-search-close" aria-label="收起搜索框" title="收起搜索框（Esc）" onClick={collapse}><X className="size-3.5" strokeWidth={1.75} /></button>
+    </div>
   </div>;
 }
 

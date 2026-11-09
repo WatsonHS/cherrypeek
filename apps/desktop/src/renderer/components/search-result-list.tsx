@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { CommitSummary } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
-import { identityTime, identityTimeTitle, shortOid } from "../lib/format.js";
+import { identityTimeTitle, momentLabel, parseGitTime, shortOid } from "../lib/format.js";
 import { createVirtualLayout } from "../lib/virtual-window.js";
 import { Button } from "./ui/button.js";
 
@@ -105,16 +105,22 @@ function resultRow(commit: CommitSummary, view: SearchView, pathParents: (number
   const pathParentLabel = pathParents?.some(parent => parent === null) ? "根提交空树" : pathParents?.length
     ? `路径命中父提交 ${pathParents.map(parent => (parent! + 1).toString()).join("、")}` : null;
   return <button key={commit.oid} type="button" role="option" aria-selected={selected} data-testid={`search-result-${commit.oid}`} data-oid={commit.oid}
-    style={{ height: ROW_HEIGHT }} className={`flex w-full items-center gap-2 px-3 text-left hover:bg-hover ${selected ? "bg-selected" : ""}`}
+    style={{ height: ROW_HEIGHT }} className={`flex w-full items-center gap-2 px-3 text-left ${selected ? "relative z-[1] bg-panel shadow-selected" : "hover:bg-hover"}`}
     onClick={() => onSelect(commit.oid)}>
     <span className="flex min-w-0 flex-1 flex-col gap-1">
       <span className="truncate text-[13px] font-medium text-fg">{commit.summary || "（空摘要）"}</span>
       <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-fg3"><span className="truncate">{identity.name || identity.email || "未知身份"}</span>
         {pathParentLabel ? <span className="shrink-0 text-accent-fg" title={pathParentLabel} data-testid={`search-path-match-${commit.oid}`}>{pathParentLabel}</span> : null}
-        <span className="shrink-0" title={identityTimeTitle(identity)}>{identityTime(identity)}</span><span className="ml-auto shrink-0 font-mono">#{rank + 1}</span></span>
+        <span className="shrink-0" title={identityTimeTitle(identity)}>{shortTime(identity.timestamp)}</span><span className="ml-auto shrink-0 font-mono">#{rank + 1}</span></span>
     </span>
     <code className="shrink-0 font-mono text-[10.5px] text-fg3">{shortOid(commit.oid)}</code>
   </button>;
+}
+
+/** "今天 22:31" / "11 月 2 日 10:00"; the full stamp with its offset is the tooltip. */
+function shortTime(timestamp: string): string {
+  const date = parseGitTime(timestamp);
+  return date ? momentLabel(date.valueOf()) : "";
 }
 
 function searchStatus(view: SearchView): string {

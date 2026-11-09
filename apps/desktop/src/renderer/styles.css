@@ -70,7 +70,8 @@
   --bad-bg: #2d1717;
   --bad-line: #5c2b28;
   --skel: #262724;
-  --shadow-selected: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
+  /* On a near-black ground a shadow does not show; a 1px ring marks the selected row. */
+  --shadow-selected: 0 0 0 1px #4a4c46, 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
   --l0: #8ba8ff; --l1: #f0a15e; --l2: #c29bf5; --l3: #4fc7a9; --l4: #f27aa6; --l5: #d9c24a;
   --add: #86d9a2; --del: #ff9c93; --add-bg: #14261a; --del-bg: #2d1717; --hunk-bg: #1c2233;
@@ -216,6 +217,8 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
  * Repository, page switch, scope, the updates notice and refresh always stay visible.
  */
 .topbar-search-toggle { display: none; }
+.topbar-search-close { display: none; }
+.topbar-search-toggle[data-active="true"] { background: var(--accent-soft); color: var(--accent-text); }
 
 @media (max-width: 1319px) {
   /* Capped, not fixed: a short name or scope ("main") takes only its own width. */
@@ -256,6 +259,13 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
     box-shadow: var(--shadow-pop);
   }
   .topbar-search[data-expanded="true"] .topbar-search-controls { flex: 1 1 auto; }
+  .topbar-search[data-expanded="true"] .topbar-search-close {
+    display: inline-flex; flex: none; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 7px; color: var(--text3);
+  }
+  .topbar-search[data-expanded="true"] .topbar-search-close:hover { background: var(--hover); color: var(--text); }
+  /* The box covers the right of the bar; the scope picker it would half cover steps aside while it is open. */
+  .window-toolbar:has(.topbar-search[data-expanded="true"]) .topbar-scope-picker { visibility: hidden; }
   .topbar-activity { gap: 0; padding-inline: 4px; }
 }
 

@@ -149,8 +149,14 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
 }): React.JSX.Element {
   const [scrollTarget, setScrollTarget] = React.useState<number | null>(null);
   // Both columns can be dragged wider or narrower; the widths are remembered.
-  const tree = useColumnWidth("commitscope.files.treeWidth", 290, 180, 520);
-  const historyColumn = useColumnWidth("commitscope.files.historyWidth", 300, 220, 560);
+  const storedTree = useColumnWidth("commitscope.files.treeWidth", 290, 180, 520);
+  const storedHistory = useColumnWidth("commitscope.files.historyWidth", 300, 220, 560);
+  // In a narrow window the columns give way so the file keeps room; the remembered widths come back when it widens.
+  const windowWidth = useWindowWidth();
+  const historyShown = Boolean(view.selection && view.historyOpen);
+  const [treeWidth, historyWidth] = fitColumns(windowWidth, storedTree, historyShown ? storedHistory : null);
+  const tree = { ...storedTree, width: treeWidth };
+  const historyColumn = { ...storedHistory, width: historyWidth };
   // Coming back from a change slides the file in; a blame line it came from flashes once.
   const [backAnimating, setBackAnimating] = React.useState(false);
   const [flashLine, setFlashLine] = React.useState<number | null>(null);
@@ -174,15 +180,16 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
   const historyCount = view.history?.state === "ready" ? `${view.history.entries.length}${view.history.nextCursor ? "+" : ""}` : null;
   const changeOpen = selection?.kind === "file" && view.tab === "history" && view.selectedCommit !== null;
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-testid="files-page">
-    <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-line pr-4 pl-2.5">
+    {/* One row at every width: middle folders shorten first, then the size note and the blame label give way. */}
+    <div className="@container flex min-h-12 shrink-0 items-center gap-2 border-b border-line pr-4 pl-2.5">
       <VersionBlock version={view.version} options={versionOptions} onChoose={actions.setVersion} />
       <span aria-hidden="true" className="mx-1 h-6 w-px bg-line" />
-      <nav aria-label="路径" className="flex min-w-0 flex-wrap items-center">
+      <nav aria-label="路径" className="flex min-w-0 shrink items-center overflow-hidden">
         {selection ? crumbs(selection.path).map((crumb, index, all) => {
           const last = index === all.length - 1;
           return <React.Fragment key={crumb.pathHex}>
-            {last ? <span aria-current="page" className="px-1 text-[13px] font-semibold">{crumb.name}</span>
-              : <button type="button" className="rounded px-1 text-[13px] text-fg2 hover:bg-hover hover:text-fg" title="在目录树中显示" data-testid="crumb-directory"
+            {last ? <span aria-current="page" className="min-w-[48px] shrink-[0.2] truncate px-1 text-[13px] font-semibold" title={crumb.name}>{crumb.name}</span>
+              : <button type="button" className="min-w-[24px] max-w-[160px] shrink truncate rounded px-1 text-[13px] text-fg2 hover:bg-hover hover:text-fg" title={`在目录树中显示 ${crumb.name}`} data-testid="crumb-directory"
                 // Clicking a folder only browses: it is shown in the tree, and the right side keeps what it shows.
                 // Directory history has its own explicit button on the tree row.
                 onClick={() => {
@@ -193,10 +200,10 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
                     row?.focus({ preventScroll: true });
                   });
                 }}>{crumb.name}</button>}
-            {last ? null : <span aria-hidden="true" className="text-line2">/</span>}
+            {last ? null : <span aria-hidden="true" className="shrink-0 text-line2">/</span>}
           </React.Fragment>;
         }) : <span className="px-1 text-[13px] text-fg3">选择左侧的文件或目录</span>}
-        {selection?.kind === "file" && view.content?.value && view.content.value.path.rawHex === selection.path.rawHex ? <span className="pl-1 text-xs whitespace-nowrap text-fg3">
+        {selection?.kind === "file" && view.content?.value && view.content.value.path.rawHex === selection.path.rawHex ? <span className="shrink-0 pl-1 text-xs whitespace-nowrap text-fg3 @max-5xl:hidden">
           {view.content.value.totalLines !== null ? `${view.content.value.totalLines.toLocaleString()} 行` : ""}
           {view.content.value.size !== null ? `${view.content.value.totalLines !== null ? " · " : ""}${formatBytes(view.content.value.size)}` : ""}
         </span> : null}
@@ -209,7 +216,7 @@ export function FilesPage({ view, actions, versionOptions, find, onFindCount, hi
         title={view.blameSupported ? "逐行追溯：显示每一行最后由哪个提交修改（git blame，⌥B）" : "逐行追溯需要核心支持（占位 · P4-12）"}
         className="flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] px-[9px] text-[12.5px] whitespace-nowrap text-fg3 hover:bg-hover hover:text-fg disabled:opacity-50 aria-pressed:bg-accent-soft aria-pressed:font-medium aria-pressed:text-accent-fg">
         <svg viewBox="0 0 16 16" aria-hidden="true" className="size-3.5" style={{ fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round" }}><path d="M2.5 3v10M5 4.5h8.5M5 8h6M5 11.5h7.5" /></svg>
-        逐行追溯{view.blameSupported ? null : <span className="text-[11px]">· 占位</span>}
+        <span className="@max-4xl:hidden">逐行追溯</span>{view.blameSupported ? null : <span className="text-[11px]">· 占位</span>}
       </button> : null}
       {selection ? <button type="button" aria-pressed={view.historyOpen} data-testid="history-toggle" title="显示或隐藏这个路径的历史（⌥H）"
         onClick={() => actions.setHistoryOpen(!view.historyOpen)}
@@ -280,6 +287,31 @@ function VersionBlock({ version, options, onChoose }: { version: TreeVersion | n
 type ColumnWidth = { width: number; fallback: number; min: number; max: number; set(width: number): void };
 
 /** A column width the user can drag, kept per viewer in localStorage. */
+/** The file keeps at least this much room; below it the tree and history columns shrink together, down to their minimums. */
+const MAIN_MIN_WIDTH = 560;
+
+function fitColumns(windowWidth: number, tree: ColumnWidth, history: ColumnWidth | null): [number, number] {
+  const wanted = tree.width + (history?.width ?? 0);
+  const room = windowWidth - MAIN_MIN_WIDTH - 12;
+  if (wanted <= room) return [tree.width, history?.width ?? 0];
+  const minimum = tree.min + (history?.min ?? 0);
+  if (room <= minimum) return [tree.min, history?.min ?? 0];
+  // Share the shortfall in proportion to how far each column is above its minimum.
+  const spare = wanted - minimum;
+  const keep = (room - minimum) / spare;
+  return [Math.round(tree.min + (tree.width - tree.min) * keep), history ? Math.round(history.min + (history.width - history.min) * keep) : 0];
+}
+
+function useWindowWidth(): number {
+  const [width, setWidth] = React.useState(() => window.innerWidth);
+  React.useEffect(() => {
+    const onResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return width;
+}
+
 function useColumnWidth(key: string, fallback: number, min: number, max: number): ColumnWidth {
   const clamp = React.useCallback((value: number) => Math.round(Math.min(max, Math.max(min, value))), [min, max]);
   const [width, setWidth] = React.useState(() => {
@@ -582,9 +614,12 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
   const oid = view.selectedCommit!;
   const summary = entry?.commit.summary ?? blameCommit?.summary ?? shortOid(oid);
   const meta = entry ? `${entry.commit.author.name} · ${when(entry.commit.author)}` : blameCommit ? `${blameCommit.authorName} · ${momentLabel(blameCommit.authorTime * 1000)}` : "";
+  const panelRef = React.useRef<HTMLElement>(null);
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      // Only while the files page is on screen: hidden pages stay mounted (inert) and must not act on keys.
+      if (panelRef.current?.closest("[inert]")) return;
       if (event.key === "Escape" && !target?.closest?.("input, textarea, [role='dialog'], [role='menu']")) onBack();
     };
     window.addEventListener("keydown", onKey);
@@ -592,18 +627,20 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
   }, [onBack]);
   const fileName = (view.focus?.from ?? view.selection)?.path.display.split("/").at(-1) ?? "文件";
   const backLabel = view.focus ? `${fileName} 第 ${view.focus.line} 行` : fileName;
-  return <section aria-label="这次提交对文件的修改" data-testid="change-panel" className="flex min-h-0 flex-1 flex-col bg-panel">
+  return <section ref={panelRef} aria-label="这次提交对文件的修改" data-testid="change-panel" className="flex min-h-0 flex-1 flex-col bg-panel">
     {/* The header gives way by its own width: author and date, then the OID and the long switch labels, then the
         "查看完整提交" text; the way back and the commit title only shorten, so nothing is cut at the right edge. */}
     <div className="@container flex min-h-11 shrink-0 items-center gap-2.5 border-b border-line pr-3 pl-2.5">
       <button type="button" onClick={onBack} data-testid="back-to-file" title={`回到 ${backLabel}（Esc 或 ⌥⌘1）`}
-        className="flex h-7 max-w-[220px] min-w-[84px] shrink items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95 @max-3xl:max-w-[160px]">
+        className="flex h-7 max-w-[220px] shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95 @max-3xl:max-w-[160px]">
         <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{backLabel}</span></button>
       <span aria-hidden="true" className="h-5 w-px shrink-0 bg-line" />
-      {/* When narrow, the author / date and then the title are cut; the OID and "查看完整提交" stay whole. */}
-      <span className="min-w-[60px] shrink truncate text-[13.5px] font-semibold" title={summary}>{summary}</span>
-      {meta ? <span className="min-w-0 shrink-[4] truncate text-xs text-fg3 @max-3xl:hidden" title={meta}>{meta}</span> : null}
-      <div className="min-w-0 flex-1" />
+      {/* The way back keeps its whole name (up to its cap); title and author · date share the rest, the author · date
+          giving way first. The OID and "在提交页查看" stay whole. */}
+      <span className="flex min-w-[60px] flex-1 items-baseline gap-2.5 overflow-hidden">
+        <span className="min-w-[60px] shrink truncate text-[13.5px] font-semibold" title={summary}>{summary}</span>
+        {meta ? <span className="min-w-[96px] shrink truncate text-xs text-fg3 @max-3xl:hidden" title={meta}>{meta}</span> : null}
+      </span>
       <div role="radiogroup" aria-label="这次提交显示什么" className="flex shrink-0 rounded-[9px] bg-sunken p-[3px]">
         {(["diff", "file"] as const).map(mode => <button key={mode} type="button" role="radio" aria-checked={view.changeView === mode} data-testid={`change-view-${mode}`}
           onClick={() => actions.setChangeView(mode)} title={mode === "diff" ? "这次提交对文件的修改" : "只看这个提交里的文件全文，不对比"}

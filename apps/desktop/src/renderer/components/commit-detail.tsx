@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, ChevronDown, ChevronUp, Copy, FileText, LoaderCircle } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileText, LoaderCircle } from "lucide-react";
 import type { BranchesContainingResult, ChangedFile, ChangedFilesPage, CommitDetails, CommitIdentity, CommitSummary, GitPath, MergeCommitsPage, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
@@ -250,7 +250,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
     {!page && detail.files.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取文件清单…</p> : null}
     {page ? <>
       {detail.fileParentIndex !== page.parentIndex ? <p role="status" className="m-0 text-xs text-fg3">正在读取 {parentLabel(detail.fileParentIndex)}；以下清单仍基于 {parentLabel(page.parentIndex)}。</p> : null}
-      <div className="overflow-hidden rounded-xl border border-line">
+      <div className="@container overflow-hidden rounded-xl border border-line">
         {page.files.length ? shownFiles.map((file, index) => {
           const diffKey = diffKeyFor(page.parentIndex, file);
           const expanded = detail.diffKey === diffKey;
@@ -294,24 +294,34 @@ function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, on
     file.binary ? "二进制" : "",
     file.similarity !== null ? `相似度 ${file.similarity}%` : "",
   ].filter(Boolean);
-  return <div data-testid="changed-file-row" className="relative border-b border-line last:border-b-0">
-    {onOpenFile ? <button type="button" aria-label={`在文件页打开 ${primary}`}
-      title={file.newPath ? "在文件页打开这个文件（目录树版本里的内容）" : "这个提交删除了它：在文件页打开它的历史，并选中这次修改"}
-      onClick={onOpenFile} data-testid="open-in-files"
-      className="absolute top-2 right-[88px] z-[1] flex size-7 items-center justify-center rounded-[7px] text-fg3 hover:bg-hover hover:text-fg"><FileText className="size-3.5" strokeWidth={1.75} /></button> : null}
-    <button type="button" aria-expanded={expanded} data-testid="changed-file-toggle" disabled={disabled} onClick={onToggle}
-      className={cn("flex w-full min-w-0 items-start gap-3 px-3 py-2.5 text-left hover:bg-bg/70 disabled:cursor-default disabled:hover:bg-transparent", onOpenFile && "pr-[130px]")}>
-      <Badge size="sm">{status}</Badge>
-      <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="break-all font-mono text-[12.5px] text-fg" title={[file.oldPath?.rawHex, file.newPath?.rawHex].filter(Boolean).join(" → ")}>{primary}{file.oldPath?.textLossy || file.newPath?.textLossy ? " · 路径含有非 UTF-8 字节" : ""}</span>
-        {file.status === "renamed" || file.status === "copied" ? <span className="break-all text-xs text-fg3">{oldPath} → {newPath}</span> : null}
-        {notes.length ? <span className="break-all text-xs text-fg3">{notes.join(" · ")}</span> : null}
-      </span>
-      <span className="shrink-0 font-mono text-xs tabular-nums"><span className="text-add">{file.additions === null ? "—" : `+${file.additions}`}</span> <span className="text-del">{file.deletions === null ? "—" : `−${file.deletions}`}</span></span>
-      <span className="shrink-0 text-xs text-fg3">{expanded ? "收起 diff" : "查看 diff"}</span>
-    </button>
+  const renamed = file.status === "renamed" || file.status === "copied";
+  // One row: the toggle (arrow, status, path, counts) and, beside it in the same flow, 在文件页打开 (icon only when narrow).
+  return <div data-testid="changed-file-row" className="border-b border-line last:border-b-0">
+    <div className="flex min-w-0 items-start">
+      <button type="button" aria-expanded={expanded} data-testid="changed-file-toggle" disabled={disabled} onClick={onToggle} title={expanded ? "收起 diff" : "查看 diff"}
+        className="flex min-w-0 flex-1 items-start gap-2.5 py-2.5 pr-2 pl-2.5 text-left hover:bg-bg/70 disabled:cursor-default disabled:hover:bg-transparent">
+        {expanded ? <ChevronDown className="mt-[3px] size-3.5 shrink-0 text-fg3" strokeWidth={1.75} /> : <ChevronRight className="mt-[3px] size-3.5 shrink-0 text-fg3" strokeWidth={1.75} />}
+        <Badge size="sm">{status}</Badge>
+        <span className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="break-words font-mono text-[12.5px] text-fg" title={renamed ? `${oldPath} → ${newPath}` : primary}>{pathWithBreaks(primary)}{file.oldPath?.textLossy || file.newPath?.textLossy ? " · 路径含有非 UTF-8 字节" : ""}</span>
+          {renamed ? <span className="break-words text-xs text-fg3">{oldPath ? pathWithBreaks(oldPath) : null} → {newPath ? pathWithBreaks(newPath) : null}</span> : null}
+          {notes.length ? <span className="break-words text-xs text-fg3">{notes.join(" · ")}</span> : null}
+        </span>
+        <span className="shrink-0 font-mono text-xs tabular-nums"><span className="text-add">{file.additions === null ? "—" : `+${file.additions}`}</span> <span className="text-del">{file.deletions === null ? "—" : `−${file.deletions}`}</span></span>
+      </button>
+      {onOpenFile ? <button type="button" aria-label={`在文件页打开 ${primary}`}
+        title={file.newPath ? "在文件页打开这个文件（目录树版本里的内容）" : "这个提交删除了它：在文件页打开它的历史，并选中这次修改"}
+        onClick={onOpenFile} data-testid="open-in-files"
+        className="mt-1.5 mr-1.5 flex h-7 shrink-0 items-center gap-1 rounded-[7px] px-1.5 text-xs text-fg3 hover:bg-hover hover:text-fg">
+        <FileText className="size-3.5" strokeWidth={1.75} /><span className="@max-xl:hidden">在文件页打开</span></button> : null}
+    </div>
     {expanded && diff ? <DiffPanel file={file} state={diff} fullFileLimited={fullFileLimited} onRetry={onRetry} /> : null}
   </div>;
+}
+
+/** A path that wraps only after its "/" separators, never in the middle of a name. */
+function pathWithBreaks(path: string): React.ReactNode[] {
+  return path.split("/").flatMap((part, index, parts) => index < parts.length - 1 ? [part, "/", <wbr key={index} />] : [part]);
 }
 
 function DiffPanel({ file, state, fullFileLimited, onRetry }: { file: ChangedFilesPage["files"][number]; state: CommitDetailView["diff"]; fullFileLimited: boolean; onRetry(): void }): React.JSX.Element {
