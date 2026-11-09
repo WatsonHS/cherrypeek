@@ -79,7 +79,7 @@ try {
     "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelFiles", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "cancelWorkspace", "chooseRepository",
     "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository", "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation",
     "getRepositorySession", "listChangedFiles", "listPathChanges", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onRepositoryObservationChanged",
-    "onWorkspaceChanged", "openRepositorySession", "readBlame", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
+    "onWorkspaceChanged", "openRepositorySession", "readBlame", "readCommitInfo", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
     "readWorkspaceStatus", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");

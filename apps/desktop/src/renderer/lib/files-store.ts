@@ -1,4 +1,4 @@
-import type { BlameBlock, BlameChunk, BlameCommit, ChangedFile, FileContent, FileDiff, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
+import type { BlameBlock, BlameChunk, BlameCommit, ChangedFile, CommitDetails, FileContent, FileDiff, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { BlameChunkEvent, RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
 
 /*
@@ -7,7 +7,7 @@ import type { BlameChunkEvent, RepositorySessionApi, RepositorySessionResult } f
  * is tied to the tree version and path it was made for; answers for anything else are dropped.
  */
 
-export type FilesApi = Pick<RepositorySessionApi, "listTree" | "readFileContent" | "readFileHistory" | "readFileChange" | "listPathChanges" | "readBlame" | "onBlameChunk" | "cancelFiles">;
+export type FilesApi = Pick<RepositorySessionApi, "listTree" | "readFileContent" | "readFileHistory" | "readFileChange" | "listPathChanges" | "readCommitInfo" | "readBlame" | "onBlameChunk" | "cancelFiles">;
 
 /** For a directory and a picked commit: the files it changed under the directory, a page at a time. */
 export interface PathChangesState {
@@ -114,6 +114,11 @@ export interface FilesView {
   changeView: ChangeView;
   /** The file's content in the picked commit, read when `changeView` is "file". */
   revision: Load<FileContent> | null;
+  /** The change view's commit details strip: open or folded; read only while open. */
+  commitInfoOpen: boolean;
+  commitInfo: Load<CommitDetails> | null;
+  /** Every file the picked commit changed (against its first parent), for the strip. */
+  commitFiles: PathChangesState | null;
   blameEnabled: boolean;
   blame: BlameState | null;
   focus: BlameFocus | null;
@@ -135,7 +140,7 @@ const ROOT = "";
 const initialView = (): FilesView => ({
   supported: false, blameSupported: false, fullFileSupported: false, repoKey: null, version: null, directories: {}, expanded: {},
   selection: null, tab: "content", historyOpen: false, content: null, contentLines: CONTENT_LINES, historyMessage: "", history: null,
-  selectedCommit: null, parentIndex: 0, change: null, changeView: "diff", revision: null, blameEnabled: false, blame: null, focus: null, pathChanges: null, pathOpen: null, pathChange: null,
+  selectedCommit: null, parentIndex: 0, change: null, changeView: "diff", revision: null, commitInfoOpen: false, commitInfo: null, commitFiles: null, blameEnabled: false, blame: null, focus: null, pathChanges: null, pathOpen: null, pathChange: null,
 });
 
 /** For each line (1-based index), the blame block that covers it; undefined while the stream has not reached it. */
@@ -165,7 +170,7 @@ const changeKey = (oid: string, parentIndex: number | null, pathHex: string, ful
 export class FilesStore {
   private view = initialView();
   private readonly listeners = new Set<() => void>();
-  private readonly intents = { content: 0, history: 0, change: 0, blame: 0, pathChanges: 0, pathChange: 0, revision: 0 };
+  private readonly intents = { content: 0, history: 0, change: 0, blame: 0, pathChanges: 0, pathChange: 0, revision: 0, commitInfo: 0, commitFiles: 0 };
   private treeIntents: Record<string, number> = {};
   /** Directory reads share one channel in main; they run one after another so a parent never cancels a child. */
   private treeQueue: Promise<void> = Promise.resolve();
@@ -263,6 +268,23 @@ export class FilesStore {
   loadMoreHistory(): void { if (this.view.history?.nextCursor && !this.view.history.loadingMore) void this.loadHistory(true); }
   retryHistory(): void { void this.loadHistory(false); }
   retryContent(): void { void this.loadContent(); }
+
+  /** Opens or folds the change view's commit details; they are read the first time they are shown. */
+  toggleCommitInfo(): void {
+    this.update({ ...this.view, commitInfoOpen: !this.view.commitInfoOpen });
+    if (this.view.commitInfoOpen) void this.loadCommitInfo();
+  }
+
+  loadMoreCommitFiles(): void { if (this.view.commitFiles?.hasMore && !this.view.commitFiles.loadingMore) void this.loadCommitFiles(true); }
+  retryCommitInfo(): void { if (this.view.commitInfo?.state === "error") void this.loadCommitInfo(); else void this.loadCommitFiles(false); }
+
+  /** Another file the picked commit changed: switch to it on the files page, the same commit still picked. */
+  openCommitFile(file: ChangedFile): void {
+    const oid = this.view.selectedCommit;
+    const path = file.newPath ?? file.oldPath;
+    if (!oid || !path) return;
+    this.select({ path, kind: "file" }, { tab: "history", commit: oid });
+  }
 
   /** Shows the picked commit's change, or the file as it was in that commit. */
   setChangeView(view: ChangeView): void {
@@ -510,6 +532,44 @@ export class FilesStore {
   private loadShownChange(): void {
     if (this.view.changeView === "file") void this.loadRevision();
     else void this.loadChange();
+    if (this.view.commitInfoOpen) void this.loadCommitInfo();
+  }
+
+  private async loadCommitInfo(): Promise<void> {
+    const oid = this.view.selectedCommit;
+    if (!oid || this.view.selection?.kind !== "file") return;
+    // Read again unless already read: a read cancelled midway (refresh, leaving the page) must not stay "loading".
+    if (this.view.commitInfo?.key === oid && this.view.commitInfo.state === "ready") { void this.loadCommitFiles(false); return; }
+    const intent = ++this.intents.commitInfo;
+    this.intents.commitFiles += 1;
+    this.update({ ...this.view, commitInfo: { key: oid, state: "loading", value: null, error: null }, commitFiles: null });
+    const result = await this.retrying(() => this.api.readCommitInfo({ oid }), () => intent === this.intents.commitInfo);
+    if (!result || intent !== this.intents.commitInfo || this.view.commitInfo?.key !== oid) return;
+    this.update({ ...this.view, commitInfo: result.ok ? { key: oid, state: "ready", value: result.value, error: null } : { key: oid, state: "error", value: null, error: errorOf(result) } });
+    if (result.ok) void this.loadCommitFiles(false);
+  }
+
+  private async loadCommitFiles(more: boolean): Promise<void> {
+    const details = this.view.commitInfo?.value;
+    if (!details) return;
+    const oid = details.commit.oid;
+    const current = this.view.commitFiles?.key === oid ? this.view.commitFiles : null;
+    if (!more && current?.state === "ready" && !current.loadingMore) return;
+    const offset = more && current ? current.files.length : 0;
+    const intent = ++this.intents.commitFiles;
+    this.update({ ...this.view, commitFiles: more && current ? { ...current, loadingMore: true }
+      : { key: oid, state: "loading", files: [], totalFiles: 0, additions: 0, deletions: 0, hasMore: false, loadingMore: false, error: null } });
+    // The whole commit (an empty path), against its first parent like the rest of the files page.
+    const result = await this.retrying(() => this.api.listPathChanges({ oid, parentIndex: details.commit.parents.length === 0 ? null : 0, pathHex: "", offset, pageSize: PATH_CHANGES_PAGE }),
+      () => intent === this.intents.commitFiles);
+    if (!result || intent !== this.intents.commitFiles || this.view.commitFiles?.key !== oid) return;
+    if (!result.ok) {
+      this.update({ ...this.view, commitFiles: { ...this.view.commitFiles, state: "error", loadingMore: false, error: errorOf(result) } });
+      return;
+    }
+    const page = result.value;
+    this.update({ ...this.view, commitFiles: { key: oid, state: "ready", files: [...(more ? this.view.commitFiles.files : []), ...page.files], totalFiles: page.totalFiles,
+      additions: page.overview.additions, deletions: page.overview.deletions, hasMore: page.hasMore, loadingMore: false, error: null } });
   }
 
   private async loadRevision(): Promise<void> {
@@ -604,6 +664,8 @@ export class FilesStore {
   }
 
   private resetAll(): void {
+    this.intents.commitInfo += 1;
+    this.intents.commitFiles += 1;
     this.intents.revision += 1;
     this.intents.pathChanges += 1;
     this.intents.pathChange += 1;

@@ -31,6 +31,7 @@ function fakeApi() {
     readFileHistory: call("history"),
     readFileChange: call("change"),
     listPathChanges: call("pathChanges"),
+    readCommitInfo: call("commitInfo"),
     readBlame: (params, streamId) => new Promise(resolve => pending.push({ kind: "blame", params, streamId, resolve })),
     onBlameChunk(listener) { blameListener = listener; return () => { blameListener = null; }; },
     cancelFiles: async () => ok({ cancelled: true }),
@@ -266,6 +267,51 @@ test("the history column sits beside the file: picking a commit opens its change
   assert.deepEqual([view.tab, view.historyOpen, view.content.state], ["content", true, "ready"], "the file is shown again, with the column still open");
   store.setHistoryOpen(false);
   assert.equal(store.getView().historyOpen, false);
+  store.dispose();
+});
+
+test("the change view's commit details are read when opened, list the whole commit, and open another of its files in place", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  store.select({ path: path("a.ts"), kind: "file" });
+  await api.answer("content", ok(textContent("a.ts", "x\n")));
+  store.setHistoryOpen(true);
+  await api.answer("history", ok({ commit: version.commit, path: path("a.ts"), entries: [historyEntry(oid("c"))], nextCursor: null }));
+  store.selectCommit(oid("c"));
+  await api.answer("change", ok({ oid: oid("c") }));
+  assert.ok(!api.pending.some(item => item.kind === "commitInfo"), "folded details are not read");
+  store.toggleCommitInfo();
+  const details = commit => ({ commit: summary(commit), message: "fix\n\nbody\n", messageWithoutTrailers: "fix\n\nbody\n", trailers: [], refs: [], worktrees: [],
+    observedAtUnixMs: 1, refsTruncated: false, worktreesTruncated: false, update: { state: "unchanged" } });
+  const info = await api.answer("commitInfo", ok(details(oid("c"))));
+  assert.deepEqual(info.params, { oid: oid("c") });
+  const files = await api.answer("pathChanges", ok(pathPage(oid("c"), [changedFile("a.ts"), changedFile("b.ts")])));
+  assert.deepEqual(files.params, { oid: oid("c"), parentIndex: 0, pathHex: "", offset: 0, pageSize: 200 }, "the whole commit, against its first parent");
+  assert.deepEqual(store.getView().commitFiles.files.map(file => file.newPath.display), ["a.ts", "b.ts"]);
+
+  store.openCommitFile(changedFile("b.ts"));
+  let view = store.getView();
+  assert.deepEqual([view.selection.path.display, view.selectedCommit, view.tab, view.commitInfoOpen], ["b.ts", oid("c"), "history", true], "the same commit stays picked");
+  const change = await api.answer("change", ok({ oid: oid("c") }), item => item.params.pathHex === hex("b.ts"));
+  assert.equal(change.params.oid, oid("c"));
+  assert.ok(!api.pending.some(item => item.kind === "commitInfo" || item.kind === "pathChanges"), "the same commit's details are not read again");
+
+  await api.answer("history", ok({ commit: version.commit, path: path("b.ts"), entries: [historyEntry(oid("c")), historyEntry(oid("d"))], nextCursor: null }));
+  store.selectCommit(oid("d"));
+  await flush();
+  assert.ok(api.pending.some(item => item.kind === "commitInfo" && item.params.oid === oid("d")), "open details follow the picked commit");
+  await store.cancel();
+  await api.answer("commitInfo", ok(details(oid("d"))));
+  assert.equal(store.getView().commitInfo.state, "loading", "an answer after cancelling is dropped");
+  store.toggleCommitInfo();
+  store.toggleCommitInfo();
+  const again = await api.answer("commitInfo", ok(details(oid("d"))));
+  assert.equal(again.params.oid, oid("d"));
+  view = store.getView();
+  assert.deepEqual([view.commitInfo.state, view.commitInfo.value.commit.oid], ["ready", oid("d")], "a read cancelled midway is read again when shown");
   store.dispose();
 });
 

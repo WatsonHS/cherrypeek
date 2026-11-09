@@ -6,6 +6,7 @@ import { momentLabel, parseGitTime, shortOid } from "../lib/format.js";
 import { blameHeat, blameLineIndex, type ChangeView, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
 import { cn } from "../lib/utils.js";
 import { DiffView, useDiffDisplay } from "./diff-view.js";
+import { FoldToggle, FoldedText, foldItems } from "./fold.js";
 import { SyntaxLine } from "./syntax-text.js";
 import { languageForPath } from "../lib/syntax/languages.js";
 import { useSyntaxLines } from "../lib/syntax/highlight.js";
@@ -30,6 +31,11 @@ export interface FilesActions {
   openOriginalHistory(): void;
   /** With a commit picked: show its change, or the file as it was in that commit. */
   setChangeView(view: ChangeView): void;
+  /** The change view's commit details: fold / open, more files, retry, and opening another of the commit's files. */
+  toggleCommitInfo(): void;
+  loadMoreCommitFiles(): void;
+  retryCommitInfo(): void;
+  openCommitFile(file: ChangedFile): void;
   loadMoreEntries(pathHex: string): void;
   retryDirectory(pathHex: string): void;
   select(selection: FilesSelection): void;
@@ -603,10 +609,11 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
           {mode === "diff" ? "改动" : <><span className="@max-2xl:hidden">这一版的</span>文件</>}</button>)}
       </div>
       <Button variant="outline" size="sm" className="shrink-0 font-mono @max-2xl:hidden" onClick={() => { void window.commitScope.copyText(oid); }} title="复制完整 OID">{shortOid(oid)}</Button>
-      <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit" aria-label="查看完整提交" title={`在提交页查看完整提交 ${shortOid(oid)}`}>
-        <span className="@max-xl:hidden">查看完整提交</span><ChevronRight className="size-3" strokeWidth={1.75} /></Button>
+      <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit" aria-label="在提交页查看" title={`在提交页查看 ${shortOid(oid)}：它在整体历史里的位置、前后提交和分支`}>
+        <span className="@max-xl:hidden">在提交页查看</span><ChevronRight className="size-3" strokeWidth={1.75} /></Button>
     </div>
     <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-3 pb-6">
+      <CommitInfoStrip view={view} actions={actions} />
       {view.focus?.originalPath && view.focus.oid === oid ? <p className="m-0 mb-2 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是它在那个路径下的修改。</p> : null}
       {view.changeView === "file" ? <RevisionContent view={view} oid={oid} /> : <ChangeBox view={view} actions={actions} entry={entry} />}
     </div>
@@ -628,6 +635,75 @@ function CommitPane({ view, actions }: { view: FilesView; actions: FilesActions 
       {view.selection?.kind === "file" && view.selectedCommit ? <ChangeBox view={view} actions={actions} entry={selected} /> : null}
       {!view.selectedCommit && history?.state === "ready" && entries.length === 0 ? <p className="m-0 text-[13px] text-fg3">{view.historyMessage ? `没有提交消息包含“${view.historyMessage}”的修改。` : "这个版本的可达历史里没有修改过这个路径的提交。"}</p> : null}
     </div>
+  </div>;
+}
+
+/**
+ * The picked commit's details inside the change view, folded to one line by default: the message body and trailers,
+ * who wrote and committed it, its parents, and every file it changed (another one opens in place). The commits page
+ * stays one click away for its place in the whole history.
+ */
+function CommitInfoStrip({ view, actions }: { view: FilesView; actions: FilesActions }): React.JSX.Element {
+  const open = view.commitInfoOpen;
+  const info = view.commitInfo?.value ?? null;
+  const files = view.commitFiles;
+  const currentHex = view.selection?.path.rawHex;
+  const body = info ? info.messageWithoutTrailers.split("\n").slice(1).join("\n").trim() : "";
+  const author = info?.commit.author;
+  const committer = info?.commit.committer;
+  const sameCommitter = author && committer && author.name === committer.name && author.email === committer.email && author.timestamp === committer.timestamp;
+  // A commit touching many files folds after 10; the file being looked at always stays in the list.
+  const [filesOpen, setFilesOpen] = React.useState(false);
+  React.useEffect(() => setFilesOpen(false), [files?.key]);
+  const isCurrent = (file: ChangedFile) => [file.newPath, file.oldPath].some(path => path?.rawHex === currentHex);
+  const shownFiles = files ? foldItems(files.files, 10, filesOpen, isCurrent) : [];
+  return <div className="mb-3 overflow-hidden rounded-xl border border-line bg-bg" data-testid="commit-info">
+    <button type="button" aria-expanded={open} onClick={actions.toggleCommitInfo} data-testid="commit-info-toggle"
+      className="flex h-9 w-full items-center gap-1.5 px-3 text-left text-xs text-fg2 hover:bg-hover">
+      {open ? <ChevronDown className="size-3.5 shrink-0 text-fg3" /> : <ChevronRight className="size-3.5 shrink-0 text-fg3" />}
+      <span className="shrink-0 font-medium text-fg">提交详情</span>
+      {!open ? <span className="min-w-0 truncate text-fg3">完整消息、作者和这次提交改动的其他文件</span> : null}
+    </button>
+    {open ? <div className="flex flex-col gap-3 border-t border-line px-4 py-3">
+      {view.commitInfo?.state === "loading" ? <p role="status" className="m-0 flex items-center gap-1.5 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取提交详情…</p> : null}
+      {view.commitInfo?.state === "error" ? <div role="alert" className="flex items-center gap-2 text-xs text-bad"><span>{view.commitInfo.error?.message}</span><Button variant="outline" size="sm" onClick={actions.retryCommitInfo}>重试</Button></div> : null}
+      {info ? <>
+        {body ? <FoldedText text={body} lines={8} testId="commit-info-body" className="m-0 whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-fg2" />
+          : <p className="m-0 text-xs text-fg3">没有正文。</p>}
+        {info.trailers.length ? <dl className="m-0 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+          {info.trailers.map((trailer, index) => <React.Fragment key={`${trailer.key}:${index}`}><dt className="text-fg3">{trailer.key}</dt><dd className="m-0 break-words text-fg2">{trailer.value}</dd></React.Fragment>)}
+        </dl> : null}
+        <dl className="m-0 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+          <dt className="text-fg3">作者</dt><dd className="m-0 break-words text-fg2">{author!.name} &lt;{author!.email}&gt; · {when(author!)}</dd>
+          {!sameCommitter ? <><dt className="text-fg3">提交者</dt><dd className="m-0 break-words text-fg2">{committer!.name} &lt;{committer!.email}&gt; · {when(committer!)}</dd></> : null}
+          <dt className="text-fg3">父提交</dt><dd className="m-0 font-mono text-fg2">{info.commit.parents.length ? info.commit.parents.map(parent => shortOid(parent)).join(" · ") : "无（根提交）"}</dd>
+        </dl>
+        {files?.state === "loading" && files.files.length === 0 ? <p role="status" className="m-0 flex items-center gap-1.5 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取改动的文件…</p> : null}
+        {files?.state === "error" ? <div role="alert" className="flex items-center gap-2 text-xs text-bad"><span>{files.error?.message}</span><Button variant="outline" size="sm" onClick={actions.retryCommitInfo}>重试</Button></div> : null}
+        {files && files.files.length ? <div className="flex flex-col gap-1">
+          <span className="text-xs text-fg3">这次提交改动了 {files.totalFiles} 个文件<Counts additions={files.additions} deletions={files.deletions} /></span>
+          <ul className="m-0 flex list-none flex-col p-0">
+            {shownFiles.map(file => {
+              const path = (file.newPath ?? file.oldPath)!;
+              const current = isCurrent(file);
+              return <li key={`${file.oldPath?.rawHex ?? ""}:${file.newPath?.rawHex ?? ""}`}>
+                <button type="button" data-testid="commit-info-file" aria-current={current ? "true" : undefined} disabled={current} onClick={() => actions.openCommitFile(file)}
+                  title={current ? "正在看这个文件" : `在这里看 ${path.display} 在这次提交里的修改`}
+                  className="flex min-h-8 w-full items-center gap-2 rounded-[7px] px-2 text-left hover:bg-hover disabled:cursor-default aria-[current=true]:bg-accent-soft aria-[current=true]:hover:bg-accent-soft">
+                  <span className="shrink-0 rounded-[5px] bg-sunken px-1.5 text-[11px] leading-5 font-semibold text-fg2">{STATUS_LABEL[file.status]}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">{path.display}{file.status === "renamed" && file.oldPath ? <span className="ml-1.5 font-sans text-xs text-fg3">← {file.oldPath.display}</span> : null}</span>
+                  {current ? <span className="shrink-0 text-[11px] font-medium text-accent-fg">当前</span> : null}
+                  <Counts additions={file.additions} deletions={file.deletions} />
+                </button>
+              </li>;
+            })}
+          </ul>
+          <FoldToggle hidden={files.files.length - shownFiles.length} open={filesOpen} noun="文件" onToggle={() => setFilesOpen(value => !value)} testId="commit-info-fold" />
+          {files.hasMore && (filesOpen || files.files.length <= 10) ? <Button variant="outline" size="sm" className="self-start" disabled={files.loadingMore} onClick={actions.loadMoreCommitFiles}>
+            {files.loadingMore ? "读取中…" : `再显示 ${Math.min(200, files.totalFiles - files.files.length)} 个文件（共 ${files.totalFiles} 个）`}</Button> : null}
+        </div> : null}
+      </> : null}
+    </div> : null}
   </div>;
 }
 

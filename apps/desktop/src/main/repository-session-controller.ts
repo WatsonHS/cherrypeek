@@ -163,7 +163,7 @@ export class RepositorySessionController {
    * previous one on the same channel, so a slow answer never lands on a newer selection.
    */
   private readonly channelIntent: Record<ReadChannel, number> = {
-    workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, blame: 0,
+    workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, commitInfo: 0, blame: 0,
   };
   private readonly activeChannel: Partial<Record<ReadChannel, ActiveChannelRequest>> = {};
   private readonly unsubscribeCore: () => void;
@@ -874,6 +874,14 @@ export class RepositorySessionController {
         page.entries.length <= params.pageSize && (page.nextCursor === null || page.entries.length > 0)));
   }
 
+  /** The same read as getCommit, on the files page's own channel and without touching the commit page's cache. */
+  async readCommitInfo(input: unknown): Promise<CommitDetails> {
+    const params = validateGetCommitParams(input);
+    const session = this.requireCommitDetailsCapability();
+    this.validateOidForSession(params.oid, session);
+    return this.runChannelRequest("commitInfo", session, signal => this.readCommitDetails(session, params, signal));
+  }
+
   async listPathChanges(input: unknown): Promise<ChangedFilesPage> {
     const params = validatePathChangesParams(input);
     const session = this.requireFilesCapability();
@@ -933,7 +941,7 @@ export class RepositorySessionController {
   }
 
   async cancelFiles(): Promise<{ cancelled: boolean }> {
-    return this.cancelChannels(["tree", "fileContent", "fileHistory", "fileChange", "pathChanges", "blame"], "文件页读取已取消");
+    return this.cancelChannels(["tree", "fileContent", "fileHistory", "fileChange", "pathChanges", "commitInfo", "blame"], "文件页读取已取消");
   }
 
   private async cancelChannels(channels: ReadChannel[], reason: string): Promise<{ cancelled: boolean }> {
@@ -2392,7 +2400,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "blame";
+type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "commitInfo" | "blame";
 
 interface ActiveChannelRequest {
   abort: AbortController;

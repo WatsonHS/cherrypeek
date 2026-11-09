@@ -144,10 +144,16 @@ try {
   await page.getByRole("tab", { name: /文件改动/ }).click();
   await page.getByRole("heading", { name: "Commit with more than one file page", exact: true })
     .waitFor({ state: "visible", timeout: 15_000 });
-  await page.getByTestId("file-page-next").waitFor({ state: "visible", timeout: 15_000 });
+  // A long page folds after 30 files, and "下一页" waits until they are shown so paging never skips them.
+  const filesFold = page.getByTestId("changed-files-fold");
+  await filesFold.waitFor({ state: "visible", timeout: 15_000 });
   const widePageRows = page.getByTestId("changed-file-row");
-  await widePageRows.first().waitFor({ state: "visible" });
+  assert.equal(await widePageRows.count(), 30, "a long file page folds after 30 files");
+  assert.equal((await filesFold.textContent()).trim(), "还有 170 个文件");
+  assert.equal(await page.getByTestId("file-page-next").count(), 0, "no next page while files of this page are folded");
+  await filesFold.click();
   assert.equal(await widePageRows.count(), 200);
+  await page.getByTestId("file-page-next").waitFor({ state: "visible" });
   await page.getByTestId("file-page-next").click();
   await waitForDom(page, () => document.querySelectorAll('[data-testid="changed-file-row"]').length === 5);
   assert.equal(await widePageRows.count(), 5, "file pagination replaces the prior page rather than accumulating rows");

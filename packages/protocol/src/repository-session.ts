@@ -177,6 +177,8 @@ export interface RepositorySessionApi {
   readFileChange(params: ReadFileChangeParams): Promise<RepositorySessionResult<FileDiff>>;
   /** Files a commit changed under one directory (empty pathHex: the whole repository), one page at a time. */
   listPathChanges(params: ListPathChangesParams): Promise<RepositorySessionResult<ChangedFilesPage>>;
+  /** A commit's full details for the files page's change view; its own channel, so commit page reads are not cancelled. */
+  readCommitInfo(params: GetCommitParams): Promise<RepositorySessionResult<CommitDetails>>;
   cancelFiles(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
   /** P4-12: chunks arrive through `onBlameChunk` with the same `streamId`; the result resolves when the file is covered. */
   readBlame(params: ReadBlameParams, streamId: string): Promise<RepositorySessionResult<{ totalLines: number; blocks: number }>>;

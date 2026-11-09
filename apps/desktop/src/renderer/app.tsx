@@ -1014,6 +1014,10 @@ export function App(): React.JSX.Element {
     retryPathChanges: () => filesStore.retryPathChanges(),
     openOriginalHistory: () => { recordJump(); filesStore.openOriginalHistory(); },
     setChangeView: next => filesStore.setChangeView(next),
+    toggleCommitInfo: () => filesStore.toggleCommitInfo(),
+    loadMoreCommitFiles: () => filesStore.loadMoreCommitFiles(),
+    retryCommitInfo: () => filesStore.retryCommitInfo(),
+    openCommitFile: file => { recordJump(); filesStore.openCommitFile(file); },
     setHistoryOpen: open => {
       try { localStorage.setItem(FILES_HISTORY_OPEN_KEY, String(open)); } catch { /* storage unavailable: not remembered */ }
       filesStore.setHistoryOpen(open);

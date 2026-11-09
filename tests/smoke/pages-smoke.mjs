@@ -284,6 +284,27 @@ try {
     await page.getByTestId("history-filter").fill("");
     await page.getByTestId("back-to-file").click();
 
+    // The change view's commit details: folded until opened, then every file of the commit (a root commit here, no parent);
+    // another file opens in place with the same commit picked, and ⌘[ returns to the first file.
+    const crumbIs = name => page.waitForFunction(expected => document.querySelector("nav[aria-label='路径'] [aria-current='page']")?.textContent === expected, name, { timeout: 15_000 });
+    await tree("long.ts").click();
+    await page.getByTestId("file-history-row").filter({ hasText: "add the first files" }).click();
+    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+    const infoToggle = page.getByTestId("commit-info-toggle");
+    if (await infoToggle.getAttribute("aria-expanded") !== "true") await infoToggle.click();
+    await page.waitForFunction(() => document.querySelectorAll("[data-testid='commit-info-file']").length === 6, null, { timeout: 15_000 });
+    assert.match(await page.locator("[data-testid='commit-info-file'][aria-current='true']").textContent() ?? "", /src\/long\.ts/u);
+    await page.getByTestId("commit-info-file").filter({ hasText: "README.md" }).click();
+    await crumbIs("README.md");
+    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
+    assert.match(await page.locator("[data-testid='commit-info-file'][aria-current='true']").textContent() ?? "", /README\.md/u, "the same commit, now on README.md");
+    assert.match(await page.locator("[data-testid='file-history-row'][aria-pressed='true']").textContent() ?? "", /add the first files/u);
+    await page.keyboard.press("Meta+BracketLeft");
+    await crumbIs("long.ts");
+    await page.getByTestId("change-panel").waitFor();
+    await infoToggle.click();
+    await page.getByTestId("back-to-file").click();
+
     // Switching pages keeps the files page's file and scroll position.
     await tree("long.ts").click();
     await page.locator("[data-testid='file-content'] [data-line='400']").waitFor({ timeout: 15_000 });

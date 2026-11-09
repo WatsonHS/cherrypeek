@@ -4,6 +4,7 @@ import type { BranchesContainingResult, ChangedFile, ChangedFilesPage, CommitDet
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
 import type { CommitDetailView } from "../lib/commit-detail-store.js";
+import { FoldToggle, FoldedText, foldItems } from "./fold.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
 import { CommitHandoffMenu } from "./handoff-menu.js";
 import { identityTime, identityTimeTitle, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
@@ -181,7 +182,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function MessageBody({ details }: { details: CommitDetails }): React.JSX.Element {
   const body = details.messageWithoutTrailers.split(/\r?\n/u).slice(1).join("\n").trim();
   return <div className="flex flex-col gap-3 text-[13px]">
-    {body ? <pre data-testid="commit-detail-message" className="m-0 whitespace-pre-wrap break-words font-sans leading-relaxed text-fg2">{body}</pre> : <p data-testid="commit-detail-message" className="m-0 text-fg3">没有正文。</p>}
+    {body ? <FoldedText text={body} lines={10} testId="commit-detail-message" className="m-0 whitespace-pre-wrap break-words font-sans leading-relaxed text-fg2" />
+      : <p data-testid="commit-detail-message" className="m-0 text-fg3">没有正文。</p>}
     {details.trailers.length && details.messageWithoutTrailers === details.message ? <p role="note" className="m-0 text-xs text-fg3">末尾信息已识别；为保留原文，正文可能仍包含这些行。</p> : null}
     {details.trailers.length ? <section aria-label="附加信息" data-testid="commit-detail-trailers" className="rounded-lg border border-line bg-bg px-3 py-2.5">
       <h2 className="m-0 mb-2 text-xs font-semibold text-fg3">附加信息</h2>
@@ -233,6 +235,11 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
 }): React.JSX.Element {
   const page = detail.files.value;
   const parentIndex = page?.parentIndex ?? detail.fileParentIndex;
+  // A long page folds after 30 files; the file whose diff is open always stays visible.
+  const [filesOpen, setFilesOpen] = React.useState(false);
+  React.useEffect(() => setFilesOpen(false), [page]);
+  const shownFiles = page ? foldItems(page.files, 30, filesOpen, file => detail.diffKey === diffKeyFor(page.parentIndex, file)) : [];
+  const filesFolded = page ? shownFiles.length < page.files.length : false;
   return <div className="flex flex-col gap-4">
     <div className="flex flex-wrap items-center gap-3">
       <strong className="text-sm">文件清单</strong>
@@ -244,7 +251,7 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
     {page ? <>
       {detail.fileParentIndex !== page.parentIndex ? <p role="status" className="m-0 text-xs text-fg3">正在读取 {parentLabel(detail.fileParentIndex)}；以下清单仍基于 {parentLabel(page.parentIndex)}。</p> : null}
       <div className="overflow-hidden rounded-xl border border-line">
-        {page.files.length ? page.files.map((file, index) => {
+        {page.files.length ? shownFiles.map((file, index) => {
           const diffKey = diffKeyFor(page.parentIndex, file);
           const expanded = detail.diffKey === diffKey;
           const canToggle = Boolean(activeDetails && detail.files.state !== "loading") || expanded && Boolean(detail.diff.value);
@@ -255,9 +262,11 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
         })
           : <p className="m-0 px-4 py-5 text-sm text-fg3">这个比较没有文件改动。</p>}
       </div>
-      {page.offset > 0 || page.hasMore ? <div className="flex items-center justify-between">
+      <FoldToggle hidden={page.files.length - shownFiles.length} open={filesOpen} noun="文件" onToggle={() => setFilesOpen(value => !value)} testId="changed-files-fold" />
+      {/* "下一页" waits until the folded files of this page are shown, so paging never skips them. */}
+      {page.offset > 0 || page.hasMore && !filesFolded ? <div className="flex items-center justify-between">
         <Button data-testid="file-page-previous" variant="outline" size="sm" disabled={page.offset === 0 || detail.files.state === "loading"} onClick={() => onLoadFiles(page.parentIndex, Math.max(0, page.offset - page.pageSize))}>上一页</Button>
-        <Button data-testid="file-page-next" variant="outline" size="sm" disabled={!page.hasMore || detail.files.state === "loading"} onClick={() => onLoadFiles(page.parentIndex, page.offset + page.files.length)}>下一页</Button>
+        {!filesFolded ? <Button data-testid="file-page-next" variant="outline" size="sm" disabled={!page.hasMore || detail.files.state === "loading"} onClick={() => onLoadFiles(page.parentIndex, page.offset + page.files.length)}>下一页</Button> : null}
       </div> : null}
     </> : null}
   </div>;
