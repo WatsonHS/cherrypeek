@@ -119,7 +119,9 @@ export function initials(name: string): string {
   if (!trimmed) return "?";
   const first = Array.from(trimmed)[0] ?? "?";
   if (/\p{Script=Han}/u.test(first)) return first;
-  const words = trimmed.split(/\s+/).filter(Boolean);
+  // Words by spaces; a single word such as a login ("shangmin.dou", "john_doe") splits at . _ - instead.
+  const spaced = trimmed.split(/\s+/u).filter(Boolean);
+  const words = spaced.length >= 2 ? spaced : trimmed.split(/[._-]+/u).filter(Boolean);
   if (words.length >= 2) return `${Array.from(words[0]!)[0]}${Array.from(words[1]!)[0]}`.toUpperCase();
   return Array.from(words[0] ?? trimmed).slice(0, 2).join("").toUpperCase();
 }

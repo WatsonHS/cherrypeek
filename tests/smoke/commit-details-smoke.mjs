@@ -59,9 +59,19 @@ try {
   assert.equal(await page.getByTestId("commit-update-hint").count(), 0,
     "an unchanged commit does not display the affected-scope hint");
 
-  const visibleParent = page.locator('[data-testid="overview-parent-selector"]:visible').first();
-  await visibleParent.selectOption("0");
-  await page.getByRole("tab", { name: /文件改动/ }).click();
+  // One page: the overview on top, the changed files below; ⌥⌘2 scrolls to them and ⌥⌘1 back to the top.
+  assert.equal(await page.getByRole("tab").count(), 0, "no tabs: overview and changed files share one page");
+  await page.locator('[data-testid="file-parent-selector"]:visible').first().selectOption("0");
+  await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur()); // shortcuts skip form fields
+  await page.keyboard.press("Alt+Meta+2");
+  await waitForDom(page, () => {
+    const section = document.querySelector("[data-testid='commit-changes']");
+    const pane = section?.closest("[aria-label='提交详情']");
+    if (!section || !pane) return false;
+    // The pane scrolls down until the section is on screen (at the top when the page is long enough).
+    const top = section.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    return pane.scrollTop > 0 && top >= -1 && top < pane.clientHeight - 40;
+  }, 5_000);
   const fileRows = page.getByTestId("changed-file-row");
   await fileRows.first().waitFor({ state: "visible" });
   assert.ok(await fileRows.filter({ hasText: "vendor/module" }).count());
@@ -71,7 +81,8 @@ try {
   assert.notEqual(await page.locator('[data-testid="file-parent-selector"]:visible').first().inputValue(), previousParent, "switching parent changes the selected baseline");
   assert.ok(await page.getByTestId("changed-file-row").count() < 200, "the UI shows only the current bounded file page");
 
-  await page.getByRole("tab", { name: "概览", exact: true }).click();
+  await page.keyboard.press("Alt+Meta+1");
+  await waitForDom(page, () => document.querySelector("[aria-label='提交详情']")?.scrollTop === 0, 5_000);
   await list.evaluate(element => { element.scrollTop = 0; });
   const octopusRow = page.locator(`[data-testid="commit-row"][data-oid="${fixture.octopus}"]`);
   await octopusRow.waitFor({ state: "visible", timeout: 15_000 });
@@ -141,7 +152,6 @@ try {
   }, 15_000, fixture.wideFiles);
   assert.equal(await page.locator('[aria-label="提交详情"] button[aria-label^="复制完整 OID"]').getAttribute("aria-label"),
     `复制完整 OID ${fixture.wideFiles}`, "rapid A→B→C selection leaves the final OID and detail aligned");
-  await page.getByRole("tab", { name: /文件改动/ }).click();
   await page.getByRole("heading", { name: "Commit with more than one file page", exact: true })
     .waitFor({ state: "visible", timeout: 15_000 });
   // A long page folds after 30 files, and "下一页" waits until they are shown so paging never skips them.

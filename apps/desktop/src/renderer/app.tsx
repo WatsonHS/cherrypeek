@@ -8,7 +8,7 @@ import type { RepositoryNavigation } from "../../../../packages/protocol/src/rep
 import type { HandoffRequest } from "./components/handoff-dialog.js";
 import { handoffFactsTarget } from "./lib/handoff-prompt.js";
 import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
-import { CommitDetail } from "./components/commit-detail.js";
+import { COMMIT_DETAIL_SCROLL_EVENT, CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
 import { SearchResultList } from "./components/search-result-list.js";
 import { HistorySplitView } from "./components/history-split-view.js";
@@ -239,7 +239,6 @@ export function App(): React.JSX.Element {
   const observationIntent = React.useRef(0);
   const [handoffOpen, setHandoffOpen] = React.useState(false);
   const [handoffRequest, setHandoffRequest] = React.useState<HandoffRequest | null>(null);
-  const [detailTab, setDetailTab] = React.useState("overview");
   const [page, setPage] = React.useState<AppPage>("commits");
   const pageRef = React.useRef(page);
   /** Shows or hides the files page's history column and remembers it (⌥H and the 历史 button). */
@@ -1062,8 +1061,8 @@ export function App(): React.JSX.Element {
     openCommit: oid => { void openCommitFromFiles(oid); },
   }), [filesStore, openCommitFromFiles, recordJump, scopeTreeVersion]);
   const versionOptions = React.useMemo(() => treeVersionOptions(view, scopeTreeVersion), [view.navigation, view.refs, scopeTreeVersion]);
-  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump });
-  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, setDetailTab, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump };
+  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump });
+  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump };
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
@@ -1095,7 +1094,8 @@ export function App(): React.JSX.Element {
         actions.changePage(event.code === "Digit1" ? "commits" : event.code === "Digit2" ? "files" : "workspace");
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "commits") {
         event.preventDefault();
-        actions.setDetailTab(event.code === "Digit1" ? "overview" : "changes");
+        // One page of details: ⌥⌘1 scrolls to the overview at the top, ⌥⌘2 to the changed files below it.
+        window.dispatchEvent(new CustomEvent(COMMIT_DETAIL_SCROLL_EVENT, { detail: event.code === "Digit1" ? "overview" : "changes" }));
       } else if (/^Digit[12]$/u.test(event.code) && event.altKey && actions.page === "files") {
         // ⌥⌘1 the file, ⌥⌘2 its change (the picked commit, or the newest in its history).
         event.preventDefault();
@@ -1245,7 +1245,7 @@ export function App(): React.JSX.Element {
             onLoadContaining={loadContainingBranches} onRetryContaining={() => detailStore.retryContaining()}
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
             selectedOid={displayedOid} onSelect={selectDisplayedCommit}
-            selectedTab={detailTab} onTabChange={setDetailTab} onOpenHandoff={openHandoff}
+            onOpenHandoff={openHandoff}
             onOpenFile={filesView.supported ? openFileFromCommit : undefined}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}
             selectedCommitOverride={searchView.active ? displayedCommit : undefined}

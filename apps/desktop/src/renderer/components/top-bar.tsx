@@ -180,7 +180,7 @@ function ShortcutGuide(): React.JSX.Element {
       ["刷新仓库历史", `${altCmd}R`],
     ] },
     { title: "右侧视图", rows: [
-      ["提交页：概览 / 文件改动", `${altCmd}1 / 2`],
+      ["提交页：滚到概览 / 文件改动", `${altCmd}1 / 2`],
       ["文件页：文件 / 修改", `${altCmd}1 / 2`],
     ] },
     { title: "显示开关", rows: [

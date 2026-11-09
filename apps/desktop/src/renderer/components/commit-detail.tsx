@@ -14,9 +14,11 @@ import { DiffView } from "./diff-view.js";
 import { cn } from "../lib/utils.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs.js";
 
-export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, selectedTab = "overview", onTabChange, onOpenFile }: {
+/** ⌥⌘1 / ⌥⌘2 on the commits page: scroll the details to the overview (top) or to 文件改动. */
+export const COMMIT_DETAIL_SCROLL_EVENT = "commitscope:commit-detail-scroll";
+
+export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, onOpenFile }: {
   preview: RepositoryView;
   detail: CommitDetailView;
   onRetryDetails(): void;
@@ -37,8 +39,6 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   canMoveNext?: boolean;
   onLocateInHistory?(): void;
   onOpenHandoff?(request: HandoffRequest): void;
-  selectedTab?: string;
-  onTabChange?(tab: string): void;
   /** Opens the files page on a path's history with this commit selected (P4-10). */
   /** Opens a changed file on the files page (its history at this commit when this commit deleted it). */
   onOpenFile?(file: ChangedFile, oid: string): void;
@@ -56,14 +56,31 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   const byOid = React.useMemo(() => new Map(commits.map(item => [item.oid, item])), [commits]);
   const repository = preview.repository;
   const otherWorktrees = !oldSelection && activeDetails ? activeDetails.worktrees.filter(worktree => !worktree.isCurrent && worktree.headOid === commit?.oid) : [];
-  const canAutoLoadContaining = Boolean(commit && repository && activeDetails && detail.details.state === "ready" && selectedTab === "overview" &&
+  const canAutoLoadContaining = Boolean(commit && repository && activeDetails && detail.details.state === "ready" &&
     detail.files.state !== "loading" && detail.merge.state !== "loading" && detail.diff.state !== "loading" && detail.containing.state === "idle");
 
   React.useEffect(() => {
     if (!canAutoLoadContaining) return;
     const timer = window.setTimeout(onLoadContaining, 150);
     return () => window.clearTimeout(timer);
-  }, [canAutoLoadContaining, detail.sessionKey, detail.oid, selectedTab, onLoadContaining]);
+  }, [canAutoLoadContaining, detail.sessionKey, detail.oid, onLoadContaining]);
+
+  // One page: the message and overview on top, the changed files below. Another commit starts at the top again.
+  const scrollRef = React.useRef<HTMLElement>(null);
+  const changesRef = React.useRef<HTMLElement>(null);
+  const scrollToChanges = React.useCallback(() => {
+    const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    changesRef.current?.scrollIntoView({ block: "start", behavior: smooth ? "smooth" : "auto" });
+  }, []);
+  React.useEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [commit?.oid]);
+  React.useEffect(() => {
+    const onScroll = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === "changes") scrollToChanges();
+      else scrollRef.current?.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    };
+    window.addEventListener(COMMIT_DETAIL_SCROLL_EVENT, onScroll);
+    return () => window.removeEventListener(COMMIT_DETAIL_SCROLL_EVENT, onScroll);
+  }, [scrollToChanges]);
 
   if (!commit || !repository) {
     return <section aria-label="提交详情" className="flex min-w-0 flex-1 items-center justify-center bg-panel">
@@ -73,12 +90,13 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   const isMerge = commit.parents.length > 1;
   const isHead = !oldDetailContext && repository.headOid === commit.oid;
 
-  return <section aria-label="提交详情" className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain bg-panel">
+  return <section ref={scrollRef} aria-label="提交详情" className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain bg-panel">
     <div className="mx-auto flex max-w-[920px] flex-col gap-5 px-11 pt-7 pb-12">
       <div className="flex flex-wrap items-center gap-2">
         {!oldSelection && !oldDetailContext ? <RefTags refs={refIndex.get(commit.oid) ?? []} headReference={repository.headReference}
           isHeadCommit={repository.headReference === null && isHead} size="default" limit={6} /> : null}
         {oldDetailContext && shownDetails?.refs.length ? <RefTags refs={shownDetails.refs} headReference={null} size="default" limit={6} /> : null}
+        {shownDetails?.refsTruncated ? <span className="text-xs text-fg3">引用列表已截断</span> : null}
         {isMerge ? <Badge>Merge · {commit.parents.length} 个父提交</Badge> : null}
         <div className="flex-1" />
         {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory} title="在完整历史里定位这个结果（⌘L）；定位后 ⌘[ 回到搜索结果">在历史中定位</Button> : null}
@@ -111,63 +129,37 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
         {shownDetails ? <MessageBody details={shownDetails} /> : null}
       </div>
 
-      <Tabs value={selectedTab} onValueChange={onTabChange} className="flex flex-col gap-5">
-        <TabsList>
-          <TabsTrigger value="overview">概览</TabsTrigger>
-          <TabsTrigger value="changes">文件改动</TabsTrigger>
-        </TabsList>
-        <TabsContent value="overview">
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(360px,100%),1fr))] gap-x-10 gap-y-7">
-            <Section title="作者与时间">
-              <IdentityBlock role="Author" identity={commit.author} />
-              <IdentityBlock role="Committer" identity={commit.committer} />
-              {!sameIdentity(commit.author, commit.committer) ? <span className="text-xs text-fg3">作者与提交者不同；{timeField === "author" ? "搜索结果按作者时间排序。" : timeField === "committer" ? "搜索结果按提交者时间排序。" : "列表按提交时间分组。"}</span> : null}
-            </Section>
-            <Section title="标识与父提交">
-              <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3.5 gap-y-2.5 text-[13px]">
-                <dt className="text-fg3">OID</dt>
-                <dd className="m-0 font-mono text-[12.5px] break-all text-fg2">{commit.oid}</dd>
-                <dt className="text-fg3">父提交</dt>
-                <dd className="m-0 flex min-w-0 flex-col gap-2">
-                  {commit.parents.length === 0 ? <span className="text-fg2">无（根提交）</span> : null}
-                  {commit.parents.map((parent, order) => <ParentRow key={parent} oid={parent} order={order} total={commit.parents.length}
-                    loaded={byOid.get(parent)} onSelect={onSelect} />)}
-                </dd>
-              </dl>
-            </Section>
-            <Section title="位置与引用">
-              {shownDetails ? <p className="m-0 text-xs text-fg3">引用与 worktree 按 {new Date(shownDetails.observedAtUnixMs).toLocaleString()} 的快照记录。</p>
-                : <p className="m-0 text-xs text-fg3">读取当前范围详情后显示引用与 worktree 快照。</p>}
-              <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] items-baseline gap-x-3.5 gap-y-2.5 text-[13px]">
-                {shownDetails ? <><dt className="text-fg3">引用</dt><dd className="m-0 flex min-w-0 flex-wrap gap-1.5">
-                  {shownDetails.refs.length ? <RefTags refs={shownDetails.refs} headReference={oldDetailContext ? null : repository.headReference} size="default" limit={12} /> : <span className="text-fg2">没有引用直接指向它</span>}
-                  {shownDetails.refsTruncated ? <span className="text-xs text-fg3">引用列表已截断</span> : null}
-                </dd><dt className="text-fg3">HEAD</dt><dd className="m-0 text-fg2">{oldDetailContext
-                  ? shownDetails.worktrees.some(worktree => worktree.isCurrent && worktree.headOid === commit.oid) ? "旧观察中本窗口 HEAD 指向这里" : "旧观察未记录本窗口 HEAD 指向这里"
-                  : repository.headOid === commit.oid ? `本窗口 HEAD 指向这里${repository.headReference ? `（${shortRefName(repository.headReference)}）` : "（detached）"}` : "不是本窗口 HEAD"}</dd></> : null}
-                {otherWorktrees.length ? <><dt className="text-fg3">其他 worktree</dt><dd className="m-0 flex flex-col gap-1 text-fg2">
-                  {otherWorktrees.map(worktree => <span key={worktree.id} title={worktree.path}>{repositoryName(worktree.path)} · {worktree.isMain ? "主" : "linked"}{worktree.isDetached ? " · detached HEAD" : ""}</span>)}
-                </dd></> : null}
-                {shownDetails ? <><dt className="text-fg3">工作树</dt><dd className="m-0 flex flex-col gap-1 text-fg2">
-                  {shownDetails.worktrees.length ? shownDetails.worktrees.map(worktree => <span key={worktree.id} title={worktree.path}>{repositoryName(worktree.path)}{worktree.isDetached ? " · detached HEAD" : ""}{worktree.available ? "" : " · 不可用"}</span>) : "无工作树记录"}
-                  {shownDetails.worktreesTruncated ? <span className="text-xs text-fg3">工作树列表已截断</span> : null}
-                </dd></> : null}
-                <dt className="text-fg3">包含它的分支</dt><dd className="m-0 min-w-0">
-                  {detail.containing.value ? <ContainingBranches result={detail.containing.value} /> : null}
-                  {detail.containing.error ? <ErrorLine message={detail.containing.error.message} onRetry={onRetryContaining} label="重试计算" /> : null}
-                  {detail.containing.state === "loading" ? <span role="status" className="inline-flex items-center gap-1.5 text-xs text-fg3">
-                    <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取包含分支…
-                  </span> : null}
-                </dd>
-              </dl>
-            </Section>
-            <ChangeOverviewSection detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} />
-            {isMerge ? <MergeSection detail={detail} activeDetails={activeDetails} refs={oldDetailContext ? shownDetails?.refs ?? [] : preview.refs} onLoadMerge={onLoadMerge} onRetryMerge={onRetryMerge} /> : null}
-          </div>
-        </TabsContent>
-        <TabsContent value="changes"><ChangesPanel detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} onToggleDiff={onToggleDiff}
-          onOpenFile={onOpenFile ? file => onOpenFile(file, commit.oid) : undefined} /></TabsContent>
-      </Tabs>
+      {/* The overview, one row per fact, so the changed files below start on the first screen. Refs and HEAD are the
+          tags at the top; the full OID is the copy button there. */}
+      <dl data-testid="commit-overview" className="m-0 grid grid-cols-[84px_minmax(0,1fr)] items-baseline gap-x-4 gap-y-2.5 border-t border-line pt-4 text-[13px]">
+        <dt className="text-fg3">作者</dt>
+        <dd className="m-0 min-w-0"><IdentityLine identity={commit.author} />
+          {sameIdentity(commit.author, commit.committer) ? <span className="ml-2 text-xs text-fg3">也是提交者</span> : null}</dd>
+        {!sameIdentity(commit.author, commit.committer) ? <><dt className="text-fg3">提交者</dt><dd className="m-0 min-w-0"><IdentityLine identity={commit.committer} />
+          <span className="ml-2 text-xs text-fg3" title="作者与提交者不同">{timeField === "author" ? "搜索结果按作者时间排序" : timeField === "committer" ? "搜索结果按提交者时间排序" : "列表按提交时间分组"}</span></dd></> : null}
+        <dt className="text-fg3">父提交</dt>
+        <dd className="m-0 flex min-w-0 flex-col gap-1">
+          {commit.parents.length === 0 ? <span className="text-fg2">无（根提交）</span> : null}
+          {commit.parents.map((parent, order) => <ParentLine key={parent} oid={parent} order={order} total={commit.parents.length} loaded={byOid.get(parent)} onSelect={onSelect} />)}
+        </dd>
+        {otherWorktrees.length ? <><dt className="text-fg3">其他 worktree</dt><dd className="m-0 flex flex-wrap gap-x-3 gap-y-1 text-fg2">
+          {otherWorktrees.map(worktree => <span key={worktree.id} title={worktree.path}>{repositoryName(worktree.path)} · {worktree.isMain ? "主" : "linked"}{worktree.isDetached ? " · detached HEAD" : ""}</span>)}
+        </dd></> : null}
+        <dt className="text-fg3">包含它的分支</dt><dd className="m-0 min-w-0">
+          {detail.containing.value ? <ContainingBranches result={detail.containing.value} /> : null}
+          {detail.containing.error ? <ErrorLine message={detail.containing.error.message} onRetry={onRetryContaining} label="重试计算" /> : null}
+          {detail.containing.state === "loading" ? <span role="status" className="inline-flex items-center gap-1.5 text-xs text-fg3">
+            <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取包含分支…
+          </span> : null}
+        </dd>
+        <dt className="text-fg3">改动</dt><dd className="m-0 min-w-0"><ChangeSummary detail={detail} activeDetails={activeDetails} onRetryFiles={onRetryFiles} onJumpToFiles={scrollToChanges} /></dd>
+      </dl>
+      {isMerge ? <MergeSection detail={detail} activeDetails={activeDetails} refs={oldDetailContext ? shownDetails?.refs ?? [] : preview.refs} onLoadMerge={onLoadMerge} onRetryMerge={onRetryMerge} /> : null}
+
+      <section ref={changesRef} aria-label="文件改动" data-testid="commit-changes" className="flex scroll-mt-4 flex-col gap-4 border-t border-line pt-5">
+        <ChangesPanel detail={detail} activeDetails={activeDetails} onLoadFiles={onLoadFiles} onRetryFiles={onRetryFiles} onToggleDiff={onToggleDiff}
+          onOpenFile={onOpenFile ? file => onOpenFile(file, commit.oid) : undefined} />
+      </section>
     </div>
   </section>;
 }
@@ -182,12 +174,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function MessageBody({ details }: { details: CommitDetails }): React.JSX.Element {
   const body = details.messageWithoutTrailers.split(/\r?\n/u).slice(1).join("\n").trim();
   return <div className="flex flex-col gap-3 text-[13px]">
-    {body ? <FoldedText text={body} lines={10} testId="commit-detail-message" className="m-0 whitespace-pre-wrap break-words font-sans leading-relaxed text-fg2" />
+    {body ? <FoldedText text={body} lines={6} testId="commit-detail-message" className="m-0 whitespace-pre-wrap break-words font-sans leading-relaxed text-fg2" />
       : <p data-testid="commit-detail-message" className="m-0 text-fg3">没有正文。</p>}
     {details.trailers.length && details.messageWithoutTrailers === details.message ? <p role="note" className="m-0 text-xs text-fg3">末尾信息已识别；为保留原文，正文可能仍包含这些行。</p> : null}
-    {details.trailers.length ? <section aria-label="附加信息" data-testid="commit-detail-trailers" className="rounded-lg border border-line bg-bg px-3 py-2.5">
-      <h2 className="m-0 mb-2 text-xs font-semibold text-fg3">附加信息</h2>
-      <dl className="m-0 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+    {details.trailers.length ? <section aria-label="附加信息" data-testid="commit-detail-trailers" title="从消息末尾的 trailer 解析，只做展示">
+      <dl className="m-0 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-[12.5px]">
         {details.trailers.map((trailer, index) => <React.Fragment key={`${trailer.key}:${index}`}>
           <dt className="text-fg3">{trailer.key}</dt><dd className="m-0 whitespace-pre-wrap break-words text-fg2">{trailer.value}</dd>
         </React.Fragment>)}
@@ -196,33 +187,42 @@ function MessageBody({ details }: { details: CommitDetails }): React.JSX.Element
   </div>;
 }
 
-function ChangeOverviewSection({ detail, activeDetails, onLoadFiles, onRetryFiles }: {
+/** One line of counts (only the kinds present) and the busiest directories; the parent is picked once, above the file list. */
+function ChangeSummary({ detail, activeDetails, onRetryFiles, onJumpToFiles }: {
   detail: CommitDetailView;
   activeDetails: CommitDetails | null;
-  onLoadFiles(parentIndex: number | null, offset: number): void;
   onRetryFiles(): void;
+  onJumpToFiles(): void;
 }): React.JSX.Element {
   const page = detail.files.value;
   const parentIndex = page?.parentIndex ?? detail.fileParentIndex;
   const overview = page?.overview;
-  const canQuery = Boolean(activeDetails);
-  return <Section title="改动概览">
-    {activeDetails ? <ParentSelector details={activeDetails} value={parentIndex} disabled={!canQuery} testId="overview-parent-selector" onChange={next => onLoadFiles(next, 0)} /> : null}
-    {!detail.details.value && detail.details.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取完整详情，读取后加载文件概览…</p> : null}
-    {!detail.details.value && detail.details.state === "error" ? <p role="status" className="m-0 text-xs text-fg3">完整详情尚未读取，暂不能读取文件概览。请使用上方“重试读取详情”。</p> : null}
-    {detail.files.error ? <ErrorLine message={detail.files.error.message} onRetry={onRetryFiles} label="重试读取文件列表" /> : null}
-    {!overview && detail.files.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取改动概览…</p> : null}
-    {overview ? <>
-      {page && detail.fileParentIndex !== page.parentIndex ? <p className="m-0 text-xs text-fg3">当前显示的是父提交 {parentLabel(page.parentIndex)} 的概览；新基准尚未加载完成。</p> : null}
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <strong className="text-xl font-semibold tabular-nums">{overview.totalFiles} 个文件</strong>
-        <span className="text-[13px] text-fg3">+{overview.additions} · −{overview.deletions} · {overview.binaryFiles} 个二进制 · {overview.gitlinkFiles} 个子模块引用</span>
-      </div>
-      <p className="m-0 text-xs text-fg3">新增 {overview.counts.added} · 修改 {overview.counts.modified} · 删除 {overview.counts.deleted} · 重命名 {overview.counts.renamed} · 复制 {overview.counts.copied} · 类型变化 {overview.counts.typeChanged}</p>
-      {overview.directories.length ? <DirectoryList directories={overview.directories} /> : null}
-      {page?.hasMore ? <p className="m-0 text-xs text-fg3">文件清单共 {page.totalFiles} 项，概览按完整清单统计。</p> : null}
-    </> : null}
-  </Section>;
+  if (!overview) {
+    return <span className="text-xs text-fg3">
+      {detail.files.error ? <ErrorLine message={detail.files.error.message} onRetry={onRetryFiles} label="重试读取文件列表" />
+        : !detail.details.value && detail.details.state === "error" ? "完整详情尚未读取，暂不能统计改动。"
+        : "正在读取改动概览…"}
+    </span>;
+  }
+  const counts = overview.counts;
+  const kinds = ([["新增", counts.added], ["修改", counts.modified], ["删除", counts.deleted], ["重命名", counts.renamed], ["复制", counts.copied], ["类型变化", counts.typeChanged],
+    ["二进制", overview.binaryFiles], ["子模块引用", overview.gitlinkFiles]] as const).filter(([, count]) => count > 0);
+  const directories = overview.directories.slice(0, 5);
+  return <div className="flex min-w-0 flex-col gap-1" data-testid="change-summary">
+    <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <strong className="font-semibold tabular-nums">{overview.totalFiles} 个文件</strong>
+      <span className="font-mono text-xs"><span className="text-add">+{overview.additions}</span> <span className="text-del">−{overview.deletions}</span></span>
+      {kinds.length ? <span className="text-xs text-fg3">{kinds.map(([label, count]) => `${label} ${count}`).join(" · ")}</span> : null}
+      <button type="button" data-testid="jump-to-files" onClick={onJumpToFiles} title="滚到下方的文件改动（⌥⌘2）"
+        className="inline-flex items-center gap-0.5 rounded-md px-1 text-xs font-medium text-accent-fg hover:bg-accent-soft">
+        查看文件<ChevronDown className="size-3" strokeWidth={1.75} /></button>
+    </span>
+    {overview.directories.length > 1 ? <span className="min-w-0 truncate text-xs text-fg3" title={overview.directories.map(item => `${item.path ? displayGitPath(item.path) : "（仓库根目录）"} ${item.totalFiles}`).join("\n")}>
+      {directories.map(item => `${item.path ? displayGitPath(item.path) : "（根目录）"} ${item.totalFiles}`).join(" · ")}{overview.directories.length > directories.length ? ` · 另 ${overview.directories.length - directories.length} 个目录` : ""}
+    </span> : null}
+    {activeDetails && activeDetails.commit.parents.length > 1 ? <span className="text-xs text-fg3">与{parentLabel(parentIndex)}比较；在下方“文件改动”里切换。</span> : null}
+    {page && detail.fileParentIndex !== page.parentIndex ? <span className="text-xs text-fg3">新的比较基准尚未读完，以上仍是{parentLabel(page.parentIndex)}的统计。</span> : null}
+  </div>;
 }
 
 function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onToggleDiff, onOpenFile }: {
@@ -242,9 +242,9 @@ function ChangesPanel({ detail, activeDetails, onLoadFiles, onRetryFiles, onTogg
   const filesFolded = page ? shownFiles.length < page.files.length : false;
   return <div className="flex flex-col gap-4">
     <div className="flex flex-wrap items-center gap-3">
-      <strong className="text-sm">文件清单</strong>
+      <h2 className="m-0 text-[17px] font-semibold">文件改动</h2>
       {activeDetails ? <ParentSelector details={activeDetails} value={parentIndex} disabled={false} testId="file-parent-selector" onChange={next => onLoadFiles(next, 0)} /> : null}
-      {page ? <span className="text-xs text-fg3">与 {parentLabel(page.parentIndex)} 比较 · {page.files.length ? `${page.offset + 1}–${page.offset + page.files.length}` : "0"} / {page.totalFiles}</span> : null}
+      {page ? <span className="text-xs text-fg3">{activeDetails && activeDetails.commit.parents.length > 1 ? `与 ${parentLabel(page.parentIndex)} 比较 · ` : ""}{page.files.length ? `${page.offset + 1}–${page.offset + page.files.length}` : "0"} / {page.totalFiles}</span> : null}
     </div>
     {detail.files.error ? <ErrorLine message={detail.files.error.message} onRetry={onRetryFiles} label="重试读取文件列表" /> : null}
     {!page && detail.files.state === "loading" ? <p role="status" className="m-0 text-xs text-fg3">正在读取文件清单…</p> : null}
@@ -286,6 +286,14 @@ function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, on
   const newPath = file.newPath ? displayGitPath(file.newPath) : null;
   const primary = newPath ?? oldPath ?? "（路径不可用）";
   const status = { added: "新增", modified: "修改", deleted: "删除", renamed: "重命名", copied: "复制", typeChanged: "类型变化" }[file.status];
+  // A second line only when it says something: a real mode change, a submodule, binary content, similarity.
+  const modeChanged = file.oldMode !== file.newMode && !/^0+$/u.test(file.oldMode ?? "0") && !/^0+$/u.test(file.newMode ?? "0");
+  const notes = [
+    modeChanged ? `mode ${file.oldMode} → ${file.newMode}` : "",
+    file.gitlink ? `子模块引用 ${file.oldOid ?? "000000"} → ${file.newOid ?? "000000"}` : "",
+    file.binary ? "二进制" : "",
+    file.similarity !== null ? `相似度 ${file.similarity}%` : "",
+  ].filter(Boolean);
   return <div data-testid="changed-file-row" className="relative border-b border-line last:border-b-0">
     {onOpenFile ? <button type="button" aria-label={`在文件页打开 ${primary}`}
       title={file.newPath ? "在文件页打开这个文件（目录树版本里的内容）" : "这个提交删除了它：在文件页打开它的历史，并选中这次修改"}
@@ -297,7 +305,7 @@ function FileRow({ file, expanded, disabled, onToggle, diff, fullFileLimited, on
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="break-all font-mono text-[12.5px] text-fg" title={[file.oldPath?.rawHex, file.newPath?.rawHex].filter(Boolean).join(" → ")}>{primary}{file.oldPath?.textLossy || file.newPath?.textLossy ? " · 路径含有非 UTF-8 字节" : ""}</span>
         {file.status === "renamed" || file.status === "copied" ? <span className="break-all text-xs text-fg3">{oldPath} → {newPath}</span> : null}
-        <span className="break-all text-xs text-fg3">mode {file.oldMode} → {file.newMode}{file.gitlink ? ` · 子模块引用 ${file.oldOid ?? "000000"} → ${file.newOid ?? "000000"}` : ""}{file.binary ? " · 二进制" : ""}{file.similarity !== null ? ` · 相似度 ${file.similarity}%` : ""}</span>
+        {notes.length ? <span className="break-all text-xs text-fg3">{notes.join(" · ")}</span> : null}
       </span>
       <span className="shrink-0 font-mono text-xs tabular-nums"><span className="text-add">{file.additions === null ? "—" : `+${file.additions}`}</span> <span className="text-del">{file.deletions === null ? "—" : `−${file.deletions}`}</span></span>
       <span className="shrink-0 text-xs text-fg3">{expanded ? "收起 diff" : "查看 diff"}</span>
@@ -449,47 +457,35 @@ function displayGitPath(path: GitPath): string {
   return path.display.replace(/[\u0000-\u001f\u007f-\u009f]/gu, character => `\\u{${character.codePointAt(0)!.toString(16)}}`);
 }
 
-function DirectoryList({ directories }: { directories: ChangedFilesPage["overview"]["directories"] }): React.JSX.Element {
-  const visible = directories.slice(0, 30);
-  const remainder = directories.slice(30);
-  const rows = (items: typeof directories) => items.map((directory, index) => <li key={`${directory.path?.rawHex ?? "root"}:${index}`}>
-    <span className="font-mono" title={directory.path?.rawHex}>{directory.path ? displayGitPath(directory.path) : "（仓库根目录）"}{directory.path?.textLossy ? " · 含非 UTF-8 字节" : ""}</span>
-    <span className="ml-2 text-xs text-fg3">{directory.totalFiles} 个文件 · +{directory.additions} · −{directory.deletions}</span>
-  </li>);
-  return <div className="flex flex-col gap-2">
-    <ul className="m-0 flex flex-col gap-1 pl-4 text-[13px] text-fg2">{rows(visible)}</ul>
-    {remainder.length ? <details className="text-xs text-fg3"><summary>另有 {remainder.length} 个目录</summary><ul className="m-0 flex flex-col gap-1 pl-4 text-[13px] text-fg2">{rows(remainder)}</ul></details> : null}
-  </div>;
-}
-
 function parentLabel(parentIndex: number | null): string {
   return parentIndex === null ? "空树" : `父提交 ${parentIndex + 1}`;
 }
 
-function IdentityBlock({ role, identity }: { role: "Author" | "Committer"; identity: CommitIdentity }): React.JSX.Element {
-  return <div className="flex items-start gap-3">
-    <IdentityAvatar identity={identity} size="md" />
-    <div className="flex min-w-0 flex-1 flex-col gap-px">
-      <span className="flex items-center gap-2"><strong className="truncate font-semibold">{identity.name}</strong><Badge size="sm">{role}</Badge></span>
-      <span className="truncate text-[12.5px] text-fg3">{identity.email}</span>
-      <span className="text-[12.5px] text-fg2 tabular-nums" title={identityTimeTitle(identity)}>{identityTime(identity)}</span>
-    </div>
-  </div>;
+/** Avatar, name, email and time on one line. */
+function IdentityLine({ identity }: { identity: CommitIdentity }): React.JSX.Element {
+  return <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 align-middle">
+    <IdentityAvatar identity={identity} size="xs" />
+    <span className="font-medium">{identity.name}</span>
+    <span className="text-[12.5px] text-fg3">{identity.email}</span>
+    <span className="text-[12.5px] text-fg2 tabular-nums" title={identityTimeTitle(identity)}>{identityTime(identity)}</span>
+  </span>;
 }
 
-function ParentRow({ oid, order, total, loaded, onSelect }: {
+/** A parent: short OID (full in the tooltip) and its title, which selects it when loaded. */
+function ParentLine({ oid, order, total, loaded, onSelect }: {
   oid: string;
   order: number;
   total: number;
   loaded: CommitSummary | undefined;
   onSelect(oid: string): void;
 }): React.JSX.Element {
-  return <div className="flex min-w-0 flex-col gap-0.5">
-    <span className="font-mono text-[12.5px] break-all text-fg2">{total > 1 ? <span className="mr-1.5 font-sans text-xs text-fg3">父 {order + 1}</span> : null}{oid}</span>
+  return <span className="flex min-w-0 items-baseline gap-2">
+    {total > 1 ? <span className="shrink-0 text-xs text-fg3">父 {order + 1}</span> : null}
+    <span className="shrink-0 font-mono text-[12.5px] text-fg2" title={oid}>{shortOid(oid)}</span>
     {loaded
-      ? <button type="button" className="min-w-0 truncate text-left text-[13px] text-accent hover:underline" onClick={() => onSelect(oid)}>{loaded.summary}</button>
+      ? <button type="button" className="min-w-0 truncate text-left text-accent hover:underline" onClick={() => onSelect(oid)}>{loaded.summary}</button>
       : <span className="text-xs text-fg3">不在已加载的提交中</span>}
-  </div>;
+  </span>;
 }
 
 function CopyOidButton({ oid }: { oid: string }): React.JSX.Element {
