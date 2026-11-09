@@ -63,10 +63,11 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onOpenHandoff, onCancelHistoryDate, onRetryHistoryDate }: {
+export function CommitList({ preview, selectedOid, onSelect, onActivate, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onOpenHandoff, onCancelHistoryDate, onRetryHistoryDate }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
+  onActivate(oid: string): void;
   captureSelectionIntent(): SelectionIntentToken | null;
   selectIfCurrent(oid: string, token: SelectionIntentToken | null): void;
   onCancel(): Promise<void>;
@@ -544,6 +545,11 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
       style={{ overflowAnchor: "none" }} onScroll={handleScroll}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (event.key === "Enter" && selectedOid && event.target === event.currentTarget) {
+          event.preventDefault();
+          onActivate(selectedOid);
+          return;
+        }
         if (event.key === "Escape" && graphExpanded) {
           event.preventDefault();
           collapseGraph();
@@ -576,7 +582,7 @@ export function CommitList({ preview, selectedOid, onSelect, captureSelectionInt
           contentMinWidth={expandedContentMinWidth} onExpandGraph={() => setGraphExpanded(true)}
           refs={refIndex.get(entry.commit.oid) ?? []} headReference={headReference} headOid={headOid}
           otherWorktrees={otherWorktreesByHead.get(entry.commit.oid) ?? []}
-          selected={entry.commit.oid === selectedOid} onSelect={() => { onSelect(entry.commit.oid); listRef.current?.focus(); }} />)}
+          selected={entry.commit.oid === selectedOid} onSelect={() => { onActivate(entry.commit.oid); listRef.current?.focus(); }} />)}
       <div aria-hidden="true" style={{ height: range.bottom }} />
       {preview.newSinceLastSeenStatus === "unavailable" ? <p role="status" className="m-0 px-3 pt-3 text-center text-xs text-fg3">无法比较上次查看记录，未显示新增标记。</p> : null}
       {preview.selectionMissingOnPage && !preview.oldSelectedCommit ? <p className="m-0 px-3 pt-4 text-center text-xs text-fg3">当前窗口未载入所选提交；这不表示它已不可达。</p> : null}

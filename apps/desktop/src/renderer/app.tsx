@@ -11,7 +11,7 @@ import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol
 import { COMMIT_DETAIL_SCROLL_EVENT, CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
 import { SearchResultList } from "./components/search-result-list.js";
-import { HistorySplitView } from "./components/history-split-view.js";
+import { HistorySplitView, useNarrowHistoryLayout } from "./components/history-split-view.js";
 import { OpenScreen } from "./components/open-screen.js";
 import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
@@ -218,6 +218,9 @@ export function App(): React.JSX.Element {
   const [path, setPathState] = React.useState("");
   const [actionError, setActionError] = React.useState<string>();
   const [selectedOid, setSelectedOid] = React.useState<string>();
+  const narrowHistory = useNarrowHistoryLayout();
+  const [detailOpen, setDetailOpen] = React.useState(false);
+  const closeDetail = React.useCallback(() => setDetailOpen(false), []);
   const [historyLocation, setHistoryLocation] = React.useState<{ oid: string; sessionKey: string; loading: boolean; cancelled: boolean; error: string | null } | null>(null);
   /** Where the last jump to another page left from; the top bar offers the way back to it until the user is on that page again. */
   const [jumpOrigin, setJumpOrigin] = React.useState<AppPlace | null>(null);
@@ -268,6 +271,7 @@ export function App(): React.JSX.Element {
   const loadSearchPaths = React.useCallback((text: string) => { void searchStore.loadPaths(text); }, [searchStore]);
   const loadContainingBranches = React.useCallback(() => { void detailStore.loadContaining(); }, [detailStore]);
   const currentSessionKey = view.session ? `${view.session.repoId}:${view.session.generation}` : null;
+  React.useLayoutEffect(() => { setDetailOpen(false); }, [currentSessionKey, narrowHistory]);
   const displayedQuery = historyLocation ? DEFAULT_SEARCH_QUERY : searchView.query;
   const displayedQueryRef = React.useRef(displayedQuery);
   displayedQueryRef.current = displayedQuery;
@@ -504,6 +508,7 @@ export function App(): React.JSX.Element {
       ...current, loading: false, error: found ? null : pageError?.code === "SCOPE_UNAVAILABLE"
         ? "提交不在当前快照范围内。" : pageError?.message ?? "历史定位未完成。",
     } : current);
+    return found;
   }, [currentSessionKey, searchStore, store]);
   const restoreHistoryAfterSearch = React.useCallback(async () => {
     const point = searchStore.getHistoryReturn();
@@ -562,6 +567,10 @@ export function App(): React.JSX.Element {
     if (searchStore.getView().active) searchStore.setSelectedOid(oid);
     else selectCommit(oid);
   }, [searchStore, selectCommit]);
+  const activateDisplayedCommit = React.useCallback((oid: string) => {
+    selectDisplayedCommit(oid);
+    setDetailOpen(true);
+  }, [selectDisplayedCommit]);
   const captureSelectionIntent = React.useCallback(() => selectionIntent.capture(store.getView().session), [selectionIntent, store]);
   const selectIfCurrent = React.useCallback((oid: string, token: SelectionIntentToken | null) => {
     applySelectionIfCurrent(selectionIntent, token, store.getView().session, oid, setSelectedOid);
@@ -947,12 +956,15 @@ export function App(): React.JSX.Element {
   /** Shows a commit on the commits page: located in the history, or in the search results when searching. */
   const showCommit = React.useCallback(async (oid: string) => {
     if (searchStore.getView().active) {
-      await locateSelectedInHistory(oid);
+      if (await locateSelectedInHistory(oid)) setDetailOpen(true);
       return;
     }
     selectionIntent.invalidate();
     const found = await store.locateCommit(oid);
-    if (found) setSelectedOid(store.getView().commits.find(commit => commit.oid.startsWith(oid.toLowerCase()))?.oid);
+    if (found) {
+      setSelectedOid(store.getView().commits.find(commit => commit.oid.startsWith(oid.toLowerCase()))?.oid);
+      setDetailOpen(true);
+    }
   }, [locateSelectedInHistory, searchStore, selectionIntent, store]);
   const openCommitFromFiles = React.useCallback(async (oid: string) => {
     setJumpOrigin(recordJump());
@@ -1188,7 +1200,7 @@ export function App(): React.JSX.Element {
 
   return <DiffFullContext.Provider value={filesCapabilities.fullFile}><div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
     {view.repository
-      ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={selectDisplayedCommit}
+      ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={activateDisplayedCommit}
         history={{ view: navigationView, hint: returnHint, onBack: navigateBack, onForward: navigateForward, onReturn: returnToOrigin }}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
         searchView={searchView} activityQuery={displayedQuery} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths}
@@ -1241,10 +1253,10 @@ export function App(): React.JSX.Element {
             {locationReturn?.partial ? `返回已发现 ${locationReturn.matchedCount} 个结果` : `返回 ${locationReturn?.matchedCount ?? 0} 个结果`}
           </Button>
         </div> : null}
-        <HistorySplitView sidebar={searchView.active
-            ? <SearchResultList view={searchView} onSelect={selectDisplayedCommit} onAnchor={setSearchAnchor}
+        <HistorySplitView narrow={narrowHistory} detailOpen={detailOpen} active={page === "commits"} onCloseDetail={closeDetail} sidebar={searchView.active
+            ? <SearchResultList view={searchView} onSelect={activateDisplayedCommit} onAnchor={setSearchAnchor}
               onNext={loadSearchNext} onPrevious={loadSearchPrevious} onRetry={retrySearch} />
-            : <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit}
+            : <CommitList preview={view} selectedOid={selectedOid} onSelect={selectCommit} onActivate={activateDisplayedCommit}
             captureSelectionIntent={captureSelectionIntent} selectIfCurrent={selectIfCurrent} onCancel={actions.cancel}
             onRetry={actions.retry} onRetryPage={actions.retryPage} onCancelPage={actions.cancelPage}
             onLoadWindowEdge={direction => store.loadWindowEdge(direction)}
@@ -1257,13 +1269,13 @@ export function App(): React.JSX.Element {
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
             onSetAnchorRestorationSpace={pixels => store.setAnchorRestorationSpace(pixels)} />}>
-          <CommitDetail preview={view} detail={detailView} onRetryDetails={() => detailStore.retryDetails()}
+          <CommitDetail preview={view} detail={detailView} onClose={narrowHistory ? closeDetail : undefined} onRetryDetails={() => detailStore.retryDetails()}
             onRetryFiles={() => detailStore.retryFiles()} onLoadFiles={(parentIndex, offset) => detailStore.loadFiles(parentIndex, offset)}
             onRetryMerge={() => detailStore.retryMerge()} onLoadMerge={(parentIndex, offset) => detailStore.loadMerge(parentIndex, offset)}
             onToggleDiff={(file, parentIndex) => { void detailStore.toggleDiff(file, parentIndex); }}
             onLoadContaining={loadContainingBranches} onRetryContaining={() => detailStore.retryContaining()}
             onLocateInHistory={searchView.active && displayedOid ? () => { void locateSelectedInHistory(displayedOid); } : undefined}
-            selectedOid={displayedOid} onSelect={selectDisplayedCommit}
+            selectedOid={displayedOid} onSelect={activateDisplayedCommit}
             onOpenHandoff={openHandoff}
             onOpenFile={filesView.supported ? openFileFromCommit : undefined}
             commitsOverride={searchView.active ? searchView.window?.commits : undefined}

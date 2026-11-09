@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileText, LoaderCircle } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileText, LoaderCircle, X } from "lucide-react";
 import type { BranchesContainingResult, ChangedFile, ChangedFilesPage, CommitDetails, CommitIdentity, CommitSummary, GitPath, MergeCommitsPage, RefInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositoryView } from "../lib/repository-session-store.js";
@@ -18,9 +18,10 @@ import { Button } from "./ui/button.js";
 /** ⌥⌘1 / ⌥⌘2 on the commits page: scroll the details to the overview (top) or to 文件改动. */
 export const COMMIT_DETAIL_SCROLL_EVENT = "commitscope:commit-detail-scroll";
 
-export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, onOpenFile }: {
+export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, onOpenFile }: {
   preview: RepositoryView;
   detail: CommitDetailView;
+  onClose?(): void;
   onRetryDetails(): void;
   onRetryFiles(): void;
   onLoadFiles(parentIndex: number | null, offset: number): void;
@@ -92,9 +93,20 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
   const headRefs = !oldSelection && !oldDetailContext ? refIndex.get(commit.oid) ?? [] : [];
   const detachedHead = !oldSelection && repository.headReference === null && isHead;
   const hasLabels = headRefs.length > 0 || detachedHead || Boolean(oldDetailContext && shownDetails?.refs.length) || Boolean(shownDetails?.refsTruncated) || isMerge;
+  const moveButtons = <>
+    <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
+      onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
+    <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={canMoveNext === undefined ? index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null) : !canMoveNext}
+      onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
+  </>;
 
   return <section ref={scrollRef} aria-label="提交详情" className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain bg-panel">
-    <div className="mx-auto flex max-w-[920px] flex-col gap-5 px-11 pt-7 pb-12">
+    {onClose ? <div data-testid="detail-drawer-toolbar" className="sticky top-0 z-20 flex h-12 items-center gap-2 border-b border-line bg-panel px-5">
+      <span className="mr-auto text-[13px] font-medium text-fg2">提交详情</span>
+      {moveButtons}
+      <Button variant="ghost" size="icon-sm" aria-label="关闭详情" title="关闭详情（Esc）" onClick={onClose}><X className="size-4" strokeWidth={1.75} /></Button>
+    </div> : null}
+    <div className={cn("mx-auto flex max-w-[920px] flex-col gap-5 pt-7 pb-12", onClose ? "px-6" : "px-11")}>
       {/* Labels get a row of their own only when there are any; the actions sit beside the title. */}
       {hasLabels ? <div className="flex flex-wrap items-center gap-2" data-testid="commit-labels">
         {headRefs.length || detachedHead ? <RefTags refs={headRefs} headReference={repository.headReference} isHeadCommit={detachedHead} size="default" limit={6} /> : null}
@@ -119,10 +131,7 @@ export function CommitDetail({ preview, detail, onRetryDetails, onRetryFiles, on
                 ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
                 : null} /> : null}
             <CopyOidButton oid={commit.oid} />
-            <Button variant="outline" size="icon-sm" aria-label="上一个提交" disabled={canMovePrevious === undefined ? index < 0 || (index === 0 && preview.windowPreviousCursor === null) : !canMovePrevious}
-              onClick={() => { void onMoveSelection(-1); }}><ChevronUp className="size-3.5" strokeWidth={1.75} /></Button>
-            <Button variant="outline" size="icon-sm" aria-label="下一个提交" disabled={canMoveNext === undefined ? index < 0 || (index === commits.length - 1 && preview.windowNextCursor === null) : !canMoveNext}
-              onClick={() => { void onMoveSelection(1); }}><ChevronDown className="size-3.5" strokeWidth={1.75} /></Button>
+            {onClose ? null : moveButtons}
           </div>
         </div>
         {(!shownDetails && commit.summaryTruncated) || (shownDetails?.commit.textLossy ?? commit.textLossy) ? <p className="m-0 text-xs text-warn">
