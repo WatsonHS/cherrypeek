@@ -26,6 +26,7 @@ try {
       "workspace-indicator": resolve(root, "apps/desktop/src/renderer/lib/workspace-indicator.ts"),
       "workspace-store": resolve(root, "apps/desktop/src/renderer/lib/workspace-store.ts"),
       "files-store": resolve(root, "apps/desktop/src/renderer/lib/files-store.ts"),
+      "navigation-history": resolve(root, "apps/desktop/src/renderer/lib/navigation-history.ts"),
       "syntax-languages": resolve(root, "apps/desktop/src/renderer/lib/syntax/languages.ts"),
       "syntax-tokens": resolve(root, "apps/desktop/src/renderer/lib/syntax/tokens.ts"),
       "syntax-theme": resolve(root, "apps/desktop/src/renderer/lib/syntax/theme.ts"),

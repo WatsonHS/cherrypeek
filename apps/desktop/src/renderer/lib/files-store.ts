@@ -31,6 +31,8 @@ export interface PathFileChange {
 }
 
 export type FilesTab = "content" | "history";
+/** With a commit picked: its change to the file ("diff"), or the file as it was in that commit ("file"). */
+export type ChangeView = "diff" | "file";
 
 export interface TreeVersion {
   commit: string;
@@ -109,6 +111,9 @@ export interface FilesView {
   parentIndex: number | null;
   /** `fullFileLimited`: the file was over the whole-file limit, so `value` holds only the changes. */
   change: (Load<FileDiff> & { fullFileLimited?: boolean }) | null;
+  changeView: ChangeView;
+  /** The file's content in the picked commit, read when `changeView` is "file". */
+  revision: Load<FileContent> | null;
   blameEnabled: boolean;
   blame: BlameState | null;
   focus: BlameFocus | null;
@@ -130,7 +135,7 @@ const ROOT = "";
 const initialView = (): FilesView => ({
   supported: false, blameSupported: false, fullFileSupported: false, repoKey: null, version: null, directories: {}, expanded: {},
   selection: null, tab: "content", historyOpen: false, content: null, contentLines: CONTENT_LINES, historyMessage: "", history: null,
-  selectedCommit: null, parentIndex: 0, change: null, blameEnabled: false, blame: null, focus: null, pathChanges: null, pathOpen: null, pathChange: null,
+  selectedCommit: null, parentIndex: 0, change: null, changeView: "diff", revision: null, blameEnabled: false, blame: null, focus: null, pathChanges: null, pathOpen: null, pathChange: null,
 });
 
 /** For each line (1-based index), the blame block that covers it; undefined while the stream has not reached it. */
@@ -160,7 +165,7 @@ const changeKey = (oid: string, parentIndex: number | null, pathHex: string, ful
 export class FilesStore {
   private view = initialView();
   private readonly listeners = new Set<() => void>();
-  private readonly intents = { content: 0, history: 0, change: 0, blame: 0, pathChanges: 0, pathChange: 0 };
+  private readonly intents = { content: 0, history: 0, change: 0, blame: 0, pathChanges: 0, pathChange: 0, revision: 0 };
   private treeIntents: Record<string, number> = {};
   /** Directory reads share one channel in main; they run one after another so a parent never cancels a child. */
   private treeQueue: Promise<void> = Promise.resolve();
@@ -259,12 +264,19 @@ export class FilesStore {
   retryHistory(): void { void this.loadHistory(false); }
   retryContent(): void { void this.loadContent(); }
 
+  /** Shows the picked commit's change, or the file as it was in that commit. */
+  setChangeView(view: ChangeView): void {
+    if (view === this.view.changeView) return;
+    this.update({ ...this.view, changeView: view });
+    if (this.view.tab === "history" && this.view.selectedCommit) this.loadShownChange();
+  }
+
   /** Picks a commit in the history column; its change opens below the file. */
   selectCommit(oid: string, parentIndex: number | null = 0): void {
     // After a blame jump the way back stays while other commits are browsed; only the line's own commit is marked.
     this.update({ ...this.view, tab: "history", selectedCommit: oid, parentIndex });
     if (this.view.selection?.kind === "directory") void this.loadPathChanges(false);
-    else void this.loadChange();
+    else this.loadShownChange();
   }
 
   loadMorePathChanges(): void { if (this.view.pathChanges?.hasMore && !this.view.pathChanges.loadingMore) void this.loadPathChanges(true); }
@@ -310,12 +322,13 @@ export class FilesStore {
    * this path's literal history, so nothing is picked in the column then.
    */
   locateFromBlame(line: number): void {
+    // A blame jump is about how that line changed: it shows the change, whatever was shown before.
     const blame = this.view.blame;
     const block = blame ? blameLineIndex(blame.blocks, blame.totalLines)[line] : undefined;
     const from = this.view.selection;
     if (!block || !from) return;
     const focus: BlameFocus = { line, oid: block.oid, originalLine: block.originalStartLine + (line - block.startLine), originalPath: block.originalPath, from };
-    this.update({ ...this.view, tab: "history", historyOpen: true, focus, selectedCommit: block.oid, parentIndex: 0, change: null });
+    this.update({ ...this.view, tab: "history", historyOpen: true, changeView: "diff", focus, selectedCommit: block.oid, parentIndex: 0, change: null });
     void this.loadChange();
     void this.loadHistory(false);
   }
@@ -359,7 +372,7 @@ export class FilesStore {
       // The file is always shown; a picked commit's change opens below it.
       void this.loadContent();
       if (this.view.blameEnabled) void this.loadBlame();
-      if (this.view.tab === "history" && this.view.selectedCommit) void this.loadChange();
+      if (this.view.tab === "history" && this.view.selectedCommit) this.loadShownChange();
     }
     if (this.view.historyOpen || selection.kind === "directory") void this.loadHistory(false);
     if (selection.kind === "directory" && this.view.selectedCommit) void this.loadPathChanges(false);
@@ -494,6 +507,25 @@ export class FilesStore {
     this.update({ ...this.view, pathChange: result.ok ? { key, state: "ready", value: result.value, error: null } : { key, state: "error", value: null, error: errorOf(result) } });
   }
 
+  private loadShownChange(): void {
+    if (this.view.changeView === "file") void this.loadRevision();
+    else void this.loadChange();
+  }
+
+  private async loadRevision(): Promise<void> {
+    const { selection, selectedCommit } = this.view;
+    if (!selection || selection.kind !== "file" || !selectedCommit) return;
+    const focus = this.view.focus?.oid === selectedCommit ? this.view.focus : null;
+    const pathHex = focus?.originalPath?.rawHex ?? selection.path.rawHex;
+    const key = `${selectedCommit}:${pathHex}`;
+    if (this.view.revision?.key === key && this.view.revision.state !== "error") return;
+    const intent = ++this.intents.revision;
+    this.update({ ...this.view, revision: { key, state: "loading", value: null, error: null } });
+    const result = await this.retrying(() => this.api.readFileContent({ commit: selectedCommit, pathHex, maxLines: CONTENT_LINES }), () => intent === this.intents.revision);
+    if (!result || intent !== this.intents.revision || this.view.revision?.key !== key) return;
+    this.update({ ...this.view, revision: result.ok ? { key, state: "ready", value: result.value, error: null } : { key, state: "error", value: null, error: errorOf(result) } });
+  }
+
   private async loadChange(): Promise<void> {
     const { selection, selectedCommit } = this.view;
     if (!selection || selection.kind !== "file" || !selectedCommit) return;
@@ -572,6 +604,7 @@ export class FilesStore {
   }
 
   private resetAll(): void {
+    this.intents.revision += 1;
     this.intents.pathChanges += 1;
     this.intents.pathChange += 1;
     this.intents.content += 1;

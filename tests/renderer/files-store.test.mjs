@@ -221,6 +221,29 @@ test("blame accumulates chunks of the current stream only; a line from before a 
   store.dispose();
 });
 
+test("a picked commit can show the file as it was in that commit instead of its change", async () => {
+  const api = fakeApi();
+  const store = new FilesStore(api);
+  store.bind("repo", capabilities);
+  store.setVersion(version);
+  await api.answer("tree", ok({ commit: version.commit, path: null, entries: [], offset: 0, total: 0, hasMore: false }));
+  store.select({ path: path("a.ts"), kind: "file" });
+  await api.answer("content", ok(textContent("a.ts", "now\n")));
+  store.setHistoryOpen(true);
+  await api.answer("history", ok({ commit: version.commit, path: path("a.ts"), entries: [historyEntry(oid("c"))], nextCursor: null }));
+  store.selectCommit(oid("c"));
+  await api.answer("change", ok({ oid: oid("c") }));
+  store.setChangeView("file");
+  const revision = await api.answer("content", ok(textContent("a.ts", "then\n", oid("c"))));
+  assert.deepEqual(revision.params, { commit: oid("c"), pathHex: hex("a.ts"), maxLines: 5000 }, "read at the picked commit, not the tree version");
+  assert.deepEqual([store.getView().revision.state, store.getView().revision.value.text, store.getView().content.value.text], ["ready", "then\n", "now\n"]);
+  store.setChangeView("diff");
+  assert.ok(!api.pending.some(item => item.kind === "change"), "the change already read is shown again without a new read");
+  store.setChangeView("file");
+  assert.ok(!api.pending.some(item => item.kind === "content"), "and so is the file");
+  store.dispose();
+});
+
 test("the history column sits beside the file: picking a commit opens its change, and closing it shows the file again", async () => {
   const api = fakeApi();
   const store = new FilesStore(api);

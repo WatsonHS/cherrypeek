@@ -211,6 +211,13 @@ try {
     assert.match(await page.getByTestId("change-panel").textContent() ?? "", /refactor: rename the module/u, "↓ shows the next commit's change");
     await page.keyboard.press("ArrowUp");
     await page.waitForFunction(() => document.querySelectorAll("[data-testid='file-history-row']")[0]?.getAttribute("aria-pressed") === "true", null, { timeout: 5_000 });
+    // The file as it was in that commit, without comparing.
+    await page.getByTestId("change-view-file").click();
+    await page.locator("[data-testid='revision-content'] [data-revision-line='30']").waitFor({ timeout: 15_000 });
+    assert.match(await page.locator("[data-testid='revision-content'] [data-revision-line='20']").textContent() ?? "", /value20 = 200;/u, "the newest commit's version");
+    assert.equal(await page.locator("[data-testid='revision-content'] [data-revision-line]").count(), 30);
+    await page.getByTestId("change-view-diff").click();
+    await page.getByTestId("file-change").waitFor({ timeout: 15_000 });
     // A narrower window keeps the change header's commit buttons whole.
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1200, 900));
     await page.waitForFunction(() => window.innerWidth === 1200);
@@ -242,6 +249,19 @@ try {
     assert.doesNotMatch(await page.getByTestId("to-files-banner").textContent() ?? "", /的历史/u, "it opened the file, not its history");
     await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
     assert.equal(await page.getByTestId("change-panel").count(), 0, "the file itself is shown, not a change");
+    // Back / forward: ⌘[ returns to the commit the jump came from, ⌘] comes back to the file.
+    const onPage = id => page.waitForFunction(expected => document.querySelector("[data-testid='page-switch'] [aria-current='page']")?.getAttribute("data-testid") === expected, id, { timeout: 10_000 });
+    assert.match(await page.getByTestId("nav-back").getAttribute("title") ?? "", /^后退到 提交 [0-9a-f]{7,}/u);
+    await page.keyboard.press("Meta+BracketLeft");
+    await onPage("page-commits");
+    assert.match(await page.getByTestId("nav-forward").getAttribute("title") ?? "", /^前进到 app\.ts/u);
+    await page.keyboard.press("Meta+BracketRight");
+    await onPage("page-files");
+    await page.locator("[data-testid='file-view'] [data-testid='file-content'] [data-line='30']").waitFor({ timeout: 15_000 });
+    await page.getByTestId("nav-back").click();
+    await onPage("page-commits");
+    await page.getByTestId("nav-forward").click();
+    await onPage("page-files");
     if (!await page.getByTestId("history-column").isVisible().catch(() => false)) await page.getByTestId("history-toggle").click();
     await page.getByTestId("file-history-row").first().waitFor({ timeout: 15_000 });
 
@@ -311,6 +331,19 @@ try {
       await page.getByTestId("diff-full-limited").waitFor({ state: "detached", timeout: 15_000 });
       await page.getByTestId("back-to-file").click();
     }
+
+    // A file renamed after the commit is not in the tree version: it is shown as it was in that commit,
+    // and the files page's tree version is left alone.
+    await page.keyboard.press("Meta+1");
+    await page.getByTestId("commit-row").last().click();
+    await page.keyboard.press("Alt+Meta+2");
+    await page.getByTestId("changed-file-row").filter({ hasText: "old-name.ts" }).getByTestId("open-in-files").click();
+    await onPage("page-files");
+    await page.locator("[data-testid='revision-content'] [data-revision-line='5']").waitFor({ timeout: 15_000 });
+    assert.match(await page.locator("[data-testid='revision-content'] [data-revision-line='5']").textContent() ?? "", /value5 = 5;/u, "the first commit's version");
+    assert.match(await page.getByTestId("to-files-banner").textContent() ?? "", /当前版本里已没有这个文件/u);
+    assert.match(await page.getByTestId("tree-version").textContent() ?? "", /main/u, "the tree version stays on the branch");
+    await page.getByTestId("back-to-file").click();
   }
 
   if (has("workspaceStatus")) {

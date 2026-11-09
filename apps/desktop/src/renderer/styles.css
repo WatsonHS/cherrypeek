@@ -218,9 +218,10 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
 .topbar-search-toggle { display: none; }
 
 @media (max-width: 1319px) {
-  .topbar-repository { width: clamp(100px, 15vw, 180px); flex: 0 1 clamp(100px, 15vw, 180px); }
+  /* Capped, not fixed: a short name or scope ("main") takes only its own width. */
+  .topbar-repository { max-width: clamp(100px, 15vw, 180px); min-width: 0; flex: 0 1 auto; }
   .topbar-repository > span { max-width: 100%; }
-  .topbar-scope-picker { width: clamp(110px, 16vw, 200px); flex: 0 1 clamp(110px, 16vw, 200px); }
+  .topbar-scope-picker { max-width: clamp(110px, 16vw, 200px); min-width: 0; flex: 0 1 auto; }
   .topbar-worktree-meta,
   .topbar-action-label,
   .topbar-activity-count { display: none; }
@@ -266,8 +267,8 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
 }
 
 @media (max-width: 900px) {
-  .topbar-repository { width: 100px; flex-basis: 100px; padding-inline: 4px; }
-  .topbar-scope-picker { width: 110px; flex-basis: 110px; padding-inline: 4px; }
+  .topbar-repository { max-width: 100px; padding-inline: 4px; }
+  .topbar-scope-picker { max-width: 110px; padding-inline: 4px; }
   .topbar-refresh { width: 28px; height: 28px; padding: 0; }
   .topbar-updates-label { max-width: 64px; }
   .topbar-divider { margin-inline: -2px; }

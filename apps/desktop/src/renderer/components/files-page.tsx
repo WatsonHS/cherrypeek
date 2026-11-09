@@ -3,7 +3,7 @@ import { ArrowLeft, ChevronDown, ChevronRight, Clock, Copy, FileText, Folder, Fo
 import { createPortal } from "react-dom";
 import type { BlameBlock, ChangedFile, CommitIdentity, FileHistoryEntry, GitPath, TreeEntry } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { momentLabel, parseGitTime, shortOid } from "../lib/format.js";
-import { blameHeat, blameLineIndex, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
+import { blameHeat, blameLineIndex, type ChangeView, type FilesSelection, type FilesView, type TreeVersion } from "../lib/files-store.js";
 import { cn } from "../lib/utils.js";
 import { DiffView, useDiffDisplay } from "./diff-view.js";
 import { SyntaxLine } from "./syntax-text.js";
@@ -28,6 +28,8 @@ export interface FilesActions {
   retryPathChanges(): void;
   /** For a blame line from before a whole-file rename: the old path's history at that commit. */
   openOriginalHistory(): void;
+  /** With a commit picked: show its change, or the file as it was in that commit. */
+  setChangeView(view: ChangeView): void;
   loadMoreEntries(pathHex: string): void;
   retryDirectory(pathHex: string): void;
   select(selection: FilesSelection): void;
@@ -529,10 +531,8 @@ function BlameGutter({ block, number, commit, level, widths, history, actions }:
       <span className="text-xs text-fg3"><span className="font-mono">{shortOid(block.oid)}</span> · {commit.authorName} · {momentLabel(commit.authorTime * 1000)}</span>
       <span className="text-xs text-fg2">这一块：{range}{history?.change.additions !== null && history?.change.additions !== undefined ? `。这个提交在本文件 +${history.change.additions} −${history.change.deletions ?? 0}` : ""}</span>
       {block.originalPath ? <span className="text-xs text-warn">当时路径：{block.originalPath.display}（之后整个文件改过名）</span> : null}
-      <div className="flex gap-2 pt-1">
-        <Button size="sm" onClick={() => { setAnchor(null); actions.locateFromBlame(number); }}>定位到这个提交</Button>
-        <Button size="sm" variant="outline" onClick={() => { setAnchor(null); actions.openCommit(block.oid); }}>在提交历史中定位</Button>
-      </div>
+      {/* No buttons: clicking the line itself opens this commit's change; the card only tells what it is. */}
+      <span className="text-[11.5px] text-fg3">单击这一行查看这次修改</span>
     </div>, document.body) : null}
   </>;
 }
@@ -585,21 +585,30 @@ function ChangePanel({ view, actions, onBack }: { view: FilesView; actions: File
   const fileName = (view.focus?.from ?? view.selection)?.path.display.split("/").at(-1) ?? "文件";
   const backLabel = view.focus ? `${fileName} 第 ${view.focus.line} 行` : fileName;
   return <section aria-label="这次提交对文件的修改" data-testid="change-panel" className="flex min-h-0 flex-1 flex-col bg-panel">
-    <div className="flex min-h-11 shrink-0 items-center gap-2.5 border-b border-line pr-3 pl-2.5">
-      <button type="button" onClick={onBack} data-testid="back-to-file" title="回到文件（Esc 或 ⌥⌘1）"
-        className="flex h-7 max-w-[260px] shrink-0 items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95">
+    {/* The header gives way by its own width: author and date, then the OID and the long switch labels, then the
+        "查看完整提交" text; the way back and the commit title only shorten, so nothing is cut at the right edge. */}
+    <div className="@container flex min-h-11 shrink-0 items-center gap-2.5 border-b border-line pr-3 pl-2.5">
+      <button type="button" onClick={onBack} data-testid="back-to-file" title={`回到 ${backLabel}（Esc 或 ⌥⌘1）`}
+        className="flex h-7 max-w-[220px] min-w-[84px] shrink items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95 @max-3xl:max-w-[160px]">
         <ArrowLeft className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{backLabel}</span></button>
       <span aria-hidden="true" className="h-5 w-px shrink-0 bg-line" />
       {/* When narrow, the author / date and then the title are cut; the OID and "查看完整提交" stay whole. */}
       <span className="min-w-[60px] shrink truncate text-[13.5px] font-semibold" title={summary}>{summary}</span>
-      {meta ? <span className="min-w-0 shrink-[4] truncate text-xs text-fg3" title={meta}>{meta}</span> : null}
+      {meta ? <span className="min-w-0 shrink-[4] truncate text-xs text-fg3 @max-3xl:hidden" title={meta}>{meta}</span> : null}
       <div className="min-w-0 flex-1" />
-      <Button variant="outline" size="sm" className="shrink-0 font-mono" onClick={() => { void window.commitScope.copyText(oid); }} title="复制完整 OID">{shortOid(oid)}</Button>
-      <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit">查看完整提交<ChevronRight className="size-3" strokeWidth={1.75} /></Button>
+      <div role="radiogroup" aria-label="这次提交显示什么" className="flex shrink-0 rounded-[9px] bg-sunken p-[3px]">
+        {(["diff", "file"] as const).map(mode => <button key={mode} type="button" role="radio" aria-checked={view.changeView === mode} data-testid={`change-view-${mode}`}
+          onClick={() => actions.setChangeView(mode)} title={mode === "diff" ? "这次提交对文件的修改" : "只看这个提交里的文件全文，不对比"}
+          className="flex h-6 items-center rounded-[7px] px-2.5 text-xs whitespace-nowrap text-fg2 aria-checked:bg-panel aria-checked:font-semibold aria-checked:text-fg aria-checked:shadow-[0_0_0_1px_var(--line2)]">
+          {mode === "diff" ? "改动" : <><span className="@max-2xl:hidden">这一版的</span>文件</>}</button>)}
+      </div>
+      <Button variant="outline" size="sm" className="shrink-0 font-mono @max-2xl:hidden" onClick={() => { void window.commitScope.copyText(oid); }} title="复制完整 OID">{shortOid(oid)}</Button>
+      <Button variant="outline" size="sm" className="shrink-0" onClick={() => actions.openCommit(oid)} data-testid="open-full-commit" aria-label="查看完整提交" title={`在提交页查看完整提交 ${shortOid(oid)}`}>
+        <span className="@max-xl:hidden">查看完整提交</span><ChevronRight className="size-3" strokeWidth={1.75} /></Button>
     </div>
     <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-3 pb-6">
       {view.focus?.originalPath && view.focus.oid === oid ? <p className="m-0 mb-2 text-xs text-fg3">这一行来自改名之前的 <span className="font-mono">{view.focus.originalPath.display}</span>，下面是它在那个路径下的修改。</p> : null}
-      <ChangeBox view={view} actions={actions} entry={entry} />
+      {view.changeView === "file" ? <RevisionContent view={view} oid={oid} /> : <ChangeBox view={view} actions={actions} entry={entry} />}
     </div>
   </section>;
 }
@@ -619,6 +628,49 @@ function CommitPane({ view, actions }: { view: FilesView; actions: FilesActions 
       {view.selection?.kind === "file" && view.selectedCommit ? <ChangeBox view={view} actions={actions} entry={selected} /> : null}
       {!view.selectedCommit && history?.state === "ready" && entries.length === 0 ? <p className="m-0 text-[13px] text-fg3">{view.historyMessage ? `没有提交消息包含“${view.historyMessage}”的修改。` : "这个版本的可达历史里没有修改过这个路径的提交。"}</p> : null}
     </div>
+  </div>;
+}
+
+/** The file as it was in the picked commit: its full text with line numbers and highlighting, nothing compared. */
+function RevisionContent({ view, oid }: { view: FilesView; oid: string }): React.JSX.Element {
+  const revision = view.revision;
+  const value = revision?.state === "ready" ? revision.value : null;
+  const text = value?.kind === "text" ? value.text : null;
+  const lines = React.useMemo(() => {
+    if (text === null) return [];
+    const split = text.split("\n");
+    if (split.at(-1) === "") split.pop();
+    return split;
+  }, [text]);
+  const language = React.useMemo(() => value ? languageForPath(value.path.display) : null, [value]);
+  const tokens = useSyntaxLines(text === null ? null : lines, language);
+  if (!revision || revision.state === "loading") {
+    return <p role="status" className="m-0 flex items-center gap-1.5 text-xs text-fg3"><LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />正在读取这一版的文件…</p>;
+  }
+  if (revision.state === "error") return <p role="alert" className="m-0 text-xs text-bad">{revision.error?.message}</p>;
+  const file = value!;
+  const note = {
+    binary: `二进制文件${file.size === null ? "" : `（${formatBytes(file.size)}）`}，不显示内容。`,
+    lfs: "这是 Git LFS 指针；未下载 LFS 内容。",
+    submodule: "这是子模块引用，只记录子模块的提交，不读取子模块内容。",
+    symlink: `符号链接，指向 ${file.symlinkTarget?.display ?? "（无法读取目标）"}。不跟随链接。`,
+    tooLarge: `文件${file.size === null ? "" : ` ${formatBytes(file.size)}`}，超过读取上限，不显示内容。`,
+    missing: "这个提交里没有这个文件（可能是这次提交删除了它）。",
+    text: "",
+  }[file.kind];
+  return <div className="overflow-hidden rounded-xl border border-line bg-bg" data-testid="revision-content">
+    <div className="flex min-h-9 items-center gap-1.5 border-b border-line px-3 text-xs text-fg3">
+      <span className="min-w-0 truncate">提交 <span className="font-mono text-fg2">{shortOid(oid)}</span> 时的 <span className="text-fg2">{file.path.display}</span></span>
+      {file.totalLines !== null && file.kind === "text" ? <span className="shrink-0">· {file.totalLines.toLocaleString()} 行</span> : null}
+    </div>
+    {note ? <p className="m-0 px-4 py-3 text-xs text-fg3">{note}</p> : null}
+    {file.truncated ? <p className="m-0 border-b border-line px-4 py-2 text-xs text-warn">只显示前 {file.lines.toLocaleString()} 行{file.totalLines !== null ? `（共 ${file.totalLines.toLocaleString()} 行）` : ""}。</p> : null}
+    {text !== null ? <div className="overflow-x-auto py-1 font-mono text-[12.5px] leading-[21px]">
+      {lines.map((line, index) => <div key={index} data-revision-line={index + 1} className="flex min-w-max whitespace-pre">
+        <span className="w-12 shrink-0 pr-3 text-right text-fg3 select-none">{index + 1}</span>
+        <span className="pr-5"><SyntaxLine tokens={tokens?.[index] ?? null} fallback={line} /></span>
+      </div>)}
+    </div> : null}
   </div>;
 }
 

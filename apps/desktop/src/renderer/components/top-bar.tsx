@@ -1,5 +1,6 @@
 import * as React from "react";
-import { ChevronDown, Cloud, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Cloud, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag } from "lucide-react";
+import type { NavigationView } from "../lib/navigation-history.js";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
 import type { SearchView } from "../lib/metadata-search-store.js";
@@ -25,7 +26,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
   searchView, activityQuery, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths, observation, refDiff, refDiffLoading, refDiffError,
   onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
-  page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch }: {
+  page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch, history }: {
   preview: RepositoryView;
   actions: RepositoryActions;
   recent: RecentState;
@@ -61,6 +62,8 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   filesAvailable: boolean;
   /** The search box of the files and workspace pages; the commits page uses the metadata search. */
   pageSearch: React.ReactNode;
+  /** Back / forward between recorded places (⌘[ / ⌘]). */
+  history: { view: NavigationView; onBack(): void; onForward(): void };
 }): React.JSX.Element | null {
   const [scopeOpen, setScopeOpen] = React.useState(false);
   const repository = preview.repository;
@@ -73,6 +76,16 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
       navigation={preview.navigation} navigationLoading={preview.navigationLoading} navigationError={preview.navigationError?.message ?? null}
       onLoadNavigation={onLoadNavigation} />
     <span aria-hidden="true" className="topbar-divider h-6 w-px shrink-0 bg-line" />
+    <div className="flex shrink-0 items-center" data-testid="nav-buttons">
+      <button type="button" data-testid="nav-back" aria-label={history.view.backLabel ? `后退到 ${history.view.backLabel}` : "后退"} disabled={!history.view.canBack} onClick={history.onBack}
+        title={history.view.backLabel ? `后退到 ${history.view.backLabel}（⌘[）` : "后退（⌘[）"}
+        className="flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent">
+        <ArrowLeft className="size-4" strokeWidth={1.75} /></button>
+      <button type="button" data-testid="nav-forward" aria-label={history.view.forwardLabel ? `前进到 ${history.view.forwardLabel}` : "前进"} disabled={!history.view.canForward} onClick={history.onForward}
+        title={history.view.forwardLabel ? `前进到 ${history.view.forwardLabel}（⌘]）` : "前进（⌘]）"}
+        className="flex size-7 items-center justify-center rounded-[7px] text-fg2 hover:bg-hover hover:text-fg disabled:text-fg3 disabled:opacity-45 disabled:hover:bg-transparent">
+        <ArrowRight className="size-4" strokeWidth={1.75} /></button>
+    </div>
     <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} />
     <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
       onOpenHandoff={onOpenHandoff}
@@ -152,10 +165,12 @@ function ShortcutGuide(): React.JSX.Element {
       <h2 className="m-0 mb-2 text-[13px] font-semibold">快捷键</h2>
       <dl className="m-0 grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs">
         <dt className="text-fg2">聚焦搜索</dt><dd className="m-0 font-mono text-fg3">{modifier}F</dd>
-        <dt className="text-fg2">从搜索结果在历史中定位</dt><dd className="m-0 font-mono text-fg3">{modifier}]</dd>
-        <dt className="text-fg2">返回搜索结果</dt><dd className="m-0 font-mono text-fg3">{modifier}[</dd>
+        <dt className="text-fg2">后退 / 前进</dt><dd className="m-0 font-mono text-fg3">{modifier}[ / ]</dd>
+        <dt className="text-fg2">搜索时：在历史中定位 / 返回结果</dt><dd className="m-0 font-mono text-fg3">{modifier}] / [</dd>
         <dt className="text-fg2">切换页面：提交 / 文件 / 工作区</dt><dd className="m-0 font-mono text-fg3">{modifier}1 / 2 / 3</dd>
-        <dt className="text-fg2">切换标签页：概览 / 文件改动</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
+        <dt className="text-fg2">提交详情：概览 / 文件改动</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
+        <dt className="text-fg2">文件页：回到文件 / 开关历史列</dt><dd className="m-0 font-mono text-fg3">{altModifier}1 / 2</dd>
+        <dt className="text-fg2">关闭修改，回到文件</dt><dd className="m-0 font-mono text-fg3">Esc</dd>
         <dt className="text-fg2">刷新仓库历史</dt><dd className="m-0 font-mono text-fg3">{refreshKey}</dd>
         <dt className="text-fg2">切换浏览范围</dt><dd className="m-0 text-fg3">顶部范围选择器</dd>
         <dt className="text-fg2">历史列表中上下选择提交</dt><dd className="m-0 font-mono text-fg3">↑ / ↓</dd>
