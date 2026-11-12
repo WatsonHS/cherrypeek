@@ -76,6 +76,21 @@ const IPC_FILES_BLAME_CHUNK = "commitscope:files:blame-chunk";
 const IPC_FILES_CANCEL = "commitscope:files:cancel";
 const IPC_OPERATION_FETCH = "commitscope:operations:fetch";
 const IPC_OPERATION_CANCEL = "commitscope:operations:cancel";
+const IPC_BRANCH_SYNC = "commitscope:operations:branch-sync";
+const IPC_OPERATION_CHECK = "commitscope:operations:check";
+const IPC_OPERATION_RUN = "commitscope:operations:run";
+const IPC_REMOTE_PAGE_OPEN = "commitscope:remote:open-page";
+const IPC_STATS_ACTIVITY = "commitscope:stats:activity";
+const IPC_STATS_CHANGES = "commitscope:stats:changes";
+const IPC_STATS_NOTABLE = "commitscope:stats:notable";
+const IPC_STATS_COMMITS = "commitscope:stats:commits";
+const IPC_STATS_CANCEL = "commitscope:stats:cancel";
+const IPC_STATS_EXCLUSIONS_GET = "commitscope:stats:exclusions:get";
+const IPC_STATS_EXCLUSIONS_SET = "commitscope:stats:exclusions:set";
+const IPC_EVOLUTION_ESTIMATE = "commitscope:evolution:estimate";
+const IPC_EVOLUTION_ANALYZE = "commitscope:evolution:analyze";
+const IPC_EVOLUTION_CHUNK = "commitscope:evolution:chunk";
+const IPC_EVOLUTION_CANCEL = "commitscope:evolution:cancel";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const IPC_OPEN_WORKSPACE_IN = "commitscope:workspace:open-in";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
@@ -444,6 +459,74 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_FILES_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.cancelFiles());
+  });
+  ipcMain.handle(IPC_BRANCH_SYNC, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getBranchSync(params));
+  });
+  ipcMain.handle(IPC_OPERATION_CHECK, (event, operation: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.checkOperation(operation));
+  });
+  ipcMain.handle(IPC_OPERATION_RUN, (event, operation: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.runOperation(operation));
+  });
+  ipcMain.handle(IPC_REMOTE_PAGE_OPEN, (event, target: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(async () => {
+      // The URL is built here from the session's own remotes; nothing the renderer sends is opened as given.
+      const url = repositorySessions!.remotePageUrl(target);
+      if (url === null) return false;
+      await shell.openExternal(url);
+      return true;
+    });
+  });
+  ipcMain.handle(IPC_STATS_ACTIVITY, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getActivityOverview(params));
+  });
+  ipcMain.handle(IPC_STATS_CHANGES, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getChangeStats(params));
+  });
+  ipcMain.handle(IPC_STATS_NOTABLE, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getNotableStats(params));
+  });
+  ipcMain.handle(IPC_STATS_COMMITS, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getStatsCommits(params));
+  });
+  ipcMain.handle(IPC_STATS_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelStats());
+  });
+  ipcMain.handle(IPC_STATS_EXCLUSIONS_GET, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.getStatsExclusions());
+  });
+  ipcMain.handle(IPC_STATS_EXCLUSIONS_SET, (event, patterns: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.setStatsExclusions(patterns));
+  });
+  ipcMain.handle(IPC_EVOLUTION_ESTIMATE, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.estimateEvolution(params));
+  });
+  ipcMain.handle(IPC_EVOLUTION_ANALYZE, (event, params: unknown, streamId: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(async () => {
+      if (typeof streamId !== "string" || !/^[A-Za-z0-9-]{1,64}$/u.test(streamId)) throw new ProtocolClientError("INVALID_REQUEST", "演变分析的流标识无效");
+      const sender = event.sender;
+      return repositorySessions!.analyzeEvolution(params, chunk => {
+        if (!sender.isDestroyed()) sender.send(IPC_EVOLUTION_CHUNK, { streamId, chunk });
+      });
+    });
+  });
+  ipcMain.handle(IPC_EVOLUTION_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelEvolution());
   });
 }
 

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { CommitScopeApi, CoreStatus } from "../../../../packages/protocol/src/core-status.js";
-import type { BlameChunkEvent, RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
+import type { BlameChunkEvent, EvolutionChunkEvent, RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
 
 const api: CommitScopeApi = {
   getCoreStatus: () => ipcRenderer.invoke("commitscope:core:get-status") as Promise<CoreStatus>,
@@ -68,6 +68,25 @@ const api: CommitScopeApi = {
   cancelFiles: () => ipcRenderer.invoke("commitscope:files:cancel"),
   fetchRepository: params => ipcRenderer.invoke("commitscope:operations:fetch", params),
   cancelRepositoryOperation: () => ipcRenderer.invoke("commitscope:operations:cancel"),
+  getBranchSync: params => ipcRenderer.invoke("commitscope:operations:branch-sync", params),
+  checkOperation: operation => ipcRenderer.invoke("commitscope:operations:check", operation),
+  runOperation: operation => ipcRenderer.invoke("commitscope:operations:run", operation),
+  openRemotePage: target => ipcRenderer.invoke("commitscope:remote:open-page", target),
+  getActivityOverview: params => ipcRenderer.invoke("commitscope:stats:activity", params),
+  getChangeStats: params => ipcRenderer.invoke("commitscope:stats:changes", params),
+  getNotableStats: params => ipcRenderer.invoke("commitscope:stats:notable", params),
+  getStatsCommits: params => ipcRenderer.invoke("commitscope:stats:commits", params),
+  cancelStats: () => ipcRenderer.invoke("commitscope:stats:cancel"),
+  getStatsExclusions: () => ipcRenderer.invoke("commitscope:stats:exclusions:get"),
+  setStatsExclusions: patterns => ipcRenderer.invoke("commitscope:stats:exclusions:set", patterns),
+  estimateEvolution: params => ipcRenderer.invoke("commitscope:evolution:estimate", params),
+  analyzeEvolution: (params, streamId) => ipcRenderer.invoke("commitscope:evolution:analyze", params, streamId),
+  cancelEvolution: () => ipcRenderer.invoke("commitscope:evolution:cancel"),
+  onEvolutionChunk(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, chunk: EvolutionChunkEvent) => listener(chunk);
+    ipcRenderer.on("commitscope:evolution:chunk", wrapped);
+    return () => ipcRenderer.removeListener("commitscope:evolution:chunk", wrapped);
+  },
   onBlameChunk(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, chunk: BlameChunkEvent) => listener(chunk);
     ipcRenderer.on("commitscope:files:blame-chunk", wrapped);

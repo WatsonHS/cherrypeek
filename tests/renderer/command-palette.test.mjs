@@ -43,3 +43,10 @@ test("P5-01 fetch commands are offered only while the core can run one", () => {
   assert.deepEqual(ids({ fetchAvailable: true }), ["fetch", "fetchPrune"]);
   assert.deepEqual(ids({ fetchAvailable: true, repositoryReady: false }), []);
 });
+test("the stats page command is offered with ⌘4 whenever a repository is open", () => {
+  const stats = paletteItems("统计", context).items.find(item => item.id === "stats");
+  assert.deepEqual([stats?.label, stats?.shortcut, stats?.action], ["切换到统计页", "⌘4", { kind: "command", command: "stats" }]);
+  assert.equal(paletteItems("统计", context, "Ctrl+").items[0].shortcut, "Ctrl+4");
+  assert.equal(paletteItems("统计", { ...context, repositoryReady: false }).items.length, 0);
+  assert.equal(paletteItems("统计", { ...context, filesAvailable: false, workspaceAvailable: false }).items.length, 1);
+});

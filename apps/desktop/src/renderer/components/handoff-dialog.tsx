@@ -5,6 +5,7 @@ import {
   HANDOFF_SCENARIO_TITLES,
   buildHandoffPrompt,
   cleanupAvailable,
+  handoffNeedsFacts,
   handoffRequestKey,
   handoffSummary,
   type HandoffPromptFacts,
@@ -32,6 +33,10 @@ const NOTE_PLACEHOLDER: Record<HandoffRequest["scenario"], string> = {
   fix: "问题是什么、怎么复现、期望的结果……",
   cleanup: "可选：需要保留或特别注意的内容……",
   "stale-worktree": "可选：这个目录的情况，比如是不是移到了别处……",
+  "fetch-failed": "可选：这个仓库的远端或认证方式，比如用的是 SSH 还是 HTTPS……",
+  "update-diverged": "可选：项目习惯用 rebase 还是 merge，或需要注意什么……",
+  "operation-blocked": "可选：这些改动是什么、你打算怎么处理……",
+  "operation-failed": "可选：失败前你做过什么，比如磁盘空间、权限、其他程序在用仓库……",
 };
 
 /**
@@ -61,6 +66,8 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
 
   React.useEffect(() => {
     if (!open || !request) return;
+    // Requests built from what the renderer already knows (a failed operation) need no facts from the core.
+    if (!handoffNeedsFacts(request)) { setFacts(null); setLoadError(null); setLoading(false); return; }
     const intent = ++intentRef.current;
     let current = true;
     setFacts(null);
@@ -98,7 +105,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
   }, [open, onOpenChange]);
 
   const built = React.useMemo(() => {
-    if (!request || !facts) return null;
+    if (!request || (!facts && handoffNeedsFacts(request))) return null;
     try {
       return buildHandoffPrompt(facts, request, note);
     } catch (error) {
@@ -113,7 +120,9 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
   const tooLong = new TextEncoder().encode(prompt).byteLength > 64 * 1024;
   const blocker = blockingReason(request, facts);
   const composingNow = composing || composingRef.current;
-  const copyDisabled = loading || !facts || Boolean(blocker) || composingNow || tooLong || !prompt || Boolean(built && "error" in built);
+  const needsFacts = handoffNeedsFacts(request);
+  const rows = request.target.kind === "operation" ? operationRows(request.target) : facts ? subjectRows(request.target, facts, request.scenario) : null;
+  const copyDisabled = loading || (needsFacts && !facts) || Boolean(blocker) || composingNow || tooLong || !prompt || Boolean(built && "error" in built);
   const title = HANDOFF_SCENARIO_TITLES[request.scenario];
   const count = request.target.kind === "commits" ? request.target.commits.length : null;
 
@@ -144,8 +153,8 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto px-5 pt-2 pb-4">
         {loading ? <p role="status" data-testid="handoff-loading" className="m-0 text-[13px] text-fg3">正在读取仓库信息…</p> : null}
         {loadError ? <p role="alert" data-testid="handoff-error" className="m-0 rounded-lg border border-bad-line bg-bad-bg p-3 text-[13px] text-bad">仓库信息读取失败：{loadError}。请关闭后重试。</p> : null}
-        {facts ? <dl data-testid="handoff-subject" className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg bg-bg px-3 py-2.5 text-xs">
-          {subjectRows(request.target, facts, request.scenario).map(([label, value]) => <React.Fragment key={label}>
+        {rows ? <dl data-testid="handoff-subject" className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-1.5 rounded-lg bg-bg px-3 py-2.5 text-xs">
+          {rows.map(([label, value]) => <React.Fragment key={label}>
             <dt className="text-fg3">{label}</dt>
             <dd className="m-0 min-w-0 break-words text-fg">{value}</dd>
           </React.Fragment>)}
@@ -196,6 +205,33 @@ function blockingReason(request: HandoffRequest, facts: HandoffPromptFacts | nul
   }
   if (request.scenario === "explain-merge" && (facts.selectedCommit?.parents.length ?? 0) < 2) return "这个提交不是 merge。";
   return null;
+}
+
+/** Rows for a failed or refused operation: only what the renderer itself knew at the time. */
+function operationRows(target: Extract<HandoffTarget, { kind: "operation" }>): [string, string][] {
+  const { repository } = target;
+  const shortRef = (name: string) => name.replace(/^refs\/(?:heads|remotes)\//u, "");
+  const rows: [string, string][] = [];
+  if (target.operation === "fetch") rows.push(["操作", "fetch（没有成功，仓库未被改动）"]);
+  else {
+    const { subject } = target;
+    const stepName = subject.step === "update" ? "更新（快进）" : subject.step === "switch" ? "切换分支" : "新建分支";
+    rows.push(["操作", `${stepName}${target.operation === "failed" ? "（中途失败，仓库可能已被部分改动）" : "（被拒绝，仓库未被改动）"}`]);
+    if (subject.branch) rows.push(["分支", `${shortRef(subject.branch.refName)} · ${shortOid(subject.branch.oid)}`]);
+    if (subject.upstream) rows.push(["上游", `${shortRef(subject.upstream.refName)} · ${shortOid(subject.upstream.oid)}`]);
+    if (target.operation === "diverged") rows.push(["分叉", `领先 ${target.blocker.ahead} · 落后 ${target.blocker.behind}`]);
+    if (target.operation === "blocked") {
+      if (target.dirty) rows.push(["未提交改动", `${target.dirty.paths.length}${target.dirty.pathsTruncated ? "+" : ""} 个文件`]);
+      if (target.inProgress) rows.push(["进行中的操作", target.inProgress]);
+    }
+  }
+  if (!repository.isBare && repository.worktreePath) {
+    rows.push(["工作区", `${repository.worktreePath}${repository.headReference ? ` · ${repository.headReference.replace(/^refs\/heads\//u, "")}` : repository.headOid ? " · detached" : ""}`]);
+  } else {
+    rows.push(["仓库", repository.path]);
+  }
+  rows.push([target.operation === "diverged" || target.operation === "blocked" ? "拒绝时间" : "失败时间", new Date(target.failedAtUnixMs).toLocaleString("zh-CN")]);
+  return rows;
 }
 
 function shortOid(oid: string): string {

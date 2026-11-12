@@ -1,7 +1,7 @@
 import type { RefInfo, RepositoryScope, WorktreeInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { repositoryName, shortRefName } from "./format.js";
 
-export type PaletteCommand = "openRepository" | "commits" | "files" | "workspace" | "copyCommit" | "copyMessage" | "copyBranch"
+export type PaletteCommand = "openRepository" | "commits" | "files" | "workspace" | "stats" | "copyCommit" | "copyMessage" | "copyBranch"
   | "openFinder" | "openTerminal" | "openEditor" | "fetch" | "fetchPrune";
 export type PaletteAction = { kind: "commit"; oid: string } | { kind: "scope"; scope: RepositoryScope } | { kind: "command"; command: PaletteCommand };
 export interface PaletteItem {
@@ -59,6 +59,7 @@ export function paletteItems(query: string, context: PaletteContext, modifier = 
     ["commits", "切换到提交页", context.repositoryReady, `${modifier}1`],
     ["files", "切换到文件页", context.repositoryReady && context.filesAvailable, `${modifier}2`],
     ["workspace", "切换到工作区", context.repositoryReady && context.workspaceAvailable, `${modifier}3`],
+    ["stats", "切换到统计页", context.repositoryReady, `${modifier}4`],
     ["fetch", "Fetch：从所有远端获取新提交", context.repositoryReady && Boolean(context.fetchAvailable)],
     ["fetchPrune", "Fetch 并清理远端已删除的分支", context.repositoryReady && Boolean(context.fetchAvailable)],
     ["copyCommit", "复制当前提交 hash", context.repositoryReady && Boolean(context.selectedOid)],

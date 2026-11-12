@@ -200,7 +200,7 @@ export class ProtocolTransport {
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "locateHistoryDate" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
       method !== "getActivityStats" && method !== "observeRepository" && method !== "diffRefSnapshots" && method !== "getHandoffFacts" &&
-      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS].includes(method)) {
+      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS, ...M5_M6_READ_METHODS].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "selectRepositoryScope"].includes(method)) {
@@ -658,14 +658,120 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "fetchRepository" && isRecord(params) && hasExactKeys(params, ["prune", "remote"]) && typeof params.prune === "boolean" &&
     (params.remote === null || typeof params.remote === "string" && params.remote.length > 0 && !params.remote.startsWith("-") &&
       Buffer.byteLength(params.remote, "utf8") <= 256)) return true;
+  if (method === "getBranchSync") return validBranchSyncParams(params);
+  if (method === "checkOperation" || method === "runOperation") return validOperationParams(params);
+  if (method === "getActivityOverview" || method === "getNotableStats") return validStatsQueryParams(params);
+  if (method === "getChangeStats") return validChangeStatsParams(params);
+  if (method === "getStatsCommits") return validStatsCommitsParams(params);
+  if (method === "getStatsExclusions") return isRecord(params) && hasExactKeys(params, []);
+  if (method === "setStatsExclusions") return validStatsExclusionsParams(params);
+  if (method === "estimateEvolution" || method === "analyzeEvolution") return validEvolutionParams(params);
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   return false;
 }
 
+function boundedText(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && Buffer.byteLength(value, "utf8") <= maxBytes && !value.includes("\0");
+}
+
+/** A full ref name as the core reports it: bounded, no NUL, never an option-looking string. */
+function validRefName(value: unknown): boolean {
+  return boundedText(value, 16 * 1024) && !value.startsWith("-");
+}
+
+export function validBranchSyncParams(params: unknown): boolean {
+  return isRecord(params) && hasExactKeys(params, ["refNames"]) && Array.isArray(params.refNames) &&
+    params.refNames.length >= 1 && params.refNames.length <= 50 && params.refNames.every(validRefName);
+}
+
+export function validOperationParams(params: unknown): boolean {
+  if (!isRecord(params) || !hasExactKeys(params, ["operation"]) || !isRecord(params.operation)) return false;
+  return validRepositoryOperation(params.operation);
+}
+
+export function validRepositoryOperation(operation: Record<string, unknown>): boolean {
+  if (operation.kind === "fastForward") {
+    return hasExactKeys(operation, ["expectedOid", "kind", "refName", "upstreamOid"]) && validRefName(operation.refName) &&
+      validOid(operation.expectedOid) && validOid(operation.upstreamOid);
+  }
+  if (operation.kind === "switch") {
+    if (!hasExactKeys(operation, ["expectedHeadOid", "expectedOid", "kind", "target"]) || !validOid(operation.expectedHeadOid) ||
+      !validOid(operation.expectedOid) || !isRecord(operation.target)) return false;
+    const target = operation.target;
+    return hasExactKeys(target, ["refName"]) ? validRefName(target.refName)
+      : hasExactKeys(target, ["remoteRefName"]) && validRefName(target.remoteRefName);
+  }
+  if (operation.kind === "createBranch") {
+    return hasExactKeys(operation, ["expectedHeadOid", "kind", "name", "startOid", "switchAfter"]) && validOid(operation.expectedHeadOid) &&
+      validOid(operation.startOid) && typeof operation.switchAfter === "boolean" && boundedText(operation.name, 1024) && !operation.name.startsWith("-");
+  }
+  return false;
+}
+
+function validStatsRange(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ["endUnix", "startUnix"]) && Number.isSafeInteger(value.startUnix) &&
+    Number.isSafeInteger(value.endUnix) && (value.startUnix as number) >= 0 && (value.startUnix as number) < (value.endUnix as number);
+}
+
+function validStatsBucket(value: unknown): boolean {
+  return value === "tenMinutes" || value === "hour" || value === "day" || value === "week" || value === "month";
+}
+
+/** Raw path as hex; the empty string is the repository root. */
+function validOptionalPathHex(value: unknown): boolean {
+  return value === "" || validPathHex(value);
+}
+
+export function validStatsQueryParams(params: unknown): boolean {
+  return isRecord(params) && hasExactKeys(params, ["bucket", "query", "range"]) && validStatsBucket(params.bucket) &&
+    validStatsRange(params.range) && isSearchQuery(params.query);
+}
+
+export function validChangeStatsParams(params: unknown): boolean {
+  return isRecord(params) && hasKeysWithOptional(params, ["bucket", "query", "range"], ["directoryPrefix"]) && validStatsBucket(params.bucket) &&
+    validStatsRange(params.range) && isSearchQuery(params.query) && (params.directoryPrefix === undefined || validOptionalPathHex(params.directoryPrefix));
+}
+
+function validStatsSelection(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.kind === "file") return hasExactKeys(value, ["kind", "pathHex"]) && validPathHex(value.pathHex);
+  if (value.kind === "directory") return hasExactKeys(value, ["kind", "pathHex"]) && validOptionalPathHex(value.pathHex);
+  if (value.kind === "pair") return hasExactKeys(value, ["aHex", "bHex", "kind"]) && validPathHex(value.aHex) && validPathHex(value.bHex);
+  return value.kind === "untested" && hasExactKeys(value, ["kind"]);
+}
+
+export function validStatsCommitsParams(params: unknown): boolean {
+  return isRecord(params) && hasExactKeys(params, ["limit", "offset", "query", "range", "selection"]) &&
+    Number.isInteger(params.limit) && (params.limit as number) >= 1 && (params.limit as number) <= 200 &&
+    Number.isInteger(params.offset) && (params.offset as number) >= 0 && (params.offset as number) <= 0xffff_ffff &&
+    validStatsRange(params.range) && isSearchQuery(params.query) && validStatsSelection(params.selection);
+}
+
+export function validStatsExclusionsParams(params: unknown): boolean {
+  if (!isRecord(params) || !hasExactKeys(params, ["patterns"]) || !Array.isArray(params.patterns) || params.patterns.length > 100) return false;
+  let total = 0;
+  for (const pattern of params.patterns) {
+    if (!boundedText(pattern, 1024)) return false;
+    total += Buffer.byteLength(pattern, "utf8");
+  }
+  return total <= 64 * 1024;
+}
+
+export function validEvolutionParams(params: unknown): boolean {
+  return isRecord(params) && hasKeysWithOptional(params, ["commit", "pathHex"], ["range"]) && validOid(params.commit) &&
+    validOptionalPathHex(params.pathHex) && (params.range === undefined || params.range === null || validStatsRange(params.range));
+}
+
 /** P5-01: user-triggered operations that write to the repository or use the network; one at a time. */
-const OPERATION_METHODS = ["fetchRepository"];
+const OPERATION_METHODS = ["fetchRepository", "runOperation"];
+
+/** P5-02 / P5-03 and M6: ordinary session reads that can be cancelled and drained. `runOperation` is in OPERATION_METHODS. */
+const M5_M6_READ_METHODS = [
+  "getBranchSync", "checkOperation", "getActivityOverview", "getChangeStats", "getNotableStats", "getStatsCommits",
+  "getStatsExclusions", "setStatsExclusions", "estimateEvolution", "analyzeEvolution",
+];
 
 /** P4-10 to P4-12 reads of the files page: session methods that can be cancelled and drained. */
 const FILE_METHODS = ["listTree", "readFileContent", "readFileHistory", "readFileChange", "listPathChanges", "readBlame"];
@@ -723,7 +829,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS, ...M5_M6_READ_METHODS].includes(method)) return "session";
   return undefined;
 }
 

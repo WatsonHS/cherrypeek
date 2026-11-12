@@ -243,7 +243,8 @@ test("navigation and merge status are bound to the current session and bounded",
   const navigationRequest = await waitFor(() => core.requests[1]);
   assert.equal(navigationRequest.method, "getRepositoryNavigation");
   assert.deepEqual(navigationRequest.context, { repoId: opened.repoId, generation: opened.generation });
-  const navigation = { refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 100 };
+  const navigation = { refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 100,
+    remotes: [], branchUpstreams: [], lastFetchUnixMs: null };
   send(navigationRequest, { section: "repositoryNavigation", navigation });
   assert.deepEqual(await navigationPromise, navigation);
 

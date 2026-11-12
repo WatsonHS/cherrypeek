@@ -46,7 +46,12 @@ import type {
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { RequestContext, ServerResponseMessage } from "../../../../packages/protocol/src/messages.js";
 import { CoreProcess } from "./core-process.js";
-import { ProtocolClientError } from "./protocol-transport.js";
+import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { BranchSyncResult, OperationCheck, OperationRun, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
+  EvolutionEstimate, EvolutionChunk, EvolutionResult } from "../../../../packages/protocol/src/generated/server-message.js";
+import { ProtocolClientError, validBranchSyncParams, validOperationParams, validStatsQueryParams, validChangeStatsParams, validStatsCommitsParams,
+  validStatsExclusionsParams, validEvolutionParams } from "./protocol-transport.js";
+import { buildRemotePageUrl, type RemotePageTarget, type RemoteWebInfo } from "./remote-page-url.js";
 
 const MAX_PATH_BYTES = 16 * 1024;
 const SESSION_TIMEOUT_MS = 20_000;
@@ -165,7 +170,11 @@ export class RepositorySessionController {
    */
   private readonly channelIntent: Record<ReadChannel, number> = {
     workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, commitInfo: 0, blame: 0,
+    branchSync: 0, operationCheck: 0, statsActivity: 0, statsChange: 0, statsNotable: 0, statsCommits: 0, statsExclusionsRead: 0, statsExclusionsWrite: 0,
+    evolutionEstimate: 0, evolutionAnalyze: 0,
   };
+  /** P5-04: the remotes of the latest navigation snapshot, valid only while that session is the current one. */
+  private navigationRemotes?: { session: RepositorySessionInfo; remotes: RemoteWebInfo[] };
   private readonly activeChannel: Partial<Record<ReadChannel, ActiveChannelRequest>> = {};
   /** P5-01: the one operation in progress. A second one is refused rather than replacing it. */
   private activeOperation?: ActiveChannelRequest;
@@ -472,7 +481,18 @@ export class RepositorySessionController {
       completion.coverage.processed !== navigation.refs.length + navigation.worktrees.length) {
       throw invalidSessionResponse("仓库导航响应不完整");
     }
+    this.navigationRemotes = { session, remotes: navigation.remotes.map(remote => ({ name: remote.name, webUrl: remote.webUrl ?? null })) };
     return navigation;
+  }
+
+  /** P5-04. The page address for a commit or ref, from the current session's remotes; null when none has a usable web address. */
+  remotePageUrl(target: unknown): string | null {
+    const session = this.requireCurrent();
+    if (!isRecord(target) || Object.keys(target).length !== 1 || typeof target.commit !== "string" && typeof target.branch !== "string") {
+      throw new ProtocolClientError("INVALID_REQUEST", "远端页面参数无效");
+    }
+    const known = this.navigationRemotes?.session === session ? this.navigationRemotes.remotes : [];
+    return buildRemotePageUrl(known, target as RemotePageTarget);
   }
 
   async selectScope(scope: unknown, pageSize = 200): Promise<RefreshedRepository> {
@@ -987,10 +1007,173 @@ export class RepositorySessionController {
 
   async cancelRepositoryOperation(): Promise<{ cancelled: boolean }> {
     const active = this.activeOperation;
-    if (!active) return { cancelled: false };
+    if (!active || active.uncancellable) return { cancelled: false };
     active.abort.abort(new Error("操作已取消"));
     await active.done.catch(() => undefined);
     return { cancelled: true };
+  }
+
+  // ---- M5 / M6 (P5-02 to P5-04, P6-01 to P6-04). Contract: docs/implementation/m5-m6-backend-contract.md ----
+
+  async getBranchSync(input: unknown): Promise<BranchSyncResult> {
+    if (!validBranchSyncParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "分支同步参数无效");
+    const params = input as GetBranchSyncParams;
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    return this.runChannelRequest("branchSync", session, signal => this.readSingleSection(session, "getBranchSync", params, signal,
+      data => data.section === "branchSync" ? data.result : undefined,
+      result => result.branches.length <= params.refNames.length && result.branches.every(branch => params.refNames.includes(branch.refName))));
+  }
+
+  async checkOperation(input: unknown): Promise<OperationCheck> {
+    const params = this.operationParams(input);
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    return this.runChannelRequest("operationCheck", session, signal => this.readSingleSection(session, "checkOperation", params, signal,
+      data => data.section === "operationCheck" ? data.result : undefined, () => true));
+  }
+
+  /**
+   * Runs one basic operation. It takes the operation slot like fetch (a second one is refused with BUSY, not queued),
+   * is never cancelled once sent, and waits up to 120 s because Git may run hooks. A refusal comes back as
+   * `outcome: "rejected"`, not as an error.
+   */
+  async runOperation(input: unknown): Promise<OperationRun> {
+    const params = this.operationParams(input);
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库正在更新，暂不能执行操作", true);
+    if (this.activeOperation) throw new ProtocolClientError("BUSY", "已有一个操作正在进行", true);
+    let result: OperationRun | undefined;
+    const done = this.core.request("runOperation", params, contextOf(session), {
+      timeoutMs: OPERATION_TIMEOUT_MS,
+      onChunk: chunk => {
+        if (result !== undefined || chunk.data.section !== "operationRun" || !chunk.done) throw invalidSessionResponse("操作响应无效");
+        result = chunk.data.result;
+      },
+    });
+    const active: ActiveChannelRequest = { abort: new AbortController(), done, uncancellable: true };
+    this.activeOperation = active;
+    try {
+      const completion = await done;
+      if (result === undefined || !completion.coverage.complete) throw invalidSessionResponse("操作响应不完整");
+      return result;
+    } finally {
+      if (this.activeOperation === active) this.activeOperation = undefined;
+    }
+  }
+
+  private operationParams(input: unknown): { operation: RepositoryOperation } {
+    // Accepts the operation itself, the shape the renderer API passes.
+    const params = { operation: input };
+    if (!validOperationParams(params)) throw new ProtocolClientError("INVALID_REQUEST", "操作参数无效");
+    return params as { operation: RepositoryOperation };
+  }
+
+  async getActivityOverview(input: unknown): Promise<ActivityOverview> {
+    if (!validStatsQueryParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "活动统计参数无效");
+    const params = input as GetActivityOverviewParams;
+    const session = this.requireCurrent();
+    this.requireCapability("activityOverview");
+    return this.runChannelRequest("statsActivity", session, signal => this.readSingleSection(session, "getActivityOverview", params, signal,
+      data => data.section === "activityOverview" ? data.stats : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  async getChangeStats(input: unknown): Promise<ChangeStats> {
+    if (!validChangeStatsParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "改动统计参数无效");
+    const params = input as GetChangeStatsParams;
+    const session = this.requireCurrent();
+    this.requireCapability("changeStats");
+    return this.runChannelRequest("statsChange", session, signal => this.readSingleSection(session, "getChangeStats", params, signal,
+      data => data.section === "changeStats" ? data.stats : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  async getNotableStats(input: unknown): Promise<NotableStats> {
+    if (!validStatsQueryParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "观察项参数无效");
+    const params = input as GetActivityOverviewParams;
+    const session = this.requireCurrent();
+    this.requireCapability("notableStats");
+    return this.runChannelRequest("statsNotable", session, signal => this.readSingleSection(session, "getNotableStats", params, signal,
+      data => data.section === "notableStats" ? data.stats : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  async getStatsCommits(input: unknown): Promise<StatsCommitPage> {
+    if (!validStatsCommitsParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "统计提交回查参数无效");
+    const params = input as GetStatsCommitsParams;
+    const session = this.requireCurrent();
+    this.requireCapability("changeStats");
+    return this.runChannelRequest("statsCommits", session, signal => this.readSingleSection(session, "getStatsCommits", params, signal,
+      data => data.section === "statsCommitPage" ? data.page : undefined,
+      page => page.commits.length <= params.limit && (page.nextOffset === undefined || page.nextOffset === null || page.nextOffset > params.offset), STATS_TIMEOUT_MS));
+  }
+
+  /** Stops the four statistics reads. The exclusion list and the evolution analysis are not touched. */
+  async cancelStats(): Promise<{ cancelled: boolean }> {
+    return this.cancelChannels(["statsActivity", "statsChange", "statsNotable", "statsCommits"], "统计读取已取消");
+  }
+
+  async getStatsExclusions(): Promise<StatsExclusions> {
+    const session = this.requireCurrent();
+    this.requireCapability("changeStats");
+    return this.runChannelRequest("statsExclusionsRead", session, signal => this.readSingleSection(session, "getStatsExclusions", {}, signal,
+      data => data.section === "statsExclusions" ? data.result : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  async setStatsExclusions(patterns: unknown): Promise<StatsExclusions> {
+    const params = { patterns };
+    if (!validStatsExclusionsParams(params)) throw new ProtocolClientError("INVALID_REQUEST", "统计排除规则无效");
+    const session = this.requireCurrent();
+    this.requireCapability("changeStats");
+    return this.runChannelRequest("statsExclusionsWrite", session, signal => this.readSingleSection(session, "setStatsExclusions", params, signal,
+      data => data.section === "statsExclusions" ? data.result : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  async estimateEvolution(input: unknown): Promise<EvolutionEstimate> {
+    if (!validEvolutionParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "演变估算参数无效");
+    const params = input as EvolutionParams;
+    const session = this.requireCurrent();
+    this.requireCapability("evolution");
+    return this.runChannelRequest("evolutionEstimate", session, signal => this.readSingleSection(session, "estimateEvolution", params, signal,
+      data => data.section === "evolutionEstimate" ? data.estimate : undefined, () => true, STATS_TIMEOUT_MS));
+  }
+
+  /**
+   * Streams cumulative results through `onChunk` and resolves with the last one. Progress must never go backwards.
+   * When cancelled or superseded the promise rejects with CANCELLED; chunks already forwarded stay delivered.
+   */
+  async analyzeEvolution(input: unknown, onChunk: (chunk: EvolutionChunk) => void): Promise<EvolutionResult> {
+    if (!validEvolutionParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "演变分析参数无效");
+    const params = input as EvolutionParams;
+    const session = this.requireCurrent();
+    this.requireCapability("evolution");
+    return this.runChannelRequest("evolutionAnalyze", session, async signal => {
+      let last: EvolutionChunk | undefined;
+      let finished = false;
+      const completion = await this.core.request("analyzeEvolution", params, contextOf(session), {
+        timeoutMs: EVOLUTION_TIMEOUT_MS,
+        signal,
+        drainAfterAbort: true,
+        onChunk: chunk => {
+          this.ensureCurrent(session);
+          if (finished || chunk.data.section !== "evolutionChunk") throw invalidSessionResponse("演变分析响应无效");
+          const data = chunk.data.chunk;
+          const { filesDone, filesTotal } = data.progress;
+          if (filesDone > filesTotal || last && (filesDone < last.progress.filesDone || filesTotal !== last.progress.filesTotal)) {
+            throw invalidSessionResponse("演变分析的进度发生倒退");
+          }
+          if (chunk.done) finished = true;
+          last = data;
+          onChunk(data);
+        },
+      });
+      this.ensureCurrent(session);
+      if (!finished || !last || !completion.coverage.complete) throw invalidSessionResponse("演变分析响应不完整");
+      return last.result;
+    });
+  }
+
+  async cancelEvolution(): Promise<{ cancelled: boolean }> {
+    return this.cancelChannels(["evolutionEstimate", "evolutionAnalyze"], "演变读取已取消");
   }
 
   async cancelFiles(): Promise<{ cancelled: boolean }> {
@@ -1051,10 +1234,10 @@ export class RepositorySessionController {
 
   /** One terminal chunk with the expected section; the schema validators in the transport have already checked its shape. */
   private async readSingleSection<T>(session: RepositorySessionInfo, method: string, params: object, signal: AbortSignal,
-    pick: (data: ServerResponseMessage["data"]) => T | undefined, consistent: (value: T) => boolean): Promise<T> {
+    pick: (data: ServerResponseMessage["data"]) => T | undefined, consistent: (value: T) => boolean, timeoutMs = SESSION_TIMEOUT_MS): Promise<T> {
     let value: T | undefined;
     const completion = await this.core.request(method, params, contextOf(session), {
-      timeoutMs: SESSION_TIMEOUT_MS,
+      timeoutMs,
       signal,
       drainAfterAbort: true,
       onChunk: chunk => {
@@ -1905,7 +2088,11 @@ export class RepositorySessionController {
                   ? "核心还不能浏览目录和文件（P4-10 后端尚未接入）" : capability === "diffFullContext"
                     ? "核心还不能返回完整文件 diff（P4-11 后端尚未接入）" : capability === "blame"
                       ? "核心还不能逐行追溯（P4-12 后端尚未接入）" : capability === "repositoryOperations"
-                        ? "核心还不能执行 fetch 等操作（P5-01 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
+                        ? "核心还不能执行 fetch 等操作（P5-01 后端尚未接入）" : capability === "activityOverview"
+                          ? "核心还不能统计活动概览（P6-01 后端尚未接入）" : capability === "changeStats"
+                            ? "核心还不能统计代码改动（P6-02 后端尚未接入）" : capability === "notableStats"
+                              ? "核心还不能计算值得注意的观察项（P6-03 后端尚未接入）" : capability === "evolution"
+                                ? "核心还不能分析代码演变（P6-04 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -2454,11 +2641,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "commitInfo" | "blame";
+type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "commitInfo" | "blame"
+  | "branchSync" | "operationCheck" | "statsActivity" | "statsChange" | "statsNotable" | "statsCommits" | "statsExclusionsRead" | "statsExclusionsWrite"
+  | "evolutionEstimate" | "evolutionAnalyze";
 
 interface ActiveChannelRequest {
   abort: AbortController;
   done: Promise<unknown>;
+  /** A local write that must run to completion once started; `cancelRepositoryOperation` leaves it alone. */
+  uncancellable?: boolean;
 }
 
 const PATCH_BYTES = 128 * 1024;
@@ -2466,6 +2657,12 @@ const FULL_FILE_PATCH_BYTES = 1024 * 1024;
 const BLAME_TIMEOUT_MS = 60_000;
 /** A little longer than the core's own 10-minute fetch limit, so the core's answer arrives first. */
 const FETCH_TIMEOUT_MS = 615_000;
+/** Statistics reads and the evolution estimate; the core bounds its own work well below this. */
+const STATS_TIMEOUT_MS = 60_000;
+/** A run may execute hooks (post-checkout and friends), so it gets far more than an ordinary read. */
+const OPERATION_TIMEOUT_MS = 120_000;
+/** Just over the core's own 10-minute evolution limit, so the core's answer arrives first. */
+const EVOLUTION_TIMEOUT_MS = 615_000;
 
 function oidParam(value: unknown): string | null {
   return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/u.test(value) ? value.toLowerCase() : null;

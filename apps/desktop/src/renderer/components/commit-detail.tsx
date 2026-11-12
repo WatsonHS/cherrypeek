@@ -7,6 +7,8 @@ import type { CommitDetailView } from "../lib/commit-detail-store.js";
 import { FoldToggle, FoldedText, foldItems } from "./fold.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
 import { CommitHandoffMenu } from "./handoff-menu.js";
+import { ActionMenu } from "./action-menu.js";
+import type { BranchStart } from "./create-branch-dialog.js";
 import { identityTime, identityTimeTitle, repositoryName, sameIdentity, shortOid, shortRefName } from "../lib/format.js";
 import { refsByTarget, RefTags } from "./commit-list.js";
 import { IdentityAvatar } from "./identity-avatar.js";
@@ -18,7 +20,7 @@ import { Button } from "./ui/button.js";
 /** ⌥⌘1 / ⌥⌘2 on the commits page: scroll the details to the overview (top) or to 文件改动. */
 export const COMMIT_DETAIL_SCROLL_EVENT = "commitscope:commit-detail-scroll";
 
-export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, onOpenFile }: {
+export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetryFiles, onLoadFiles, onRetryMerge, onLoadMerge, onToggleDiff, onLoadContaining, onRetryContaining, selectedOid, onSelect, onMoveSelection, commitsOverride, selectedCommitOverride, timeField, canMovePrevious, canMoveNext, onLocateInHistory, onOpenHandoff, onCreateBranch, onOpenRemote, onOpenFile }: {
   preview: RepositoryView;
   detail: CommitDetailView;
   onClose?(): void;
@@ -40,6 +42,9 @@ export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetry
   canMoveNext?: boolean;
   onLocateInHistory?(): void;
   onOpenHandoff?(request: HandoffRequest): void;
+  onCreateBranch?(start: BranchStart): void;
+  /** Present only when a remote has a recognised web address. */
+  onOpenRemote?(oid: string): void;
   /** Opens the files page on a path's history with this commit selected (P4-10). */
   /** Opens a changed file on the files page (its history at this commit when this commit deleted it). */
   onOpenFile?(file: ChangedFile, oid: string): void;
@@ -131,6 +136,12 @@ export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetry
                 ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
                 : null} /> : null}
             <CopyOidButton oid={commit.oid} />
+            <ActionMenu label="更多操作" menuLabel="提交操作" testId="commit-more" items={[
+              ...(onCreateBranch ? [{ key: "create-branch", label: "从这里新建分支…", onSelect: () => onCreateBranch({ kind: "commit", oid: commit.oid, summary: commit.summary }) }] : []),
+              // The full message once the details are loaded; the summary until then.
+              { key: "copy-message", label: "复制提交消息", onSelect: () => { void window.commitScope.copyText(shownDetails?.message ?? commit.summary); } },
+              ...(onOpenRemote ? [{ key: "open-remote", label: "在远端网页打开", onSelect: () => onOpenRemote(commit.oid) }] : []),
+            ]} />
             {onClose ? null : moveButtons}
           </div>
         </div>

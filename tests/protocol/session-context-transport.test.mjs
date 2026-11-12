@@ -224,6 +224,7 @@ test("history page cancellation drains; scope transport validates requests and r
     assert.ok(navigationRequest, "navigation uses the current session protocol route");
     respond(navigationRequest, 0, true, { section: "repositoryNavigation", navigation: {
       refs: [], refsTruncated: false, worktrees: [], worktreesTruncated: false, defaultBase: null, observedAtUnixMs: 100,
+      remotes: [], branchUpstreams: [], lastFetchUnixMs: null,
     } }, 0);
     assert.deepEqual((await navigation).coverage, { complete: true, processed: 0 });
     await assert.rejects(transport.request("getRepositoryNavigation", { unexpected: true }, session), error => error.code === "INVALID_REQUEST");

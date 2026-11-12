@@ -3,9 +3,9 @@ import { LoaderCircle } from "lucide-react";
 import type { WorkspaceBadge } from "../lib/workspace-indicator.js";
 import { cn } from "../lib/utils.js";
 
-export type AppPage = "commits" | "files" | "workspace";
+export type AppPage = "commits" | "files" | "workspace" | "stats";
 
-export const PAGE_SHORTCUTS: Record<AppPage, string> = { commits: "⌘1", files: "⌘2", workspace: "⌘3" };
+export const PAGE_SHORTCUTS: Record<AppPage, string> = { commits: "⌘1", files: "⌘2", workspace: "⌘3", stats: "⌘4" };
 
 const ICON = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" } as const;
 
@@ -22,6 +22,10 @@ function WorkspaceIcon(): React.JSX.Element {
   return <svg viewBox="0 0 16 16" aria-hidden="true" className="size-[15px] shrink-0" style={ICON}><path d="M4 1.75h5.5L12.5 4.75v9.5H4z" /><path d="M8.25 6v3M6.75 7.5h3M6.75 11h3" /></svg>;
 }
 
+function StatsIcon(): React.JSX.Element {
+  return <svg viewBox="0 0 16 16" aria-hidden="true" className="size-[15px] shrink-0" style={ICON}><path d="M3 13.5V8.5M8 13.5V3M13 13.5V6.5" /></svg>;
+}
+
 function Badge({ badge }: { badge: WorkspaceBadge }): React.JSX.Element | null {
   if (badge.kind === "none") return null;
   if (badge.kind === "spinner") return <LoaderCircle aria-hidden="true" className="size-3 shrink-0 animate-spin text-fg3 motion-reduce:animate-none" />;
@@ -35,13 +39,15 @@ function Badge({ badge }: { badge: WorkspaceBadge }): React.JSX.Element | null {
   )}>{badge.text}</span>;
 }
 
-/** Commits / files / workspace switch, right after the repository block in the top bar. */
-export function PageSwitch({ page, onChange, workspace, workspaceBranch, filesAvailable = true }: {
+/** Commits / files / workspace / stats switch, right after the repository block in the top bar. */
+export function PageSwitch({ page, onChange, workspace, workspaceBranch, filesAvailable = true, behind }: {
   page: AppPage;
   onChange(page: AppPage): void;
   workspace: WorkspaceBadge;
   workspaceBranch: string | null;
   filesAvailable?: boolean;
+  /** The window's branch is behind its upstream (from local refs): `· main ↓5`. */
+  behind?: { branch: string; count: number; upstream: string | null } | null;
 }): React.JSX.Element {
   const item = (id: AppPage, label: string, icon: React.ReactNode, extra: React.ReactNode, options: { title: string; ariaLabel?: string; disabled?: boolean }) =>
     <button key={id} type="button" data-testid={`page-${id}`} aria-current={page === id ? "page" : undefined}
@@ -55,8 +61,11 @@ export function PageSwitch({ page, onChange, workspace, workspaceBranch, filesAv
     {item("commits", "提交", <CommitsIcon />, null, { title: `提交（${PAGE_SHORTCUTS.commits}）`, ariaLabel: "提交页" })}
     {item("files", "文件", <FilesIcon />, null, { title: filesAvailable ? `文件（${PAGE_SHORTCUTS.files}）` : "这个仓库还没有提交，没有可浏览的文件", ariaLabel: "文件页", disabled: !filesAvailable })}
     {item("workspace", "工作区", <WorkspaceIcon />, <>
-      {workspaceBranch ? <span className="page-switch-branch max-w-[120px] truncate font-medium text-fg3">· {workspaceBranch}</span> : null}
+      {workspaceBranch || behind ? <span className="page-switch-branch max-w-[120px] truncate font-medium text-fg3">· {workspaceBranch ?? behind?.branch}</span> : null}
+      {behind ? <span data-testid="workspace-behind" className="shrink-0 text-[11.5px] font-medium tabular-nums text-accent-fg"
+        title={`落后${behind.upstream ? ` ${behind.upstream}` : "上游"} ${behind.count} 个提交（来自本地引用）`}>↓{behind.count}</span> : null}
       <Badge badge={workspace} />
-    </>, { title: workspace.title, ariaLabel: workspace.ariaLabel, disabled: workspace.disabled })}
+    </>, { title: workspace.title, ariaLabel: behind ? `${workspace.ariaLabel ?? "工作区"}，${behind.branch} 落后上游 ${behind.count} 个提交` : workspace.ariaLabel, disabled: workspace.disabled })}
+    {item("stats", "统计", <StatsIcon />, null, { title: `统计（${PAGE_SHORTCUTS.stats}）`, ariaLabel: "统计页" })}
   </nav>;
 }

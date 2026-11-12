@@ -60,6 +60,12 @@ import type { FetchRepositoryParams } from "./generated/client-message.js";
 import type { FetchResult } from "./generated/server-message.js";
 export type { FetchRepositoryParams } from "./generated/client-message.js";
 export type { FetchResult } from "./generated/server-message.js";
+import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "./generated/client-message.js";
+import type { BranchSyncResult, BranchSync, BranchSyncState, OperationCheck, OperationRun, OperationBlocker, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
+  EvolutionEstimate, EvolutionChunk, EvolutionResult } from "./generated/server-message.js";
+export type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "./generated/client-message.js";
+export type { BranchSyncResult, BranchSync, BranchSyncState, OperationCheck, OperationRun, OperationBlocker, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
+  EvolutionEstimate, EvolutionChunk, EvolutionResult } from "./generated/server-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -195,4 +201,37 @@ export interface RepositorySessionApi {
   fetchRepository(params: FetchRepositoryParams): Promise<RepositorySessionResult<FetchResult>>;
   /** Stops the operation in progress, if any, and waits until the core has stopped it. */
   cancelRepositoryOperation(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+
+  // M5 (P5-02 / P5-03). Contract: docs/implementation/m5-m6-backend-contract.md.
+  /** Ahead / behind and fast-forward state of local branches against their upstreams, from local refs only. */
+  getBranchSync(params: GetBranchSyncParams): Promise<RepositorySessionResult<BranchSyncResult>>;
+  /** Read-only: whether the operation could run now, and what blocks it. */
+  checkOperation(operation: RepositoryOperation): Promise<RepositorySessionResult<OperationCheck>>;
+  /** Runs it. A refusal is a normal result (`outcome: "rejected"`), not an error; nothing was written then. */
+  runOperation(operation: RepositoryOperation): Promise<RepositorySessionResult<OperationRun>>;
+  /**
+   * Opens a commit or branch on the remote's web page. Main builds the URL from the remotes of the current
+   * navigation snapshot; the renderer never passes a URL. Resolves to false when no remote has a web address.
+   */
+  openRemotePage(target: { commit: string } | { branch: string }): Promise<RepositorySessionResult<boolean>>;
+
+  // M6 statistics. All four reads share one channel group cancelled by `cancelStats`.
+  getActivityOverview(params: GetActivityOverviewParams): Promise<RepositorySessionResult<ActivityOverview>>;
+  getChangeStats(params: GetChangeStatsParams): Promise<RepositorySessionResult<ChangeStats>>;
+  getNotableStats(params: GetActivityOverviewParams): Promise<RepositorySessionResult<NotableStats>>;
+  getStatsCommits(params: GetStatsCommitsParams): Promise<RepositorySessionResult<StatsCommitPage>>;
+  cancelStats(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+  getStatsExclusions(): Promise<RepositorySessionResult<StatsExclusions>>;
+  setStatsExclusions(patterns: string[]): Promise<RepositorySessionResult<StatsExclusions>>;
+  estimateEvolution(params: EvolutionParams): Promise<RepositorySessionResult<EvolutionEstimate>>;
+  /** Cumulative results arrive through `onEvolutionChunk` with the same `streamId`; resolves with the last one. */
+  analyzeEvolution(params: EvolutionParams, streamId: string): Promise<RepositorySessionResult<EvolutionResult>>;
+  onEvolutionChunk(listener: (event: EvolutionChunkEvent) => void): () => void;
+  /** Stops an estimate or analysis; chunks already delivered stay valid. */
+  cancelEvolution(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
+}
+
+export interface EvolutionChunkEvent {
+  streamId: string;
+  chunk: EvolutionChunk;
 }

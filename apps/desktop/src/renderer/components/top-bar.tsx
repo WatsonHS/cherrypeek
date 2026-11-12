@@ -14,6 +14,12 @@ import { PathField } from "./path-field.js";
 import { UpdatesPopover } from "./updates-popover.js";
 import { ActivityStatsPopover } from "./activity-stats.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
+import { ActionMenu } from "./action-menu.js";
+import { FetchNotice } from "./operation-banners.js";
+import { SyncAction, SyncTags } from "./branch-sync.js";
+import type { OperationsActions } from "../lib/use-operations.js";
+import { refTip, syncRowModel, webRemote, webUrlLabel } from "../lib/operations.js";
+import type { BranchStart } from "./create-branch-dialog.js";
 import type { ActivityStats, RefSnapshotDiff, RepositoryObservation, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { SearchControls } from "./search-controls.js";
 import { PageSwitch, type AppPage } from "./page-switch.js";
@@ -28,7 +34,7 @@ const HINT_CLASS = "flex h-7 max-w-[clamp(96px,14vw,200px)] items-center gap-1 r
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
   searchView, activityQuery, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths, observation, refDiff, refDiffLoading, refDiffError,
-  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
+  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, onCreateBranch, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
   page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch, history }: {
   preview: RepositoryView;
   actions: RepositoryActions;
@@ -53,6 +59,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onCancelRefDiff(): void;
   onObserve(): void;
   onOpenHandoff(request: HandoffRequest): void;
+  onCreateBranch(start: BranchStart): void;
   activityStats: ActivityStats | null;
   activityLoading: boolean;
   activityError: string | null;
@@ -75,13 +82,14 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   const hint = history.hint;
   const repository = preview.repository;
   if (!repository) return null;
+  const ops = actions.operations;
   const busy = preview.state === "loading" || preview.opening !== null || preview.scopeSwitching || preview.refreshing;
   return <header className="window-toolbar relative flex h-[52px] min-h-[52px] max-h-[52px] flex-nowrap items-center gap-1 overflow-hidden border-b border-line py-2">
     {/* Two labelled blocks: which repository (and worktree) this window shows, and which history it browses. */}
     <RepositorySwitcher repository={repository} session={preview.session} record={preview.record} actions={actions}
       recent={recent} onRefreshRecent={onRefreshRecent} loading={busy}
       navigation={preview.navigation} navigationLoading={preview.navigationLoading} navigationError={preview.navigationError?.message ?? null}
-      onLoadNavigation={onLoadNavigation} />
+      onLoadNavigation={onLoadNavigation} ops={actions.operations} />
     <span aria-hidden="true" className="topbar-divider h-6 w-px shrink-0 bg-line" />
     <div className="flex shrink-0 items-center" data-testid="nav-buttons">
       {/* After a jump to another page: "← 提交 92aa8c23" while one step back is that place; once other steps are recorded,
@@ -98,22 +106,26 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
         aria-label={`回到 ${hint.title}`} title={`回到 ${hint.title}`} className={`nav-hint ml-1 ${HINT_CLASS}`}>
         <CornerUpLeft className="size-3.5 shrink-0" strokeWidth={1.75} /><span className="truncate">{hint.label}</span></button> : null}
     </div>
-    <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} />
+    <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
+      behind={ops?.headBehind ? { branch: ops.headBehind.branch, count: ops.headBehind.behind, upstream: ops.headBehind.upstream } : null} />
     <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
-      onOpenHandoff={onOpenHandoff}
+      onOpenHandoff={onOpenHandoff} onCreateBranch={onCreateBranch} ops={ops}
       onLoadMergeStatus={onLoadMergeStatus} onCancelMergeStatus={onCancelMergeStatus} onRefresh={actions.refresh} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="min-w-0 flex-1 basis-0" />
     <ActivityStatsPopover query={activityQuery} stats={activityStats} loading={activityLoading} error={activityError}
       onLoad={onLoadActivity} onQueryChange={onSearchQueryChange} onAddAuthor={onActivityAuthor} />
-    <TopBarSearch label={page === "commits" ? "搜索提交消息" : page === "files" ? "在文件页搜索" : "过滤改动的文件"}>
+    <TopBarSearch label={page === "commits" ? "搜索提交消息" : page === "files" ? "在文件页搜索" : page === "stats" ? "统计页搜索（尚未接入）" : "过滤改动的文件"}>
       {page === "commits" ? <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
         onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} /> : pageSearch}
     </TopBarSearch>
     <ShortcutGuide />
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
-    {preview.session && actions.fetch ? <Button variant="outline" size="sm" disabled={!actions.fetch.running && (preview.refreshing || busy)}
+    {preview.session && actions.fetch?.notice ? <FetchNotice notice={actions.fetch.notice} onDismiss={actions.fetch.dismissNotice}
+      update={ops?.headBehind?.canUpdate ? { branch: ops.headBehind.branch, disabled: ops.busy || busy, running: ops.view.running?.label === `更新 ${ops.headBehind.branch}`,
+        onUpdate: () => { void ops.update(ops.headBehind!.refName); } } : undefined} /> : null}
+    {preview.session && actions.fetch ? <Button variant="outline" size="sm" disabled={!actions.fetch.running && (preview.refreshing || busy || Boolean(ops?.view.running))}
       data-testid="fetch-button" className="topbar-refresh shrink-0"
       onClick={event => { if (actions.fetch?.running) actions.fetch.cancel(); else void actions.fetch?.start(event.altKey); }}
       title={actions.fetch.running ? "正在 fetch，点击取消" : "Fetch：从所有远端获取新提交，不改动工作区和本地分支（按住 ⌥ 点击同时清理远端已删除的分支）"}
@@ -275,7 +287,7 @@ function isLinkedWorktree(repository: RepositoryInfo): boolean {
     && repository.gitDir.replace(/[\\/]+$/, "") !== repository.commonDir.replace(/[\\/]+$/, "");
 }
 
-function RepositorySwitcher({ repository, session, record, actions, recent, onRefreshRecent, loading, navigation, navigationLoading, navigationError, onLoadNavigation }: {
+function RepositorySwitcher({ repository, session, record, actions, recent, onRefreshRecent, loading, navigation, navigationLoading, navigationError, onLoadNavigation, ops }: {
   repository: RepositoryInfo;
   session: RepositorySessionInfo | null;
   record: ViewRecord | null;
@@ -287,6 +299,7 @@ function RepositorySwitcher({ repository, session, record, actions, recent, onRe
   navigationLoading: boolean;
   navigationError: string | null;
   onLoadNavigation(): void;
+  ops: OperationsActions | null;
 }): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const name = repositoryName(repository.worktreePath ?? repository.path);
@@ -316,7 +329,7 @@ function RepositorySwitcher({ repository, session, record, actions, recent, onRe
         {session ? <SessionFacts session={session} record={record} /> : <span className="text-xs text-warn">核心已断开，这里显示的是之前读取的内容。</span>}
       </div>
       <WorktreeFacts repository={repository} navigation={navigation} navigationLoading={navigationLoading}
-        navigationError={navigationError} onLoadNavigation={onLoadNavigation} />
+        navigationError={navigationError} onLoadNavigation={onLoadNavigation} ops={ops} />
     <RecentList recent={recent} currentWorktreeId={session?.worktreeId ?? null} disabled={loading} onOpen={openPath} />
       <div className="flex flex-col gap-2">
         <span className="text-[11.5px] font-semibold text-fg3">打开其他仓库</span>
@@ -396,13 +409,15 @@ function sameScope(left: RepositoryScope | undefined, right: RepositoryScope): b
   return false;
 }
 
-function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
+function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onCreateBranch, ops, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
   preview: RepositoryView;
   open: boolean;
   onOpenChange(open: boolean): void;
   onChange(scope: RepositoryScope): void;
   onLoadNavigation(): void;
   onOpenHandoff(request: HandoffRequest): void;
+  onCreateBranch(start: BranchStart): void;
+  ops: OperationsActions | null;
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
   onRefresh(): Promise<void>;
@@ -438,6 +453,22 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
     root.querySelectorAll("[data-scope-ref-kind='localBranch'][data-ref-name]").forEach(element => observer.observe(element));
     return () => observer.disconnect();
   }, [open, navigation, preview.mergeStatuses, preview.mergeStatusLoading, visibleBranches]);
+  // Ahead / behind for the local branches in view, asked in batches like the merge status above.
+  const opsRef = React.useRef(ops);
+  opsRef.current = ops;
+  const hasOps = ops !== null;
+  const loadVisibleSync = React.useCallback(() => {
+    const root = optionsRef.current;
+    if (!open || !hasOps || !root) return;
+    const box = root.getBoundingClientRect();
+    const names = [...root.querySelectorAll<HTMLElement>("[data-scope-ref-kind='localBranch'][data-ref-name]")]
+      .filter(element => { const row = element.getBoundingClientRect(); return box.height === 0 || (row.bottom > box.top && row.top < box.bottom); })
+      .map(element => element.dataset.refName!).slice(0, 50);
+    if (names.length) opsRef.current?.loadSync(names);
+  }, [open, hasOps]);
+  React.useEffect(() => { loadVisibleSync(); }, [loadVisibleSync, navigation]);
+  const canOperate = Boolean(ops && repository.headOid && !repository.isBare);
+  const remote = ops ? webRemote(navigation?.remotes) : null;
   const choose = (next: RepositoryScope) => { onOpenChange(false); onChange(next); };
   const option = (id: string, next: RepositoryScope, text: React.ReactNode, selected: boolean, disabled = false) =>
     <button key={id} type="button" data-testid={`scope-option-${id}`} aria-current={selected ? "true" : undefined} disabled={disabled}
@@ -465,7 +496,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
         <span className="font-semibold">浏览范围</span>
         <span className="text-xs text-fg3">只切换只读历史范围；不会切换或修改任何 worktree。</span>
       </div>
-      <div ref={optionsRef} className="min-h-0 overflow-auto p-2" data-testid="scope-options" onScroll={() => visibleBranches()}>
+      <div ref={optionsRef} className="min-h-0 overflow-auto p-2" data-testid="scope-options" onScroll={() => { visibleBranches(); loadVisibleSync(); }}>
         {option("head", "head", <>HEAD 可达历史{repository.headReference ? <code className="ml-auto font-mono text-xs text-fg3">{shortRefName(repository.headReference)}</code> : repository.headOid ? <code className="ml-auto font-mono text-xs text-fg3">{shortOid(repository.headOid)}</code> : <span className="ml-auto text-xs text-fg3">空仓库</span>}</>, sameScope(scope, "head"))}
         {option("allBranches", "allBranches", <>全部分支<span className="ml-auto text-xs text-fg3">本地与远端可达</span></>, sameScope(scope, "allBranches"), !navigation || Boolean(navigation.refsTruncated))}
         <div className="flex flex-col gap-px py-1">
@@ -490,10 +521,15 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
           if (!refs.length) return null;
           return <div key={kind} className="flex flex-col gap-px py-1">
             <div className="flex justify-between px-2.5 pt-1.5 pb-1 text-[11.5px] font-semibold text-fg3"><span>{title}{kind === "localBranch" ? navigation?.defaultBase ? ` · 基准 ${shortRefName(navigation.defaultBase.name)}` : " · 无可用默认基准" : ""}</span><span className="font-normal">{refs.length}</span></div>
-            {kind === "remoteBranch" ? <p className="m-0 px-2.5 pb-1 text-[10.5px] text-fg3" data-testid="remote-ref-disclaimer">本地引用快照 · fetch 时间未知 · 未 fetch</p> : null}
+            {kind === "remoteBranch" ? <p className="m-0 px-2.5 pb-1 text-[10.5px] text-fg3" data-testid="remote-ref-disclaimer">{ops?.view.lastFetchUnixMs ? `本地引用快照 · 上次 fetch ${momentLabel(ops.view.lastFetchUnixMs)}` : "本地引用快照 · fetch 时间未知 · 未 fetch"}</p> : null}
             {refs.map(ref => {
               const isHead = ref.name === repository.headReference;
               const merged = navigation?.defaultBase ? preview.mergeStatuses[ref.name] : undefined;
+              const syncModel = ops && kind === "localBranch" ? syncRowModel(ops.view.syncs[ref.name], isHead) : null;
+              const shortName = shortRefName(ref.name);
+              const switchTarget = kind === "localBranch" ? { refName: ref.name } : { remoteRefName: ref.name };
+              const startSwitch = () => { onOpenChange(false); void ops?.switchTo(switchTarget); };
+              const canSwitch = canOperate && (kind === "remoteBranch" || (kind === "localBranch" && !isHead));
               const checkedOut = kind === "localBranch" ? (navigation?.worktrees ?? []).filter(worktree => worktree.headReference === ref.name) : [];
               const checkoutLabel = checkedOut.length
                 ? `检出于 ${checkedOut.map(worktree => repositoryName(worktree.path)).join("、")}`
@@ -511,8 +547,17 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                 {isHead ? <Badge variant="head" size="sm">本窗口 HEAD</Badge> : null}
                 {merged === "merged" ? <Badge size="sm">已合入</Badge> : null}
                 {merged === "patchEquivalent" && navigation?.defaultBase ? <Badge size="sm" className="max-w-[180px]" title="已找到等价补丁；清理前需要重新核对当前内容"><span className="truncate">内容已在 {shortRefName(navigation.defaultBase.name)}</span></Badge> : null}
-                <code className="shrink-0 font-mono text-xs text-fg3">{shortOid(ref.peeledOid ?? ref.oid)}</code>
+                {syncModel && ops ? <SyncTags model={syncModel} lastFetchUnixMs={ops.view.lastFetchUnixMs} /> : null}
+                <code className="shrink-0 font-mono text-xs text-fg3">{shortOid(refTip(ref))}</code>
                 </>, sameScope(scope, { ref: ref.name }))}</div>
+                {syncModel && ops ? <SyncAction model={syncModel} name={shortName} busy={ops.busy} running={ops.view.running?.label === `更新 ${shortName}` || ops.view.running?.label === `检查 ${shortName}`}
+                  onUpdate={() => { void ops.update(ref.name); }}
+                  onHandoff={() => { onOpenChange(false); void ops.handoffDiverged(ref.name); }} /> : null}
+                {canSwitch && ops ? <Button variant="outline" size="sm" data-testid="branch-switch" disabled={ops.busy}
+                  className="h-7 shrink-0 px-2 text-xs opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100"
+                  aria-label={kind === "remoteBranch" ? `切换到 ${shortName}（新建本地分支）` : `切换到 ${shortName}`}
+                  title={kind === "remoteBranch" ? "新建同名的本地跟踪分支并切换，会更新工作区文件" : "切换本窗口的工作区，会更新工作区文件"}
+                  onClick={startSwitch}>{kind === "remoteBranch" ? "切换（新建本地分支）" : "切换"}</Button> : null}
                 {kind === "localBranch" && (merged === "merged" || merged === "patchEquivalent") && !isHead && ref.name !== navigation?.defaultBase?.name
                   ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
                     aria-label={`交给 Agent 清理已合入的分支 ${shortRefName(ref.name)}`} title="交给 Agent 核对后删除这个已合入的分支"
@@ -522,6 +567,14 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                   onClick={() => { void window.commitScope.copyText(shortRefName(ref.name)); }}>
                   <Copy className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
                 </button> : null}
+                {kind !== "tag" ? <ActionMenu label={`更多操作 ${shortRefName(ref.name)}`} menuLabel="分支操作" testId="branch-more"
+                  triggerClassName="opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                  items={[
+                    ...(canSwitch && ops ? [{ key: "switch", label: kind === "remoteBranch" ? "切换（新建本地分支）" : "切换到这个分支", disabled: ops.busy, onSelect: startSwitch }] : []),
+                    ...(ops ? [{ key: "create", label: "从这里新建分支…", disabled: ops.busy, onSelect: () => { onOpenChange(false); onCreateBranch({ kind: "branch", name: shortRefName(ref.name), oid: ref.peeledOid ?? ref.oid }); } }] : []),
+                    { key: "copy", label: "复制分支名", onSelect: () => { void window.commitScope.copyText(shortRefName(ref.name)); } },
+                    ...(remote && ops ? [{ key: "open-remote", label: "在远端网页打开", onSelect: () => { void ops.openRemote({ branch: ref.name }); } }] : []),
+                  ]} /> : null}
                 {merged === "unavailable" ? <button type="button" aria-label={`重新计算 ${shortRefName(ref.name)} 的合入状态`}
                   className="ml-2 self-start px-2 text-[11px] text-fg3 underline" onClick={() => onLoadMergeStatus([ref.name])}>重试</button> : null}
               </div>;
@@ -536,7 +589,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
         {preview.scopeSwitching ? <p role="status" data-testid="scope-switch-status" className="m-0 px-2.5 py-2 text-xs text-fg3">正在准备新范围的历史…</p> : null}
         {navigation && navigation.refs.length === 0 && navigation.worktrees.length === 0 ? <p className="m-0 px-2.5 py-3 text-[13px] text-fg3">没有可选引用或 worktree。</p> : null}
       </div>
-      {navigation ? <div className="border-t border-line px-4 py-2 text-[11px] text-fg3">本地引用快照 {momentLabel(navigation.observedAtUnixMs)} · 未 fetch</div> : null}
+      {navigation ? <div className="border-t border-line px-4 py-2 text-[11px] text-fg3">本地引用快照 {momentLabel(navigation.observedAtUnixMs)} · {ops?.view.lastFetchUnixMs ? `上次 fetch ${momentLabel(ops.view.lastFetchUnixMs)}` : "未 fetch"}</div> : null}
       {preview.refsTruncated ? <div className="border-t border-line bg-bg px-4 py-2.5 text-xs text-fg3">引用数量达到显示上限，列表不完整。</div> : null}
     </PopoverContent> : null}
   </Popover>;
@@ -568,14 +621,19 @@ function OpenWorkspaceButtons({ bare }: { bare: boolean }): React.JSX.Element {
 }
 
 /** The current directory's worktree facts, independent of the browsing scope. */
-function WorktreeFacts({ repository, navigation, navigationLoading, navigationError, onLoadNavigation }: {
+function WorktreeFacts({ repository, navigation, navigationLoading, navigationError, onLoadNavigation, ops }: {
   repository: RepositoryInfo;
   navigation: RepositoryNavigation | null;
   navigationLoading: boolean;
   navigationError: string | null;
   onLoadNavigation(): void;
+  ops: OperationsActions | null;
 }): React.JSX.Element {
   const path = repository.worktreePath ?? repository.path;
+  const remote = ops ? webRemote(navigation?.remotes) : null;
+  const behind = ops?.headBehind ?? null;
+  const headSync = ops && repository.headReference ? ops.view.syncs[repository.headReference] : undefined;
+  const updating = ops?.view.running?.label === `更新 ${behind?.branch}`;
   const linked = isLinkedWorktree(repository);
   const headDescription = repository.headReference
     ? `分支 ${repository.headReference}`
@@ -592,6 +650,25 @@ function WorktreeFacts({ repository, navigation, navigationLoading, navigationEr
         </dd>
         <dt className="text-fg3">类型</dt><dd className="m-0">{repository.isBare ? "bare 仓库（没有工作区目录）" : linked ? "关联 worktree" : "主 worktree"}</dd>
         <dt className="text-fg3">实际 HEAD</dt><dd className="m-0 break-all">{repository.isBare ? "bare 仓库没有工作区 HEAD" : headDescription}</dd>
+        {ops && repository.headReference && headSync && headSync.state !== "unavailable" ? <>
+          <dt className="text-fg3">分支</dt><dd className="m-0 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1" data-testid="worktree-branch-sync">
+            <span className="min-w-0 truncate font-medium" title={repository.headReference}>{shortRefName(repository.headReference)}</span>
+            {headSync.state === "noUpstream" ? <span className="text-fg3">没有上游</span>
+              : headSync.upstream ? <span className="text-fg2" title="来自本地引用，不代表远端现在的状态">
+                {headSync.state === "upToDate" ? `与 ${shortRefName(headSync.upstream.refName)} 一致` : `落后 ${shortRefName(headSync.upstream.refName)} ${headSync.behind ?? 0} · 领先 ${headSync.ahead ?? 0}`}
+              </span> : null}
+            {behind?.canUpdate ? <Button variant="soft" size="sm" data-testid="worktree-update" disabled={ops.busy}
+              aria-label={`更新 ${behind.branch}（快进 ${behind.behind} 个提交）`} title="先 fetch，再快进到上游"
+              onClick={() => { void ops.update(behind.refName); }}>
+              {updating ? <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" /> : null}更新（快进 {behind.behind} 个提交）
+            </Button> : null}
+          </dd></> : null}
+        {remote ? <><dt className="text-fg3">远端</dt><dd className="m-0 flex min-w-0 items-center gap-2" data-testid="worktree-remote">
+          <span className="min-w-0 truncate font-mono" title={remote.webUrl}>{webUrlLabel(remote.webUrl)}</span>
+          <Button variant="ghost" size="sm" className="shrink-0" data-testid="worktree-open-remote" aria-label={`在网页打开 ${remote.name}`}
+            onClick={() => { if (ops) void ops.openRemote(repository.headReference ? { branch: repository.headReference } : { commit: repository.headOid ?? "" }); }}
+            disabled={!repository.headReference && !repository.headOid}>在网页打开</Button>
+        </dd></> : null}
         <dt className="text-fg3">HEAD 完整 OID</dt><dd className="m-0 break-all font-mono">{repository.headOid ?? "无提交"}</dd>
         <dt className="text-fg3">关联 worktree</dt><dd className="m-0">{worktreeCount}</dd>
       </dl>

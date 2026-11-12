@@ -15,9 +15,9 @@
   --text: #1b1b19;
   --text2: #4f4e49;
   --text3: #6e6d67;
-  --accent: #2b59d9;
-  --accent-soft: #edf1fd;
-  --accent-text: #1e45b5;
+  --accent: #2f4b7c;
+  --accent-soft: #e9edf4;
+  --accent-text: #27406b;
   --warn: #8a5300;
   --warn-bg: #fff4e0;
   --warn-line: #f0d7a6;
@@ -30,7 +30,9 @@
   --shadow-selected: 0 1px 2px rgba(20, 20, 18, 0.06), 0 4px 14px rgba(20, 20, 18, 0.07);
   --shadow-pop: 0 16px 40px rgba(20, 20, 18, 0.16);
   --scrim: rgba(20, 20, 18, 0.32);
-  --l0: #2b59d9; --l1: #d0661a; --l2: #8a4fd0; --l3: #12806a; --l4: #c2366b; --l5: #8a7400;
+  /* Statistics charts (docs/DESIGN.md, accent adjustment). */
+  --bar: #7d8fb3; --chart-add: #2f9c8a; --chart-del: #d96c57; --chart-weak: #cbd3e2; --chart-strong: #1e3358;
+  --l0: #2f4b7c; --l1: #d0661a; --l2: #8a4fd0; --l3: #12806a; --l4: #c2366b; --l5: #8a7400;
   --add: #1c6b3e; --del: #a8281d; --add-bg: #eaf6ee; --del-bg: #fcedeb; --hunk-bg: #f0f3fa;
   --syn-keyword: #6e2fad; --syn-string: #0a5e52; --syn-number: #8a4100;
   --syn-function: #1c47b3; --syn-type: #7e2f5f; --syn-comment: #595852;
@@ -59,9 +61,9 @@
   --text: #ecece8;
   --text2: #c1c0ba;
   --text3: #97968f;
-  --accent: #8ba8ff;
-  --accent-soft: #1e2640;
-  --accent-text: #afc3ff;
+  --accent: #9bb0d6;
+  --accent-soft: #222a3a;
+  --accent-text: #b9c8e4;
   --warn: #f0b75e;
   --warn-bg: #2c2312;
   --warn-line: #5a4319;
@@ -75,7 +77,8 @@
   --shadow-selected: 0 0 0 1px #4a4c46, 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5);
   --scrim: rgba(0, 0, 0, 0.5);
-  --l0: #8ba8ff; --l1: #f0a15e; --l2: #c29bf5; --l3: #4fc7a9; --l4: #f27aa6; --l5: #d9c24a;
+  --bar: #6b7fa6; --chart-add: #35a08d; --chart-del: #db7359; --chart-weak: #3a4560; --chart-strong: #c9d5ec;
+  --l0: #9bb0d6; --l1: #f0a15e; --l2: #c29bf5; --l3: #4fc7a9; --l4: #f27aa6; --l5: #d9c24a;
   --add: #86d9a2; --del: #ff9c93; --add-bg: #14261a; --del-bg: #2d1717; --hunk-bg: #1c2233;
   --syn-keyword: #d2b0fa; --syn-string: #7adbc8; --syn-number: #f5b077;
   --syn-function: #a3bdff; --syn-type: #f5a8d0; --syn-comment: #abaaa3;
@@ -103,6 +106,11 @@
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-accent-fg: var(--accent-text);
+  --color-bar: var(--bar);
+  --color-chart-add: var(--chart-add);
+  --color-chart-del: var(--chart-del);
+  --color-chart-weak: var(--chart-weak);
+  --color-chart-strong: var(--chart-strong);
   --color-warn: var(--warn);
   --color-warn-bg: var(--warn-bg);
   --color-warn-line: var(--warn-line);
