@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { ActivityOverview } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { StatsBucket } from "../../../../../packages/protocol/src/generated/client-message.js";
-import { bucketChartTitle, bucketEnd, bucketLabel, clipToRange, compareText } from "../lib/stats-range.js";
+import { bucketChartTitle, bucketEnd, bucketLabel, bucketUnitLabel, clipToRange, compareText, rangeDays } from "../lib/stats-range.js";
 import type { StatsRequest, StatsSlot } from "../lib/stats-store.js";
 import { cn } from "../lib/utils.js";
 import {
@@ -22,12 +22,21 @@ function ActivityCards({ stats, request, actions }: { stats: ActivityOverview; r
   const { range, bucket } = request;
   const { totals, previousTotals, coverage } = stats;
   const busiest = stats.rhythm.busiestDay;
+  // Calendar-day measures (active days, streaks, weekday × hour) say nothing about an hour or a single day:
+  // under two days the tiles count the chart's own buckets instead.
+  const shortRange = rangeDays(range) < 2;
+  const activeBuckets = stats.buckets.filter(item => item.count > 0).length;
+  const peak = stats.buckets.reduce<ActivityOverview["buckets"][number] | null>((best, item) => item.count > (best?.count ?? 0) ? item : best, null);
   return <>
     <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
       <StatTile title="提交数" value={formatCount(totals.commits)} note={compareText(totals.commits, previousTotals.commits, range)} />
-      <StatTile title="活跃天数" value={formatCount(totals.activeDays)} unit="天" note={compareText(totals.activeDays, previousTotals.activeDays, range)} />
+      {shortRange
+        ? <StatTile title="活跃时段" value={formatCount(activeBuckets)} unit={`/ ${formatCount(stats.buckets.length)}`} note={`按每${bucketUnitLabel(bucket)}划分，有提交的时段数`} />
+        : <StatTile title="活跃天数" value={formatCount(totals.activeDays)} unit={`/ ${formatCount(Math.round(rangeDays(range)))} 天`} note={compareText(totals.activeDays, previousTotals.activeDays, range)} />}
       <StatTile title="活跃作者" value={formatCount(totals.authors)} unit="人" note={compareText(totals.authors, previousTotals.authors, range)} />
-      <StatTile title="单日最多" value={busiest ? formatCount(busiest.count) : "0"} unit="个提交" note={busiest ? busiest.day : "当前范围内没有提交"} />
+      {shortRange
+        ? <StatTile title="最密集时段" value={peak ? formatCount(peak.count) : "0"} unit="个提交" note={peak ? `${bucketLabel(peak.startUnix, bucket)} 起的${bucketUnitLabel(bucket)}` : "当前范围内没有提交"} />
+        : <StatTile title="单日最多" value={busiest ? formatCount(busiest.count) : "0"} unit="个提交" note={busiest ? busiest.day : "当前范围内没有提交"} />}
     </div>
     {coverage.complete ? null : <div><PartialTag coverage={coverage} /> <span className="text-xs text-fg3">以上数字只覆盖已建立索引的提交。</span></div>}
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -36,11 +45,11 @@ function ActivityCards({ stats, request, actions }: { stats: ActivityOverview; r
     </div>
     {stats.sessions.length ? <SessionsCard stats={stats} actions={actions} /> : null}
     <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)]">
-      <HeatmapCard stats={stats} />
+      {shortRange ? null : <HeatmapCard stats={stats} />}
       <TypesCard stats={stats} />
       <BranchesCard stats={stats} />
     </div>
-    <RhythmCard stats={stats} />
+    {shortRange ? null : <RhythmCard stats={stats} />}
   </>;
 }
 

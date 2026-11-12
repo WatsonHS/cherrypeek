@@ -93,6 +93,8 @@ export interface StatsStoreOptions {
   now?: () => Date;
   /** Wait before reloading after a control or filter change while a result is shown. 0 reloads at once. */
   debounceMs?: number;
+  /** Shortest time between re-reads caused only by index progress. */
+  indexReloadMs?: number;
   /** Waits between retries after BUSY / CANCELLED. */
   retryDelaysMs?: readonly number[];
 }
@@ -120,6 +122,8 @@ export class StatsStore {
   private readonly retryTimers: Partial<Record<LoadKind, ReturnType<typeof setTimeout>>> = {};
   private readonly retryCount: Record<LoadKind, number> = { activity: 0, changes: 0, notable: 0 };
   private ensureTimer?: ReturnType<typeof setTimeout>;
+  private indexReloadTimer?: ReturnType<typeof setTimeout>;
+  private readonly indexReloadMs: number;
   private exclusionsToken = 0;
   private evolutionToken = 0;
   private streamCounter = 0;
@@ -128,7 +132,9 @@ export class StatsStore {
   constructor(private readonly api: StatsApi, options: StatsStoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.debounceMs = options.debounceMs ?? 300;
-    this.retryDelays = options.retryDelaysMs ?? [1_500, 3_000, 6_000, 12_000];
+    this.indexReloadMs = options.indexReloadMs ?? 5_000;
+    // A statistic that gave way to an interactive read is usually free to run again within a few hundred ms.
+    this.retryDelays = options.retryDelaysMs ?? [400, 1_000, 2_500, 6_000];
     const custom = { from: today(this.now()), to: today(this.now()) };
     this.view = {
       sessionKey: null, active: false, capabilities: { activity: false, changes: false, notable: false, evolution: false },
@@ -151,7 +157,6 @@ export class StatsStore {
     const wasActive = this.view.active;
     const evolutionChanged = binding.evolutionCommit !== this.evolutionCommit;
     const queryChanged = this.query !== null && JSON.stringify(this.query) !== JSON.stringify(binding.query);
-    const indexChanged = binding.indexKey !== undefined && binding.indexKey !== this.indexKey;
     this.query = binding.query;
     if (sessionChanged) {
       this.abortAll();
@@ -171,16 +176,23 @@ export class StatsStore {
     const changed = !same || sessionChanged || evolutionChanged;
     if (binding.indexKey !== undefined && binding.indexKey !== this.indexKey) {
       this.indexKey = binding.indexKey;
-      // A result that did not cover the whole index is read again when the index moved on.
-      for (const kind of LOAD_KINDS) {
-        const value = this.slot(kind).value as { coverage: { complete: boolean } } | null;
-        if (value && !value.coverage.complete) this.attempted[kind] = null;
+      // A result that did not cover the whole index is read again when the index moved on, but at most once
+      // per interval: while the index is being built it moves every second, and each re-read scans it.
+      if (!this.indexReloadTimer) {
+        this.indexReloadTimer = setTimeout(() => {
+          this.indexReloadTimer = undefined;
+          for (const kind of LOAD_KINDS) {
+            const value = this.slot(kind).value as { coverage: { complete: boolean } } | null;
+            if (value && !value.coverage.complete) this.attempted[kind] = null;
+          }
+          if (this.view.active) this.requestEnsure(true);
+        }, this.indexReloadMs);
       }
     }
     if (binding.active && !wasActive) this.applyRange();
     if (!binding.active && wasActive) this.abortAll();
     if (changed || binding.active !== wasActive) this.emit();
-    if (binding.active) this.requestEnsure(!sessionChanged && (queryChanged || indexChanged));
+    if (binding.active) this.requestEnsure(!sessionChanged && queryChanged);
   }
 
   setSection(section: StatsSection): void {
@@ -333,6 +345,8 @@ export class StatsStore {
   }
 
   dispose(): void {
+    if (this.indexReloadTimer) clearTimeout(this.indexReloadTimer);
+    this.indexReloadTimer = undefined;
     this.abortAll();
     this.exclusionsToken += 1;
     this.evolutionToken += 1;

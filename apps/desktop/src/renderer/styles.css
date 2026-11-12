@@ -221,8 +221,9 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
 }
 
 /*
- * Top bar shrink order (docs/DESIGN.md section 11): the search box narrows first, then the activity
- * numbers and the refresh label go; below 1100px the page switch keeps only icons and badges, search
+ * Top bar shrink order (docs/DESIGN.md section 11): below 1320px the search box narrows, the refresh and
+ * Fetch labels and the activity bars go, and only the current page keeps its label; below 1100px the
+ * page switch keeps only icons and badges, search
  * collapses into a button and the shortcut guide becomes "⋯"; narrower still, names truncate.
  * Repository, page switch, scope, the updates notice and refresh always stay visible.
  */
@@ -246,6 +247,15 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .topbar-cancel-button { width: 28px; height: 28px; padding: 0; }
   .topbar-cancel-label { font-size: 0; }
   .topbar-cancel-label::after { content: "×"; font-size: 16px; }
+  /*
+   * With four pages plus Fetch the bar no longer fits: only the current page keeps its label, the others
+   * are icon and badge (the name is in the tooltip). The activity bars go too; the statistics page is one
+   * click away in the switch.
+   */
+  .page-switch-item:not([aria-current="page"]) { padding-inline: 9px; gap: 4px; }
+  .page-switch-item:not([aria-current="page"]) .page-switch-label,
+  .page-switch-item:not([aria-current="page"]) .page-switch-branch { display: none; }
+  .topbar-activity { display: none; }
 }
 
 @media (max-width: 1099px) {
