@@ -42,6 +42,6 @@ M0 的 gix 比较是局部、限范围的验证。若 CLI 已满足目标或 gix
 
 ## 暂不排期
 
-切分支、fetch、stash 等由 App 执行还是交给 Agent，后续再讨论；当前继续保持只读、浏览分支不 checkout。工作区状态展示不等于已经提供这些操作。
+2026-11-12 已确认：fetch、快进更新、切换分支、新建分支由 App 执行，排入 M5（见 [实施计划](PLAN.md)）；浏览分支仍不 checkout。stash、commit、merge、rebase、冲突解决等继续交给 Agent，不排期。删除已合入分支、重命名、打标签和非强制 push 是第二批候选，第一批试用后再决定。
 
 暂存 / 提交、merge / rebase、三方冲突解决、PR review、账号与云同步、AI 总结均不进入 M0–M4。Linux 与正式分发渠道待目标平台和实际需求明确后单独排期。
