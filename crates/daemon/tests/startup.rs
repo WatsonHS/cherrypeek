@@ -320,7 +320,8 @@ fn handshake_and_runtime_info_are_real_two_chunk_response() {
             "workspaceStatus",
             "fileBrowsing",
             "diffFullContext",
-            "blame"
+            "blame",
+            "repositoryOperations"
         ])
     );
     assert_eq!(handshake["core"]["git"]["available"], true);

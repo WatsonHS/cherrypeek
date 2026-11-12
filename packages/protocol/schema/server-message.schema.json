@@ -313,6 +313,11 @@
           "const": "blame",
           "description": "P4-12: line-by-line blame.",
           "type": "string"
+        },
+        {
+          "const": "repositoryOperations",
+          "description": "P5-01: user-triggered operations that write to the repository or use the network. Fetch first.",
+          "type": "string"
         }
       ]
     },
@@ -915,6 +920,29 @@
         "INDEX_VERSION_UNSUPPORTED"
       ],
       "type": "string"
+    },
+    "FetchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "finishedAtUnixMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remotes": {
+          "description": "The remotes that were fetched, in Git's order.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "remotes",
+        "finishedAtUnixMs"
+      ],
+      "type": "object"
     },
     "FileContent": {
       "additionalProperties": false,
@@ -2882,6 +2910,23 @@
           "required": [
             "section",
             "chunk"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/FetchResult"
+            },
+            "section": {
+              "const": "repositoryFetched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
           ],
           "type": "object"
         },

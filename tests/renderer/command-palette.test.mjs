@@ -28,3 +28,18 @@ test("unavailable actions disappear, and a large ref list still leaves room for 
   assert.ok(result.items.length < 100 && result.total > result.items.length);
   assert.ok(result.items.some(item => item.id === "openRepository"));
 });
+test("P5-05 copy and open commands appear only when they have something to act on", () => {
+  const ids = extra => paletteItems("", { ...context, ...extra }).items.filter(item => item.group === "命令").map(item => item.id);
+  assert.deepEqual(ids({}).filter(id => id.startsWith("open") && id !== "openRepository"), ["openFinder"]);
+  assert.deepEqual(ids({ hasWorkingDirectory: true }).filter(id => id.startsWith("open") && id !== "openRepository"), ["openFinder", "openTerminal", "openEditor"]);
+  assert.equal(ids({ selectedMessage: "fix: 标题\n\n正文" }).includes("copyMessage"), true);
+  assert.equal(ids({ selectedMessage: "x", selectedOid: null }).includes("copyMessage"), false);
+  assert.equal(ids({}).includes("copyBranch"), false);
+  assert.equal(paletteItems("复制当前分支", { ...context, headReference: "refs/heads/Feature/中文" }).items[0].label, "复制当前分支名 Feature/中文");
+});
+test("P5-01 fetch commands are offered only while the core can run one", () => {
+  const ids = extra => paletteItems("fetch", { ...context, ...extra }).items.map(item => item.id);
+  assert.deepEqual(ids({}), []);
+  assert.deepEqual(ids({ fetchAvailable: true }), ["fetch", "fetchPrune"]);
+  assert.deepEqual(ids({ fetchAvailable: true, repositoryReady: false }), []);
+});

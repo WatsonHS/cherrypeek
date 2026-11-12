@@ -304,6 +304,8 @@ pub enum Capability {
     DiffFullContext,
     /// P4-12: line-by-line blame.
     Blame,
+    /// P5-01: user-triggered operations that write to the repository or use the network. Fetch first.
+    RepositoryOperations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -345,6 +347,7 @@ impl CoreReady {
                 Capability::FileBrowsing,
                 Capability::DiffFullContext,
                 Capability::Blame,
+                Capability::RepositoryOperations,
             ],
         }
     }
@@ -425,6 +428,7 @@ pub enum RequestParams {
     ReadFileChange(ReadFileChangeParams),
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
+    FetchRepository(FetchRepositoryParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1554,6 +1558,28 @@ pub struct ListPathChangesParams {
     pub page_size: u16,
 }
 
+/// P5-01: fetch remote-tracking refs. Never touches the working tree, the index, HEAD or local branches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FetchRepositoryParams {
+    /// The name of a configured remote, or null for every remote.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableStringSchema")]
+    pub remote: Option<String>,
+    /// Also delete remote-tracking refs whose branch is gone on the remote.
+    pub prune: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FetchResult {
+    /// The remotes that were fetched, in Git's order.
+    #[schemars(length(max = 64))]
+    pub remotes: Vec<String>,
+    pub finished_at_unix_ms: u64,
+}
+
 /// P4-12: blame of a file at a commit, streamed in chunks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1852,6 +1878,8 @@ pub enum ResponseData {
     FileHistory { page: FileHistoryPage },
     #[serde(rename = "blameChunk")]
     BlameChunk { chunk: BlameChunk },
+    #[serde(rename = "repositoryFetched")]
+    RepositoryFetched { result: FetchResult },
     #[serde(rename = "git")]
     Git { git: GitInfo },
     #[serde(rename = "repository")]

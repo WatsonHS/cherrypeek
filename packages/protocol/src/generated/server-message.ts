@@ -44,7 +44,8 @@ export type Capability =
   | "workspaceStatus"
   | "fileBrowsing"
   | "diffFullContext"
-  | "blame";
+  | "blame"
+  | "repositoryOperations";
 export type ResponseData =
   | {
       coreVersion: string;
@@ -130,6 +131,10 @@ export type ResponseData =
   | {
       chunk: BlameChunk;
       section: "blameChunk";
+    }
+  | {
+      result: FetchResult;
+      section: "repositoryFetched";
     }
   | {
       git: GitInfo;
@@ -1185,6 +1190,15 @@ export interface BlameCommit {
   summary: string;
   summaryTruncated: boolean;
   textLossy: boolean;
+}
+export interface FetchResult {
+  finishedAtUnixMs: number;
+  /**
+   * The remotes that were fetched, in Git's order.
+   *
+   * @maxItems 64
+   */
+  remotes: string[];
 }
 export interface RepositorySessionInfo {
   generation: string;

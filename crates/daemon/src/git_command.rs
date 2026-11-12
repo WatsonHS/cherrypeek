@@ -23,6 +23,9 @@ pub struct ReadOnlyGit {
     /// Working-tree reads (P4-09) honour the user's global and system Git configuration so filters such
     /// as Git LFS behave as in a terminal. Everything else ignores it.
     user_config: bool,
+    /// P5-01: the one place a command may write to the repository or reach the network. Only
+    /// `crate::operations` builds a runner in this mode; every read keeps the isolation below.
+    operation: bool,
 }
 
 pub struct CommandOutput {
@@ -40,10 +43,21 @@ pub enum GitFailure {
     CommandFailed(String),
 }
 
-struct ChildGuard(Child);
+/// The second field is true when the child leads its own process group (operations), so that
+/// stopping it also stops the transport helpers it started (ssh, git-remote-https).
+struct ChildGuard(Child, bool);
 
 impl ChildGuard {
     fn kill_and_wait(&mut self) {
+        #[cfg(unix)]
+        if self.1
+            && let Ok(pid) = libc::pid_t::try_from(self.0.id())
+        {
+            // SAFETY: killpg only sends a signal; the group id is this child's own pid, set at spawn.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -67,6 +81,7 @@ impl ReadOnlyGit {
         Ok(Self {
             executable,
             user_config: false,
+            operation: false,
         })
     }
 
@@ -77,6 +92,19 @@ impl ReadOnlyGit {
         Self {
             executable: self.executable.clone(),
             user_config: true,
+            operation: false,
+        }
+    }
+
+    /// P5-01. The same executable for a user-triggered operation (fetch, fast-forward, switch): it reads
+    /// the user's configuration, may use the network and runs hooks, as the command would in a terminal.
+    /// It still never prompts, never pages and never starts background maintenance.
+    #[must_use]
+    pub fn for_operation(&self) -> Self {
+        Self {
+            executable: self.executable.clone(),
+            user_config: true,
+            operation: true,
         }
     }
 
@@ -101,7 +129,7 @@ impl ReadOnlyGit {
         let child = command
             .spawn()
             .map_err(|error| GitFailure::Unavailable(format!("Could not start Git: {error}")))?;
-        let mut child = ChildGuard(child);
+        let mut child = ChildGuard(child, self.operation);
         let stdout = child.0.stdout.take().expect("stdout was piped");
         let stderr = child.0.stderr.take().expect("stderr was piped");
         let overflow = Arc::new(AtomicBool::new(false));
@@ -245,7 +273,7 @@ impl ReadOnlyGit {
         let child = command
             .spawn()
             .map_err(|error| GitFailure::Unavailable(format!("Could not start Git: {error}")))?;
-        let mut child = ChildGuard(child);
+        let mut child = ChildGuard(child, self.operation);
         let stdout = child.0.stdout.take().expect("stdout was piped");
         let stderr = child.0.stderr.take().expect("stderr was piped");
         let (sender, receiver) = mpsc::sync_channel(channel_capacity);
@@ -289,6 +317,9 @@ impl ReadOnlyGit {
     }
 
     fn command(&self, cwd: &Path, args: &[OsString], has_input: bool) -> Command {
+        if self.operation {
+            return self.operation_command(cwd, args, has_input);
+        }
         let mut command = Command::new(&self.executable);
         command
             .arg("--no-lazy-fetch")
@@ -339,6 +370,50 @@ impl ReadOnlyGit {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command
+    }
+}
+
+impl ReadOnlyGit {
+    /// The command line of an operation: none of the read isolation (network, hooks, optional locks,
+    /// lazy fetch), but no pager, no prompt and no automatic maintenance.
+    fn operation_command(&self, cwd: &Path, args: &[OsString], has_input: bool) -> Command {
+        let mut command = Command::new(&self.executable);
+        command
+            .arg("--no-pager")
+            .arg("-c")
+            .arg("gc.auto=0")
+            .arg("-c")
+            .arg("maintenance.auto=false")
+            .arg("-C")
+            .arg(cwd);
+        for argument in args {
+            command.arg(argument);
+        }
+        // SSH settings the user exported are part of how their remotes work; everything else that
+        // could redirect Git (GIT_DIR, GIT_WORK_TREE, GIT_ASKPASS, …) is dropped.
+        for (name, _) in env::vars_os().filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            name.starts_with("GIT_") && name != "GIT_SSH" && name != "GIT_SSH_COMMAND"
+        }) {
+            command.env_remove(name);
+        }
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
+            .stdin(if has_input {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         command
     }
 }

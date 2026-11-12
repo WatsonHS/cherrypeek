@@ -13,6 +13,7 @@ const api: CommitScopeApi = {
   chooseRepository: () => ipcRenderer.invoke("commitscope:repository:choose") as Promise<string | null>,
   getLaunchRepository: () => ipcRenderer.invoke("commitscope:repository:launch") as Promise<string | null>,
   copyText: text => ipcRenderer.invoke("commitscope:clipboard:write-text", text) as Promise<void>,
+  openWorkspaceIn: (target, reselect = false) => ipcRenderer.invoke("commitscope:workspace:open-in", target, reselect) as Promise<boolean>,
   onRepositoryObservationChanged(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, observation: RepositoryObservationEvent) => listener(observation);
     ipcRenderer.on("commitscope:updates:observed", wrapped);
@@ -65,6 +66,8 @@ const api: CommitScopeApi = {
   readCommitInfo: params => ipcRenderer.invoke("commitscope:files:commit", params),
   readBlame: (params, streamId) => ipcRenderer.invoke("commitscope:files:blame", params, streamId),
   cancelFiles: () => ipcRenderer.invoke("commitscope:files:cancel"),
+  fetchRepository: params => ipcRenderer.invoke("commitscope:operations:fetch", params),
+  cancelRepositoryOperation: () => ipcRenderer.invoke("commitscope:operations:cancel"),
   onBlameChunk(listener) {
     const wrapped = (_event: Electron.IpcRendererEvent, chunk: BlameChunkEvent) => listener(chunk);
     ipcRenderer.on("commitscope:files:blame-chunk", wrapped);

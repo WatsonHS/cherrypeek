@@ -31,6 +31,28 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "FetchRepositoryParams": {
+      "additionalProperties": false,
+      "description": "P5-01: fetch remote-tracking refs. Never touches the working tree, the index, HEAD or local branches.",
+      "properties": {
+        "prune": {
+          "description": "Also delete remote-tracking refs whose branch is gone on the remote.",
+          "type": "boolean"
+        },
+        "remote": {
+          "description": "The name of a configured remote, or null for every remote.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remote",
+        "prune"
+      ],
+      "type": "object"
+    },
     "GetActivityStatsParams": {
       "additionalProperties": false,
       "properties": {
@@ -850,6 +872,9 @@
         },
         {
           "$ref": "#/definitions/ReadBlameParams"
+        },
+        {
+          "$ref": "#/definitions/FetchRepositoryParams"
         }
       ]
     },

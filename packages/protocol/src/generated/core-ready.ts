@@ -19,7 +19,8 @@ export type Capability =
   | "workspaceStatus"
   | "fileBrowsing"
   | "diffFullContext"
-  | "blame";
+  | "blame"
+  | "repositoryOperations";
 
 export interface CoreReady {
   capabilities: Capability[];

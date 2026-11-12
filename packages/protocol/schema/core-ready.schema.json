@@ -41,6 +41,11 @@
           "const": "blame",
           "description": "P4-12: line-by-line blame.",
           "type": "string"
+        },
+        {
+          "const": "repositoryOperations",
+          "description": "P5-01: user-triggered operations that write to the repository or use the network. Fetch first.",
+          "type": "string"
         }
       ]
     },

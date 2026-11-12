@@ -28,7 +28,8 @@ import type {
 import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
   ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
-  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "../../../../packages/protocol/src/generated/client-message.js";
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams, FetchRepositoryParams } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { FetchResult } from "../../../../packages/protocol/src/generated/server-message.js";
 import type {
   HistoryPage,
   HistoryDateLocation,
@@ -166,10 +167,17 @@ export class RepositorySessionController {
     workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, commitInfo: 0, blame: 0,
   };
   private readonly activeChannel: Partial<Record<ReadChannel, ActiveChannelRequest>> = {};
+  /** P5-01: the one operation in progress. A second one is refused rather than replacing it. */
+  private activeOperation?: ActiveChannelRequest;
   private readonly unsubscribeCore: () => void;
 
   constructor(private readonly core: CoreProcess) {
     this.unsubscribeCore = core.subscribe(status => this.onCoreStatus(status));
+  }
+
+  /** The directory the window has open: the worktree, or the repository directory of a bare repository. */
+  getCurrentDirectory(): string | null {
+    return this.current ? this.current.repository.worktreePath ?? this.current.repository.path : null;
   }
 
   getCurrentSessionIdentity(): { repoId: string; generation: string } | null {
@@ -938,6 +946,51 @@ export class RepositorySessionController {
       if (!finished || !completion.coverage.complete || totalLines === null || covered !== totalLines) throw invalidSessionResponse("逐行追溯响应不完整");
       return { totalLines, blocks };
     });
+  }
+
+  /**
+   * P5-01. Fetches remote-tracking refs; the working tree, index, HEAD and local branches are untouched.
+   * The browsing snapshot does not change here: the renderer refreshes once this resolves.
+   */
+  async fetchRepository(input: unknown): Promise<FetchResult> {
+    if (typeof input !== "object" || input === null) throw new ProtocolClientError("INVALID_REQUEST", "fetch 参数无效");
+    const { remote, prune } = input as Record<string, unknown>;
+    if (typeof prune !== "boolean" || !(remote === null || typeof remote === "string" && remote.length > 0)) {
+      throw new ProtocolClientError("INVALID_REQUEST", "fetch 参数无效");
+    }
+    const params: FetchRepositoryParams = { remote, prune };
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    if (this.activeOpen) throw new ProtocolClientError("BUSY", "仓库正在切换，暂不能 fetch", true);
+    if (this.activeOperation) throw new ProtocolClientError("BUSY", "已有一个操作正在进行", true);
+    const abort = new AbortController();
+    let result: FetchResult | undefined;
+    const done = this.core.request("fetchRepository", params, contextOf(session), {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      signal: abort.signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        if (result !== undefined || chunk.data.section !== "repositoryFetched" || !chunk.done) throw invalidSessionResponse("fetch 响应无效");
+        result = chunk.data.result;
+      },
+    });
+    const active: ActiveChannelRequest = { abort, done };
+    this.activeOperation = active;
+    try {
+      const completion = await done;
+      if (result === undefined || !completion.coverage.complete) throw invalidSessionResponse("fetch 响应不完整");
+      return result;
+    } finally {
+      if (this.activeOperation === active) this.activeOperation = undefined;
+    }
+  }
+
+  async cancelRepositoryOperation(): Promise<{ cancelled: boolean }> {
+    const active = this.activeOperation;
+    if (!active) return { cancelled: false };
+    active.abort.abort(new Error("操作已取消"));
+    await active.done.catch(() => undefined);
+    return { cancelled: true };
   }
 
   async cancelFiles(): Promise<{ cancelled: boolean }> {
@@ -1851,7 +1904,8 @@ export class RepositorySessionController {
                 ? "核心还不能读取工作区（P4-09 后端尚未接入）" : capability === "fileBrowsing"
                   ? "核心还不能浏览目录和文件（P4-10 后端尚未接入）" : capability === "diffFullContext"
                     ? "核心还不能返回完整文件 diff（P4-11 后端尚未接入）" : capability === "blame"
-                      ? "核心还不能逐行追溯（P4-12 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
+                      ? "核心还不能逐行追溯（P4-12 后端尚未接入）" : capability === "repositoryOperations"
+                        ? "核心还不能执行 fetch 等操作（P5-01 后端尚未接入）" : "核心不支持只读范围导航，请更新核心版本");
     }
   }
 
@@ -2410,6 +2464,8 @@ interface ActiveChannelRequest {
 const PATCH_BYTES = 128 * 1024;
 const FULL_FILE_PATCH_BYTES = 1024 * 1024;
 const BLAME_TIMEOUT_MS = 60_000;
+/** A little longer than the core's own 10-minute fetch limit, so the core's answer arrives first. */
+const FETCH_TIMEOUT_MS = 615_000;
 
 function oidParam(value: unknown): string | null {
   return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/u.test(value) ? value.toLowerCase() : null;

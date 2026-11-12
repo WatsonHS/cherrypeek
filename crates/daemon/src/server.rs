@@ -38,6 +38,8 @@ pub(crate) struct ActiveRequest {
     cancelled: Arc<AtomicBool>,
     repo_id: Option<String>,
     pub(crate) blocks_background: bool,
+    /// P5-01: an operation has a slot of its own, so a long fetch never uses up the two read slots.
+    is_operation: bool,
 }
 
 #[derive(Debug)]
@@ -77,6 +79,7 @@ enum RequestOperation {
     ReadFileChange(ReadFileChangeParams),
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
+    FetchRepository(commitscope_core::FetchRepositoryParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -384,8 +387,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             None
                         };
 
+                        let is_operation =
+                            matches!(operation, RequestOperation::FetchRepository(_));
                         let mut active = requests.lock().expect("request map poisoned");
-                        if active.len() >= MAX_ACTIVE_REQUESTS {
+                        let busy = if is_operation {
+                            active.values().any(|request| request.is_operation)
+                        } else {
+                            active
+                                .values()
+                                .filter(|request| !request.is_operation)
+                                .count()
+                                >= MAX_ACTIVE_REQUESTS
+                        };
+                        if busy {
                             drop(active);
                             send_error(
                                 &out_tx,
@@ -415,6 +429,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             ActiveRequest {
                                 cancelled: Arc::clone(&cancelled),
                                 repo_id: repo_id.clone(),
+                                is_operation,
                                 blocks_background: !matches!(
                                     operation,
                                     RequestOperation::GetMetadataIndexStatus
@@ -537,6 +552,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ReadFileChange(_)
             | RequestOperation::ListPathChanges(_)
             | RequestOperation::ReadBlame(_)
+            | RequestOperation::FetchRepository(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
@@ -1384,6 +1400,33 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 params,
+            );
+        }
+        RequestOperation::FetchRepository(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                // The worker's read deadline is far too short for a network transfer; a fetch has its own.
+                move |git, session, cancelled, _read_deadline| {
+                    let result = crate::operations::fetch_repository(
+                        git,
+                        session,
+                        &params,
+                        cancelled,
+                        std::time::Instant::now() + crate::operations::FETCH_TIMEOUT,
+                    )?;
+                    let processed = u32::try_from(result.remotes.len()).unwrap_or(u32::MAX);
+                    Ok((ResponseData::RepositoryFetched { result }, processed))
+                },
             );
         }
         RequestOperation::RefreshRepository(params) => {
@@ -2247,6 +2290,7 @@ fn validate_request(
         | "readFileChange"
         | "listPathChanges"
         | "readBlame"
+        | "fetchRepository"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -2525,6 +2569,16 @@ fn validate_request(
                 "readBlame" => serde_json::from_value::<ReadBlameParams>(params.clone())
                     .map(RequestOperation::ReadBlame)
                     .map_err(|_| (ErrorCode::InvalidRequest, "readBlame params 无效".into())),
+                "fetchRepository" => serde_json::from_value::<
+                    commitscope_core::FetchRepositoryParams,
+                >(params.clone())
+                .map(RequestOperation::FetchRepository)
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        "fetchRepository params 无效".into(),
+                    )
+                }),
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
@@ -2576,6 +2630,7 @@ fn validate_request(
         | "readFileChange"
         | "listPathChanges"
         | "readBlame"
+        | "fetchRepository"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"

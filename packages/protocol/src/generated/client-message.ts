@@ -46,7 +46,8 @@ export type RequestParams =
   | ReadFileHistoryParams
   | ReadFileChangeParams
   | ListPathChangesParams
-  | ReadBlameParams;
+  | ReadBlameParams
+  | FetchRepositoryParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -275,4 +276,17 @@ export interface ListPathChangesParams {
 export interface ReadBlameParams {
   commit: string;
   pathHex: string;
+}
+/**
+ * P5-01: fetch remote-tracking refs. Never touches the working tree, the index, HEAD or local branches.
+ */
+export interface FetchRepositoryParams {
+  /**
+   * Also delete remote-tracking refs whose branch is gone on the remote.
+   */
+  prune: boolean;
+  /**
+   * The name of a configured remote, or null for every remote.
+   */
+  remote: string | null;
 }

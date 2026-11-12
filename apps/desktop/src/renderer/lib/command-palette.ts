@@ -1,7 +1,8 @@
 import type { RefInfo, RepositoryScope, WorktreeInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { repositoryName, shortRefName } from "./format.js";
 
-export type PaletteCommand = "openRepository" | "commits" | "files" | "workspace" | "copyCommit";
+export type PaletteCommand = "openRepository" | "commits" | "files" | "workspace" | "copyCommit" | "copyMessage" | "copyBranch"
+  | "openFinder" | "openTerminal" | "openEditor" | "fetch" | "fetchPrune";
 export type PaletteAction = { kind: "commit"; oid: string } | { kind: "scope"; scope: RepositoryScope } | { kind: "command"; command: PaletteCommand };
 export interface PaletteItem {
   id: string;
@@ -20,6 +21,14 @@ export interface PaletteContext {
   workspaceAvailable: boolean;
   selectedOid: string | null;
   oidLength: number;
+  /** P5-05. The full message of the selected commit once its details are loaded, else its summary. */
+  selectedMessage?: string | null;
+  /** The branch the window's working directory has checked out, as a full ref name. */
+  headReference?: string | null;
+  /** False for a bare repository, which has no working directory to open in a terminal or editor. */
+  hasWorkingDirectory?: boolean;
+  /** P5-01: the core can run operations and no fetch is in progress. */
+  fetchAvailable?: boolean;
 }
 
 /** Only uses the current frozen navigation snapshot; never reads the repository from the renderer. */
@@ -50,7 +59,14 @@ export function paletteItems(query: string, context: PaletteContext, modifier = 
     ["commits", "切换到提交页", context.repositoryReady, `${modifier}1`],
     ["files", "切换到文件页", context.repositoryReady && context.filesAvailable, `${modifier}2`],
     ["workspace", "切换到工作区", context.repositoryReady && context.workspaceAvailable, `${modifier}3`],
+    ["fetch", "Fetch：从所有远端获取新提交", context.repositoryReady && Boolean(context.fetchAvailable)],
+    ["fetchPrune", "Fetch 并清理远端已删除的分支", context.repositoryReady && Boolean(context.fetchAvailable)],
     ["copyCommit", "复制当前提交 hash", context.repositoryReady && Boolean(context.selectedOid)],
+    ["copyMessage", "复制当前提交消息", context.repositoryReady && Boolean(context.selectedOid && context.selectedMessage)],
+    ["copyBranch", context.headReference ? `复制当前分支名 ${shortRefName(context.headReference)}` : "复制当前分支名", context.repositoryReady && Boolean(context.headReference)],
+    ["openFinder", "在 Finder 中打开仓库目录", context.repositoryReady],
+    ["openTerminal", "在终端打开工作区", context.repositoryReady && Boolean(context.hasWorkingDirectory)],
+    ["openEditor", "在编辑器打开工作区", context.repositoryReady && Boolean(context.hasWorkingDirectory)],
   ];
   items.push(...commands.filter(([, label, enabled]) => enabled && (!text || label.toLowerCase().includes(text))).map(([command, label, , shortcut]) => ({
     id: command, group: "命令", label, shortcut, action: { kind: "command", command } as PaletteAction,

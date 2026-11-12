@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowLeft, ArrowRight, ChevronDown, Cloud, CornerUpLeft, Ellipsis, Folder, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag, X } from "lucide-react";
+import { ArrowDownToLine, ArrowLeft, ArrowRight, ChevronDown, Cloud, Code, Copy, CornerUpLeft, Ellipsis, Folder, FolderOpen, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag, Terminal, X } from "lucide-react";
 import type { NavigationView } from "../lib/navigation-history.js";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
@@ -113,6 +113,16 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <ShortcutGuide />
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
+    {preview.session && actions.fetch ? <Button variant="outline" size="sm" disabled={!actions.fetch.running && (preview.refreshing || busy)}
+      data-testid="fetch-button" className="topbar-refresh shrink-0"
+      onClick={event => { if (actions.fetch?.running) actions.fetch.cancel(); else void actions.fetch?.start(event.altKey); }}
+      title={actions.fetch.running ? "正在 fetch，点击取消" : "Fetch：从所有远端获取新提交，不改动工作区和本地分支（按住 ⌥ 点击同时清理远端已删除的分支）"}
+      aria-label={actions.fetch.running ? "取消 fetch" : "Fetch：从所有远端获取新提交"}>
+      {actions.fetch.running
+        ? <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" strokeWidth={1.75} />
+        : <ArrowDownToLine className="size-3.5" strokeWidth={1.75} />}
+      <span className="topbar-action-label" aria-live="polite">{actions.fetch.running ? "取消" : "Fetch"}</span>
+    </Button> : null}
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
       className="topbar-refresh shrink-0" onClick={() => { void actions.refresh(); }} title="刷新仓库历史" aria-label="刷新仓库历史">
       <RefreshCw className={cn("size-3.5", preview.refreshing && "animate-spin motion-reduce:animate-none")} strokeWidth={1.75} />
@@ -491,7 +501,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
               const checkoutTitle = checkedOut.length
                 ? `检出于：${checkedOut.map(worktree => worktree.path).join("、")}`
                 : "未被 worktree 检出";
-              return <div key={ref.name} data-scope-ref-kind={kind} data-ref-name={kind === "localBranch" ? ref.name : undefined} className="flex items-center gap-1">
+              return <div key={ref.name} data-scope-ref-kind={kind} data-ref-name={kind === "localBranch" ? ref.name : undefined} className="group/ref flex items-center gap-1">
                 <div className="min-w-0 flex-1">{option(`ref-${ref.name}`, { ref: ref.name }, <>
                 <Icon className="size-3.5 shrink-0 text-fg3" strokeWidth={1.75} aria-hidden="true" />
                 <span className="flex min-w-[96px] flex-1 flex-col">
@@ -507,6 +517,11 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                   ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
                     aria-label={`交给 Agent 清理已合入的分支 ${shortRefName(ref.name)}`} title="交给 Agent 核对后删除这个已合入的分支"
                     onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); }}>清理</Button> : null}
+                {kind !== "tag" ? <button type="button" data-testid="copy-branch-name" className={cn(NAV_CLASS, "shrink-0 opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100")}
+                  aria-label={`复制分支名 ${shortRefName(ref.name)}`} title="复制分支名"
+                  onClick={() => { void window.commitScope.copyText(shortRefName(ref.name)); }}>
+                  <Copy className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
+                </button> : null}
                 {merged === "unavailable" ? <button type="button" aria-label={`重新计算 ${shortRefName(ref.name)} 的合入状态`}
                   className="ml-2 self-start px-2 text-[11px] text-fg3 underline" onClick={() => onLoadMergeStatus([ref.name])}>重试</button> : null}
               </div>;
@@ -525,6 +540,31 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
       {preview.refsTruncated ? <div className="border-t border-line bg-bg px-4 py-2.5 text-xs text-fg3">引用数量达到显示上限，列表不完整。</div> : null}
     </PopoverContent> : null}
   </Popover>;
+}
+
+/** P5-05: open the window's directory elsewhere. The directory itself is taken from the session in main. */
+function OpenWorkspaceButtons({ bare }: { bare: boolean }): React.JSX.Element {
+  const [error, setError] = React.useState<string | null>(null);
+  const open = (target: "finder" | "terminal" | "editor", reselect: boolean) => {
+    setError(null);
+    window.commitScope.openWorkspaceIn(target, reselect).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message.replace(/^Error invoking remote method '[^']+': (Error: )?/u, "") : "打开失败");
+    });
+  };
+  const targets = [
+    ["finder", "在 Finder 中打开", FolderOpen, true],
+    ["terminal", "在终端打开（按住 ⌥ 点击可更换终端应用）", Terminal, !bare],
+    ["editor", "在编辑器打开（按住 ⌥ 点击可更换编辑器）", Code, !bare],
+  ] as const;
+  return <span className="-my-1 flex shrink-0 items-center" data-testid="open-workspace">
+    {targets.filter(([, , , shown]) => shown).map(([target, label, Icon]) => <button key={target} type="button" className={NAV_CLASS}
+      data-open-target={target} aria-label={label.replace(/（.*）$/u, "")} title={label}
+      onClick={event => open(target, event.altKey && target !== "finder")}>
+      <Icon className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
+    </button>)}
+    {error ? <span role="alert" className="sr-only">{error}</span> : null}
+    {error ? <span aria-hidden="true" className="ml-1 max-w-[140px] truncate font-sans text-[11px] text-bad" title={error}>{error}</span> : null}
+  </span>;
 }
 
 /** The current directory's worktree facts, independent of the browsing scope. */
@@ -546,7 +586,10 @@ function WorktreeFacts({ repository, navigation, navigationLoading, navigationEr
   return <section className="flex flex-col gap-1.5" data-testid="worktree-info" aria-label="当前工作区">
     <span className="text-[11.5px] font-semibold text-fg3">当前工作区</span>
       <dl className="m-0 grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
-        <dt className="text-fg3">目录</dt><dd className="m-0 break-all font-mono" title={path}>{path}</dd>
+        <dt className="text-fg3">目录</dt><dd className="m-0 flex min-w-0 items-start gap-1">
+          <span className="min-w-0 flex-1 break-all font-mono" title={path}>{path}</span>
+          <OpenWorkspaceButtons bare={repository.isBare} />
+        </dd>
         <dt className="text-fg3">类型</dt><dd className="m-0">{repository.isBare ? "bare 仓库（没有工作区目录）" : linked ? "关联 worktree" : "主 worktree"}</dd>
         <dt className="text-fg3">实际 HEAD</dt><dd className="m-0 break-all">{repository.isBare ? "bare 仓库没有工作区 HEAD" : headDescription}</dd>
         <dt className="text-fg3">HEAD 完整 OID</dt><dd className="m-0 break-all font-mono">{repository.headOid ?? "无提交"}</dd>

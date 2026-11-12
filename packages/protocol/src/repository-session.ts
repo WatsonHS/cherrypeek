@@ -56,6 +56,11 @@ export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, B
 export type { ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams, WorkspaceSide } from "./generated/client-message.js";
 export type { ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "./generated/client-message.js";
 
+import type { FetchRepositoryParams } from "./generated/client-message.js";
+import type { FetchResult } from "./generated/server-message.js";
+export type { FetchRepositoryParams } from "./generated/client-message.js";
+export type { FetchResult } from "./generated/server-message.js";
+
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: { code: ErrorCode; message: string; retryable: boolean } };
@@ -183,4 +188,11 @@ export interface RepositorySessionApi {
   /** P4-12: chunks arrive through `onBlameChunk` with the same `streamId`; the result resolves when the file is covered. */
   readBlame(params: ReadBlameParams, streamId: string): Promise<RepositorySessionResult<{ totalLines: number; blocks: number }>>;
   onBlameChunk(listener: (event: BlameChunkEvent) => void): () => void;
+  /**
+   * P5-01: fetches remote-tracking refs (every remote when `remote` is null). It leaves the working tree,
+   * index, HEAD and local branches alone and does not change the browsing snapshot; refresh afterwards.
+   */
+  fetchRepository(params: FetchRepositoryParams): Promise<RepositorySessionResult<FetchResult>>;
+  /** Stops the operation in progress, if any, and waits until the core has stopped it. */
+  cancelRepositoryOperation(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
 }

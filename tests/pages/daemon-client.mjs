@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { NavigationDaemonClient, createDaemonEnvironment, projectSession } from "../navigation/daemon-client.mjs";
 
-const PAGE_CAPABILITIES = ["workspaceStatus", "fileBrowsing", "diffFullContext", "blame"];
+const PAGE_CAPABILITIES = ["workspaceStatus", "fileBrowsing", "diffFullContext", "blame", "repositoryOperations"];
 
 export class PagesDaemonClient extends NavigationDaemonClient {
   async start(timeoutMs) {

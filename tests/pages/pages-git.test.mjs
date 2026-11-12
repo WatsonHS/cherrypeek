@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lstat, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -436,6 +436,131 @@ test("cancelled workspace, tree, content, history and blame reads reap their Git
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------
+// P5-01 fetch: the one operation so far that writes to the repository
+// ---------------------------------------------------------------------------------------------
+
+const COMMIT_ENV = { GIT_AUTHOR_NAME: "Fetch Test", GIT_AUTHOR_EMAIL: "fetch@example.invalid", GIT_COMMITTER_NAME: "Fetch Test", GIT_COMMITTER_EMAIL: "fetch@example.invalid" };
+
+/** `upstream` with main and topic, plus two clones: the daemon fetches in `local`, plain Git in `reference`. */
+async function createFetchFixture(name) {
+  const root = join(dataRoot, "..", `fetch-${name}`);
+  const [upstream, local, reference] = ["upstream", "local", "reference"].map(part => join(root, part));
+  await mkdir(upstream, { recursive: true });
+  await git(upstream, ["init", "--quiet", "-b", "main"]);
+  await commitFile(upstream, "a.txt", "one\n");
+  await git(upstream, ["branch", "topic"]);
+  for (const clone of [local, reference]) await git(root, ["clone", "--quiet", upstream, clone]);
+  return { upstream, local, reference };
+}
+
+async function commitFile(repository, file, text) {
+  await writeFile(join(repository, file), text);
+  await git(repository, ["add", "."]);
+  await git(repository, ["commit", "--quiet", "-m", file], { env: COMMIT_ENV });
+}
+
+const remoteRefs = repository => git(repository, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"]);
+
+/** What a fetch must leave alone. FETCH_HEAD and the remote-tracking refs are what it is for. */
+async function localState(repository) {
+  return {
+    head: await git(repository, ["symbolic-ref", "HEAD"]),
+    branches: await git(repository, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"]),
+    status: await git(repository, ["status", "--porcelain=v2"]),
+    index: (await readFile(join(repository, ".git", "index"))).toString("hex"),
+  };
+}
+
+function fetched(response) {
+  assert.equal(response.chunks.length, 1);
+  const chunk = response.chunks[0];
+  assert.equal(chunk.data.section, "repositoryFetched");
+  assert.equal(chunk.done && chunk.coverage.complete, true);
+  return chunk.data.result;
+}
+
+test("fetch matches independent git fetch and leaves HEAD, local branches, the index and the working tree alone", async () => {
+  const { upstream, local, reference } = await createFetchFixture("compare");
+  await commitFile(upstream, "b.txt", "two\n");
+  await git(upstream, ["branch", "-D", "topic"]);
+  await git(upstream, ["branch", "later"]);
+  await writeFile(join(local, "dirty.txt"), "uncommitted");
+  const before = await localState(local);
+  const client = await openClient("fetch-compare", local);
+  try {
+    const result = fetched(await client.call("fetchRepository", { remote: null, prune: false }, 60_000));
+    assert.deepEqual(result.remotes, ["origin"]);
+    await git(reference, ["fetch", "--quiet", "--all"]);
+    assert.equal(await remoteRefs(local), await remoteRefs(reference), "without prune the deleted branch stays, as with git fetch");
+    assert.match(await remoteRefs(local), /refs\/remotes\/origin\/topic /u);
+
+    fetched(await client.call("fetchRepository", { remote: "origin", prune: true }, 60_000));
+    await git(reference, ["fetch", "--quiet", "--prune", "origin"]);
+    assert.equal(await remoteRefs(local), await remoteRefs(reference));
+    assert.doesNotMatch(await remoteRefs(local), /refs\/remotes\/origin\/topic /u);
+    assert.equal(await git(local, ["rev-parse", "origin/main"]), await git(upstream, ["rev-parse", "main"]));
+
+    // The browsing snapshot is still the one opened before the fetch; only a refresh moves it.
+    const status = await client.workspaceStatus();
+    assert.equal(status.entries.length, 1);
+  } finally {
+    await client.stop();
+  }
+  assert.deepEqual(await localState(local), before);
+});
+
+test("a fetch that cannot run is refused or fails without touching the repository", async () => {
+  const { upstream, local } = await createFetchFixture("refuse");
+  const before = await snapshotTree(local);
+  const client = await openClient("fetch-refuse", local);
+  try {
+    for (const remote of ["elsewhere", "--upload-pack=/usr/bin/true", ""]) {
+      await assert.rejects(client.call("fetchRepository", { remote, prune: false }, 60_000), error => error.code === "INVALID_REQUEST", `remote ${JSON.stringify(remote)}`);
+    }
+    await assert.rejects(client.call("fetchRepository", { prune: false }, 60_000), error => error.code === "INVALID_REQUEST");
+    assert.deepEqual(await snapshotTree(local), before, "refused requests write nothing at all");
+    await rm(upstream, { recursive: true, force: true });
+    await assert.rejects(client.call("fetchRepository", { remote: null, prune: false }, 60_000), error => error.code === "GIT_ERROR" && error.message.length > "GIT_ERROR: ".length);
+  } finally {
+    await client.stop();
+  }
+  const noRemote = await openClient("fetch-no-remote", fixture.clean);
+  try {
+    await assert.rejects(noRemote.call("fetchRepository", { remote: null, prune: false }, 60_000), error => error.code === "INVALID_REQUEST");
+  } finally {
+    await noRemote.stop();
+  }
+});
+
+test("a fetch in progress keeps both read slots free, refuses a second operation, and is reaped on cancel", { skip: process.platform === "win32" || !wrapper }, async t => {
+  const { upstream, local } = await createFetchFixture("held");
+  await commitFile(upstream, "b.txt", "two\n");
+  const client = await openClient("fetch-held", local, { gate: true });
+  try {
+    await rm(startedPath, { force: true });
+    await writeFile(gatePath, "fetch");
+    const held = client.begin("fetchRepository", { remote: null, prune: false }, 60_000);
+    const settled = held.result.then(() => "done", error => error.code);
+    const pid = await waitForPid(startedPath, 10_000);
+    await assert.rejects(client.call("fetchRepository", { remote: null, prune: false }, 60_000), error => error.code === "BUSY");
+    const reads = await Promise.all([client.workspaceStatus(), client.listTree(client.session.headOid ?? await git(local, ["rev-parse", "HEAD"]), null)]);
+    assert.equal(reads.length, 2, "two reads run beside the held fetch");
+    const cancelledAt = performance.now();
+    client.cancel(held.requestId);
+    const reapedAfter = await waitForExit(pid, 3000) - cancelledAt;
+    assert.equal(await settled, "CANCELLED");
+    assert.equal(await exists(gatePath), true, "the child ended because the daemon stopped it, not because the gate opened");
+    t.diagnostic(`fetch: Git child ${pid} reaped ${reapedAfter.toFixed(0)} ms after cancel`);
+    await rm(gatePath, { force: true });
+    fetched(await client.call("fetchRepository", { remote: null, prune: false }, 60_000));
+    assert.equal(await git(local, ["rev-parse", "origin/main"]), await git(upstream, ["rev-parse", "main"]), "a fetch after the cancelled one works");
+  } finally {
+    await rm(gatePath, { force: true });
+    await client.stop();
+  }
+});
 
 async function openClient(name, repository, { gate = false } = {}) {
   const extra = { HOME: home, XDG_CONFIG_HOME: join(home, ".config") };

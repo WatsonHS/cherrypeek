@@ -1,5 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, session, type IpcMainInvokeEvent } from "electron";
-import { watch, readdirSync, type FSWatcher } from "node:fs";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, session, shell, type IpcMainInvokeEvent } from "electron";
+import { execFile } from "node:child_process";
+import { watch, readdirSync, readFileSync, statSync, writeFileSync, type FSWatcher } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { RepositoryObservationEvent } from "../../../../packages/protocol/src/repository-session.js";
 import type { RepositorySessionInfo } from "../../../../packages/protocol/src/generated/server-message.js";
@@ -73,7 +74,10 @@ const IPC_FILES_COMMIT = "commitscope:files:commit";
 const IPC_FILES_BLAME = "commitscope:files:blame";
 const IPC_FILES_BLAME_CHUNK = "commitscope:files:blame-chunk";
 const IPC_FILES_CANCEL = "commitscope:files:cancel";
+const IPC_OPERATION_FETCH = "commitscope:operations:fetch";
+const IPC_OPERATION_CANCEL = "commitscope:operations:cancel";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
+const IPC_OPEN_WORKSPACE_IN = "commitscope:workspace:open-in";
 const MAX_COPY_TEXT_LENGTH = 64 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
 let window: BrowserWindow | undefined;
@@ -120,6 +124,84 @@ function registerStatusIpc(): void {
     if (typeof text !== "string" || text.length === 0 || text.length > MAX_COPY_TEXT_LENGTH) throw new Error("Invalid clipboard text");
     clipboard.writeText(text);
   });
+  ipcMain.handle(IPC_OPEN_WORKSPACE_IN, (event, target: unknown, reselect: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    if (target !== "finder" && target !== "terminal" && target !== "editor") throw new Error("Invalid open target");
+    return openWorkspaceIn(target, reselect === true);
+  });
+}
+
+type OpenWithChoices = { terminal?: string; editor?: string };
+const DEFAULT_TERMINAL_APP = "/System/Applications/Utilities/Terminal.app";
+
+function openWithFile(): string {
+  return resolve(app.getPath("userData"), "open-with.json");
+}
+
+function isApplicationPath(value: unknown): value is string {
+  return typeof value === "string" && isAbsolute(value) && value.endsWith(".app") && !value.includes("\0") &&
+    Buffer.byteLength(value, "utf8") <= MAX_PATH_BYTES;
+}
+
+/** The applications the user picked for "open in terminal / editor"; a missing or damaged file means none picked. */
+function readOpenWith(): OpenWithChoices {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(openWithFile(), "utf8"));
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const { terminal, editor } = parsed as Record<string, unknown>;
+    return { ...(isApplicationPath(terminal) ? { terminal } : {}), ...(isApplicationPath(editor) ? { editor } : {}) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * P5-05. The directory is the session's, not the renderer's. Finder goes through `shell`; a terminal or editor is
+ * started with `open -a <application> <directory>` as an argument array, so nothing from the repository is ever
+ * interpreted as a command. The application is one the user picked in a file dialog (Terminal.app by default).
+ */
+async function openWorkspaceIn(target: "finder" | "terminal" | "editor", reselect: boolean): Promise<boolean> {
+  const directory = repositorySessions?.getCurrentDirectory();
+  if (!directory || !isAbsolute(directory)) throw new Error("没有打开的仓库目录");
+  try {
+    if (!statSync(directory).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new Error(`目录不存在或无法访问：${directory}`);
+  }
+  if (target === "finder") {
+    const failure = await shell.openPath(directory);
+    if (failure) throw new Error(failure);
+    return true;
+  }
+  if (process.platform !== "darwin") throw new Error("在终端或编辑器中打开目前只支持 macOS");
+  const choices = readOpenWith();
+  let application = reselect ? undefined : choices[target] ?? (target === "terminal" ? DEFAULT_TERMINAL_APP : undefined);
+  if (!application) {
+    if (!window || window.isDestroyed()) return false;
+    const picked = await dialog.showOpenDialog(window, {
+      title: target === "terminal" ? "选择终端应用" : "选择编辑器",
+      message: target === "terminal" ? "选择用来打开工作区的终端应用" : "选择用来打开工作区的编辑器",
+      defaultPath: "/Applications",
+      properties: ["openFile"],
+      filters: [{ name: "应用", extensions: ["app"] }],
+    });
+    const chosen = picked.canceled ? undefined : picked.filePaths[0];
+    if (!isApplicationPath(chosen)) return false;
+    application = chosen;
+    try {
+      writeFileSync(openWithFile(), JSON.stringify({ ...choices, [target]: application }), "utf8");
+    } catch {
+      // The choice only fails to be remembered; opening still goes ahead.
+    }
+  }
+  const chosenApplication = application;
+  await new Promise<void>((done, fail) => {
+    execFile("/usr/bin/open", ["-a", chosenApplication, directory], { timeout: 10_000 }, error => {
+      if (error) fail(new Error(`无法用 ${chosenApplication} 打开：${error.message}`));
+      else done();
+    });
+  });
+  return true;
 }
 
 /** The repository passed with `--repository=` at launch; the renderer opens it like any other path. */
@@ -239,6 +321,14 @@ function registerRepositorySessionIpc(): void {
       const { repository, refs, refsTruncated, ...content } = page;
       return content;
     });
+  });
+  ipcMain.handle(IPC_OPERATION_FETCH, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.fetchRepository(params));
+  });
+  ipcMain.handle(IPC_OPERATION_CANCEL, event => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.cancelRepositoryOperation());
   });
   ipcMain.handle(IPC_HISTORY_LOCATE, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");

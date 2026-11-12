@@ -54,6 +54,8 @@ export interface RepositoryActions {
   nextPage(): Promise<string | undefined>;
   refresh(): Promise<void>;
   switchScope(scope: RepositoryScope): Promise<void>;
+  /** P5-01: null while the core cannot run operations. Fetches every remote, then refreshes the snapshot. */
+  fetch: { running: boolean; start(prune?: boolean): Promise<void>; cancel(): void } | null;
 }
 
 /** Subscribes to core status, ignoring stale revisions. */
@@ -213,6 +215,9 @@ export function App(): React.JSX.Element {
   const filesView = React.useSyncExternalStore(filesStore.subscribe, filesStore.getView);
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
+  const operationsSupported = ready && status.core.capabilities.includes("repositoryOperations");
+  const [fetching, setFetching] = React.useState(false);
+  const fetchRunning = React.useRef(false);
   const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
   const [path, setPathState] = React.useState("");
@@ -832,7 +837,32 @@ export function App(): React.JSX.Element {
     } : undefined;
     await store.refresh(selectedOid, anchorBeforeRefresh.current);
   });
+  // P5-01. A fetch only moves remote-tracking refs; the view changes when the refresh after it lands.
+  const startFetch = async (prune = false) => {
+    if (fetchRunning.current) return;
+    fetchRunning.current = true;
+    setFetching(true);
+    setActionError(undefined);
+    try {
+      const result = await window.commitScope.fetchRepository({ remote: null, prune });
+      if (!result.ok) {
+        if (result.error.code !== "CANCELLED") setActionError(`fetch 没有完成，仓库未被改动。${result.error.message}`);
+        return;
+      }
+      await refresh();
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      fetchRunning.current = false;
+      setFetching(false);
+    }
+  };
   const actions: RepositoryActions = {
+    fetch: operationsSupported && view.session ? {
+      running: fetching,
+      start: startFetch,
+      cancel: () => { void window.commitScope.cancelRepositoryOperation(); },
+    } : null,
     path,
     setPath(next) { pathEdited.current = true; setPathState(next); },
     open: (target = path) => run(async () => { await abandonHistoryLocation(); await store.open(target); }),
@@ -1138,6 +1168,10 @@ export function App(): React.JSX.Element {
   const paletteSelectedOid = page === "files"
     ? filesView.tab === "history" ? filesView.selectedCommit : filesView.version?.commit ?? null
     : page === "commits" ? displayedOid ?? null : null;
+  // The commit page knows the full message once the details are read; elsewhere only the summary is at hand.
+  const paletteSelectedMessage = !paletteSelectedOid ? null
+    : page === "commits" && detailView.details.value?.commit.oid === paletteSelectedOid ? detailView.details.value.message
+    : (searchView.active ? searchView.window?.commits : view.commits)?.find(commit => commit.oid === paletteSelectedOid)?.summary ?? null;
   const executePalette = (action: PaletteAction) => {
     if (action.kind === "commit") {
       setJumpOrigin(recordJump());
@@ -1150,6 +1184,16 @@ export function App(): React.JSX.Element {
       void actions.choose();
     } else if (action.command === "copyCommit") {
       if (paletteSelectedOid) void run(() => window.commitScope.copyText(paletteSelectedOid));
+    } else if (action.command === "copyMessage") {
+      if (paletteSelectedMessage) void run(() => window.commitScope.copyText(paletteSelectedMessage));
+    } else if (action.command === "copyBranch") {
+      const branch = view.repository?.headReference;
+      if (branch) void run(() => window.commitScope.copyText(shortRefName(branch)));
+    } else if (action.command === "openFinder" || action.command === "openTerminal" || action.command === "openEditor") {
+      const target = action.command === "openFinder" ? "finder" : action.command === "openTerminal" ? "terminal" : "editor";
+      void run(async () => { await window.commitScope.openWorkspaceIn(target); });
+    } else if (action.command === "fetch" || action.command === "fetchPrune") {
+      void actions.fetch?.start(action.command === "fetchPrune");
     } else changePage(action.command);
   };
   const displayedCommit = searchView.active
@@ -1332,7 +1376,10 @@ export function App(): React.JSX.Element {
       context={{ refs: view.navigation?.refs ?? view.refs, worktrees: view.navigation?.worktrees ?? [],
         repositoryReady: view.state === "ready" && !view.opening && !view.refreshing && !view.scopeSwitching,
         coreReady: ready, filesAvailable, workspaceAvailable: !workspaceUnavailable,
-        selectedOid: paletteSelectedOid, oidLength: view.repository?.objectFormat === "sha256" ? 64 : 40 }}
+        selectedOid: paletteSelectedOid, oidLength: view.repository?.objectFormat === "sha256" ? 64 : 40,
+        selectedMessage: paletteSelectedMessage, headReference: view.repository?.headReference ?? null,
+        hasWorkingDirectory: Boolean(view.repository && !view.repository.isBare),
+        fetchAvailable: Boolean(actions.fetch && !actions.fetch.running) }}
       onLoadNavigation={() => { if (!store.getView().navigation) void loadNavigation(); }} onExecute={executePalette} />
     <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} request={handoffRequest} sessionKey={detailSessionKey}
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}

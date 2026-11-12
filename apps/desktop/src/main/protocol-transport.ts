@@ -65,6 +65,8 @@ interface PendingRequest {
   gateBound: boolean;
   retainResultAfterAbort: boolean;
   drainAfterAbort: boolean;
+  /** P5-01: an operation has a slot of its own and does not count towards the read limit. */
+  operation: boolean;
   fatalOnTimeout: boolean;
   cancelRequested: boolean;
   cancelError?: ProtocolClientError;
@@ -184,8 +186,10 @@ export class ProtocolTransport {
     if (requestMode === "session" && (!context.repoId || !context.generation)) {
       return Promise.reject(new ProtocolClientError("STALE_CONTEXT", "当前没有可用的仓库会话"));
     }
-    if (this.pending.size >= this.maxPendingRequests) {
-      return Promise.reject(new ProtocolClientError("BUSY", "读取暂时繁忙，请稍后重试", true));
+    const operation = OPERATION_METHODS.includes(method);
+    const pendingOperations = [...this.pending.values()].filter(request => request.operation).length;
+    if (operation ? pendingOperations > 0 : this.pending.size - pendingOperations >= this.maxPendingRequests) {
+      return Promise.reject(new ProtocolClientError("BUSY", operation ? "已有一个操作正在进行" : "读取暂时繁忙，请稍后重试", true));
     }
     if (options.signal?.aborted) {
       return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
@@ -196,7 +200,7 @@ export class ProtocolTransport {
     if (options.drainAfterAbort && method !== "readHistoryPage" && method !== "locateCommit" && method !== "locateHistoryDate" && method !== "refMergeStatus" && method !== "getMetadataIndexStatus" &&
       method !== "searchCommits" && method !== "listSearchIdentities" && method !== "listSearchPaths" &&
       method !== "getActivityStats" && method !== "observeRepository" && method !== "diffRefSnapshots" && method !== "getHandoffFacts" &&
-      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS].includes(method)) {
+      !["getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS].includes(method)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "该请求不支持取消并排空终态"));
     }
     if (options.fatalOnTimeout && !["openRepository", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "selectRepositoryScope"].includes(method)) {
@@ -215,6 +219,7 @@ export class ProtocolTransport {
         gateBound: requestMode === "session",
         retainResultAfterAbort: options.retainResultAfterAbort === true,
         drainAfterAbort: options.drainAfterAbort === true,
+        operation,
         fatalOnTimeout: options.fatalOnTimeout === true,
         cancelRequested: false,
         nextSequence: 0,
@@ -650,11 +655,17 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.parentIndex === null || Number.isInteger(params.parentIndex) && (params.parentIndex as number) >= 0 && (params.parentIndex as number) <= 127) &&
     (params.fullFile === undefined || typeof params.fullFile === "boolean")) return true;
   if (method === "readBlame" && isRecord(params) && hasExactKeys(params, ["commit", "pathHex"]) && validOid(params.commit) && validPathHex(params.pathHex)) return true;
+  if (method === "fetchRepository" && isRecord(params) && hasExactKeys(params, ["prune", "remote"]) && typeof params.prune === "boolean" &&
+    (params.remote === null || typeof params.remote === "string" && params.remote.length > 0 && !params.remote.startsWith("-") &&
+      Buffer.byteLength(params.remote, "utf8") <= 256)) return true;
   if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "listRecentRepositories"].includes(method)) {
     return isRecord(params) && Object.keys(params).length === 0;
   }
   return false;
 }
+
+/** P5-01: user-triggered operations that write to the repository or use the network; one at a time. */
+const OPERATION_METHODS = ["fetchRepository"];
 
 /** P4-10 to P4-12 reads of the files page: session methods that can be cancelled and drained. */
 const FILE_METHODS = ["listTree", "readFileContent", "readFileHistory", "readFileChange", "listPathChanges", "readBlame"];
@@ -712,7 +723,7 @@ type RequestMode = "legacy" | "control" | "session";
 function requestModeFor(method: string): RequestMode | undefined {
   if (method === "getRuntimeInfo" || method === "readRepositoryPreview") return "legacy";
   if (method === "openRepository" || method === "listRecentRepositories") return "control";
-  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS].includes(method)) return "session";
+  if (["getRepositorySession", "readSessionPreview", "recordRepositoryView", "closeRepository", "readHistoryPage", "locateCommit", "locateHistoryDate", "refreshRepository", "getRepositoryNavigation", "selectRepositoryScope", "refMergeStatus", "getMetadataIndexStatus", "controlMetadataIndex", "searchCommits", "listSearchIdentities", "listSearchPaths", "getActivityStats", "observeRepository", "diffRefSnapshots", "getHandoffFacts", "getCommit", "listChangedFiles", "readMergeCommits", "branchesContaining", "readDiff", ...WORKSPACE_METHODS, ...FILE_METHODS, ...OPERATION_METHODS].includes(method)) return "session";
   return undefined;
 }
 
