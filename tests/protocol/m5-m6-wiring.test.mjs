@@ -226,6 +226,8 @@ test("analyzeEvolution forwards chunks in order, rejects backwards progress, and
   const analysis = controller.analyzeEvolution(params, item => delivered.push(item.progress.filesDone));
   const request = await waitFor(() => core.requests[0]);
   assert.equal(request.method, "analyzeEvolution");
+  assert.equal(request.options.timeoutMs, null, "the daemon owns the pause-aware work budget");
+  assert.equal(request.options.drainAfterAbort, true);
   chunk(request, { section: "evolutionChunk", chunk: evolutionChunk(1, 3) }, false);
   chunk(request, { section: "evolutionChunk", chunk: evolutionChunk(2, 3) }, false);
   chunk(request, { section: "evolutionChunk", chunk: evolutionChunk(3, 3) }, true);

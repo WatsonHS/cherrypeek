@@ -62,7 +62,7 @@
 
 活动 / 改动 / 观察项参数带现有 `SearchQuery`，外加 `range: {startUnix, endUnix}`（半开区间）和 `bucket: "tenMinutes" | "hour" | "day" | "week" | "month"`。页内 range 与 query 的日期条件取交集；previousTotals 使用紧邻的上一个等长周期，也保留 query 条件。一天 / 周 / 月按 IANA 本地边界；周从周一开始，最多 3660 桶，跨度最多 3660 天。首桶可早于 range.startUnix，只统计 range 内提交。
 
-统计占一个独立辅助额度；历史、搜索、详情等交互请求到来会取消统计，前端可稍后重试。超过计算预算返回 `RESOURCE_LIMIT`，不返回半算完的排名。结果 `coverage: {processed, complete}` 是实际索引覆盖，不提供未知总量百分比；活动按元数据覆盖，改动和观察项按已完成的文件索引覆盖。浅克隆缺失第一父的文件统计保留为未覆盖。
+daemon 与桌面 transport 中统计读取与排除配置共用一个辅助额度，演化估算 / 分析另有一个独立额度；均不占两条交互额度。同额度重入仍返回 `BUSY`，长演化分析不会阻塞 daemon 的统计准入。2026-11-12 用户授权后，桌面 transport 也同步拆分统计 / 演化额度，保留两条独立交互和一条操作额度；不靠增加单类额度放宽并发。普通读取不再取消辅助请求：四个统计读取在线程低优先级下继续计算，估算 / 排除配置直接完成，演化分析在文件间等待交互请求结束。显式 cancel、会话 / generation 替换、关闭仓库和退出仍取消旧任务。旧顶栏 `getActivityStats` 的 main 抢占逻辑保持原样，与这里的四个统计页方法分开。超过计算预算返回 `RESOURCE_LIMIT`，不返回半算完的排名。结果 `coverage: {processed, complete}` 是实际索引覆盖，不提供未知总量百分比；活动按元数据覆盖，改动和观察项按已完成的文件索引覆盖。浅克隆缺失第一父的文件统计保留为未覆盖。
 
 路径筛选用索引中的原始路径，保留原有“命中任意父比较”的语义；文件记录尚未补完时该查询返回 `INDEX_UNAVAILABLE`，不能静默忽略路径条件。根目录路径为 `rawHex: ""`。
 
@@ -126,6 +126,7 @@ selection 为 `{kind: "file", pathHex}` / `{kind: "directory", pathHex}` / `{kin
   - `covered: {files, lines}`、`skipped: {path: GitPath, reason}[]`、`complete`（本次枚举出的可分析文件是否全部完成；不代表 skipped 也有结果）。
 - skipped.reason 为 `excluded` / `notRegularFile` / `byteLimit` / `lineLimit` / `binary` / `fileLimit`。沿用每文件 1 MiB / 20000 行限制；只跟随整文件重命名，不做跨文件复制追踪。
 - 取消返回 `CANCELLED`，main / renderer 应保留已经收到的 chunk；完成文件已写入原有 blame-cache-v1。第二次分析同版本复用缓存。Git 错误保留已发送结果，不把失败文件算成完成。
+- 调度：预选及逐文件分析在文件边界暂停，条件为 daemon 中存在任何非辅助、非操作的活动请求；每 10 ms 检查取消。daemon 的 600 秒截止只扣除这些暂停时间，其他工作与 I/O 仍计时；已超时则返回 `TIMEOUT`。完成文件的累计结果在等待前发送，暂停不清除它。`estimateEvolution` 不暂停，沿用原 600 秒截止。桌面 main 的分析 615 秒总超时已移除，由 daemon 统一管理分析工作预算；取消 / 上下文替换后仍需排空终态，5 秒未响应则关闭连接并回收核心。main 的估算 60 秒总超时不变。此处只调整内部 RequestOptions，不改协议方法、参数或响应。统计读取仍沿用 daemon 15 秒、main 60 秒截止。详见[调度验证](../validation/stats-scheduling.md)。
 - 存活展示 added / kept，不推断工作量；merge 解决产生的归属行可能使分子与排除 merge 的新增分母不完全对应，不能强行钳制成百分比。
 
 ### 与最初草案的差异汇总

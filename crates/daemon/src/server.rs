@@ -41,6 +41,8 @@ pub(crate) struct ActiveRequest {
     /// P5-01: an operation has a slot of its own, so a long fetch never uses up the two read slots.
     is_operation: bool,
     is_auxiliary: bool,
+    /// Evolution has its own auxiliary slot; a long analysis cannot starve statistics.
+    is_evolution: bool,
 }
 
 #[derive(Debug)]
@@ -415,21 +417,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 | RequestOperation::GetActivityOverview(_)
                                 | RequestOperation::GetChangeStats(_)
                         );
+                        let is_evolution = matches!(
+                            operation,
+                            RequestOperation::EstimateEvolution(_)
+                                | RequestOperation::AnalyzeEvolution(_)
+                        );
                         let mut active = requests.lock().expect("request map poisoned");
-                        if !is_operation
-                            && !is_auxiliary
-                            && !matches!(operation, RequestOperation::GetMetadataIndexStatus)
-                        {
-                            for request in active.values().filter(|r| r.is_auxiliary) {
-                                request.cancelled.store(true, Ordering::Release);
-                            }
-                        }
                         let busy = if is_operation {
                             active.values().any(|request| request.is_operation)
                         } else if is_auxiliary {
                             active
                                 .values()
-                                .any(|r| r.is_auxiliary || (!r.is_operation && r.blocks_background))
+                                .any(|r| r.is_auxiliary && r.is_evolution == is_evolution)
                         } else {
                             active
                                 .values()
@@ -469,6 +468,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 repo_id: repo_id.clone(),
                                 is_operation,
                                 is_auxiliary,
+                                is_evolution,
                                 blocks_background: !matches!(
                                     operation,
                                     RequestOperation::GetMetadataIndexStatus
@@ -769,6 +769,13 @@ fn spawn_evolution_worker(
                 &params,
                 &cancelled,
                 std::time::Instant::now() + crate::evolution::TIMEOUT,
+                &|| {
+                    requests
+                        .lock()
+                        .expect("request map poisoned")
+                        .values()
+                        .any(|r| !r.is_auxiliary && !r.is_operation)
+                },
                 &mut emit,
             )
         };
@@ -1185,6 +1192,7 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 move |_, session, cancelled, deadline| {
+                    crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
                     let stats =
                         crate::change_stats::change_stats(session, &params, cancelled, deadline)
@@ -1211,6 +1219,7 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 move |_, session, cancelled, deadline| {
+                    crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
                     let stats =
                         crate::change_stats::notable_stats(session, &params, cancelled, deadline)
@@ -1237,6 +1246,7 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 move |_, session, cancelled, deadline| {
+                    crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
                     let page =
                         crate::change_stats::stats_commits(session, &params, cancelled, deadline)
@@ -1357,6 +1367,7 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 move |_, session, cancelled, deadline| {
+                    crate::stats::prepare_worker(cancelled, deadline)?;
                     let stats =
                         crate::stats::activity_overview(session, &params, cancelled, deadline)
                             .map_err(|e| crate::details::DetailError {

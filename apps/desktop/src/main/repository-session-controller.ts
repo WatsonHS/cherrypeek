@@ -1150,7 +1150,9 @@ export class RepositorySessionController {
       let last: EvolutionChunk | undefined;
       let finished = false;
       const completion = await this.core.request("analyzeEvolution", params, contextOf(session), {
-        timeoutMs: EVOLUTION_TIMEOUT_MS,
+        // The daemon owns the 600-second work budget and excludes cooperative
+        // pauses. A main-side wall-clock deadline would cancel a valid long pause.
+        timeoutMs: null,
         signal,
         drainAfterAbort: true,
         onChunk: chunk => {
@@ -2661,8 +2663,6 @@ const FETCH_TIMEOUT_MS = 615_000;
 const STATS_TIMEOUT_MS = 60_000;
 /** A run may execute hooks (post-checkout and friends), so it gets far more than an ordinary read. */
 const OPERATION_TIMEOUT_MS = 120_000;
-/** Just over the core's own 10-minute evolution limit, so the core's answer arrives first. */
-const EVOLUTION_TIMEOUT_MS = 615_000;
 
 function oidParam(value: unknown): string | null {
   return typeof value === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/u.test(value) ? value.toLowerCase() : null;

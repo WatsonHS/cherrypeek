@@ -9,6 +9,136 @@ use std::{
     time::Instant,
 };
 
+/// Called only inside the four dedicated statistics request threads, never the
+/// dispatcher, interactive workers, indexer or operation workers. Threads exit
+/// with their request, so the priority cannot leak into a later interactive job.
+pub(crate) fn prepare_worker(
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), crate::details::DetailError> {
+    if let Err(error) = lower_thread_priority() {
+        eprintln!("commitscope-daemon: could not lower statistics thread priority: {error}");
+    }
+    let check = || {
+        active(cancelled, deadline)
+            .map_err(|e| crate::details::detail_error(e.code, &e.message, false))
+    };
+    // Deterministic integration-test gate; absent from release builds. Statistics
+    // read SQLite without a Git child, so the normal Git wrapper cannot hold them.
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("COMMITSCOPE_TEST_STATS_GATE") {
+        let path = std::path::PathBuf::from(path);
+        if path.exists() {
+            let _ = std::fs::write(path.with_extension("started"), b"started");
+            while path.exists() {
+                check()?;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    check()
+}
+
+#[cfg(target_os = "macos")]
+fn lower_thread_priority() -> std::io::Result<()> {
+    // Darwin's qos_class_t is an unsigned enum; libc does not expose this API.
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: libc::c_uint, relative: libc::c_int)
+        -> libc::c_int;
+    }
+    const QOS_CLASS_UTILITY: libc::c_uint = 0x11;
+    // SAFETY: changes only the calling pthread, with valid QoS and relative priority.
+    let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) };
+    if error == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(error))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn lower_thread_priority() -> std::io::Result<()> {
+    // Linux nice values are per-thread. who=0 selects the calling thread, not
+    // the process leader. Never raise an already lower inherited priority.
+    // SAFETY: these calls take scalar arguments and do not access Rust memory.
+    let current = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+    let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, current.max(10)) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+fn lower_thread_priority() -> std::io::Result<()> {
+    // No supported thread-local background priority API here (including other
+    // Unix platforms). POSIX nice may affect the entire process: do not use it.
+    // Leave normal priority rather than lowering interactive/index/operation work.
+    Ok(())
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "android")
+))]
+mod priority_tests {
+    use super::*;
+
+    fn current_priority() -> i32 {
+        #[cfg(target_os = "macos")]
+        {
+            unsafe extern "C" {
+                fn pthread_get_qos_class_np(
+                    thread: libc::pthread_t,
+                    class: *mut libc::c_uint,
+                    relative: *mut libc::c_int,
+                ) -> libc::c_int;
+            }
+            let mut class = 0;
+            let mut relative = 0;
+            assert_eq!(
+                unsafe {
+                    pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
+                },
+                0
+            );
+            class as i32
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        unsafe {
+            libc::getpriority(libc::PRIO_PROCESS, 0)
+        }
+    }
+
+    #[test]
+    fn statistics_priority_is_thread_local() {
+        let before = current_priority();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                lower_thread_priority().unwrap();
+                let priority = current_priority();
+                barrier.wait();
+                barrier.wait();
+                priority
+            });
+            barrier.wait();
+            let during = current_priority();
+            barrier.wait();
+            let lowered = worker.join().unwrap();
+            assert_eq!(
+                during, before,
+                "dispatcher/other workers keep their priority"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(lowered, 0x11);
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            assert_eq!(lowered, before.max(10));
+        });
+    }
+}
+
 pub(crate) fn error(code: ErrorCode, message: &str) -> IndexError {
     IndexError {
         code,

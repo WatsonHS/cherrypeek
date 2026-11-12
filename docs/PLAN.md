@@ -8,12 +8,16 @@
 
 2026-11-12 界面与接线（Claude，子代理实现后统一检查；未做人工实窗检查，M5 / M6 各任务未据此勾选）：
 - 强调色按 DESIGN「强调色调整」换为墨蓝（深浅两套），并加入统计图的五个颜色 token。
-- main / preload：接入 `getBranchSync`、`checkOperation`、`runOperation`、`openRemotePage`、四个统计读取、排除列表、`estimateEvolution` / `analyzeEvolution`。`runOperation` 与 fetch 共用操作额度；统计读取各自一个通道，新请求取代旧请求；远端网页地址由 main 根据导航快照里的远端生成，renderer 不传 URL。超时：统计与估算 60 秒，执行操作 120 秒，演化分析 615 秒。
+- main / preload：接入 `getBranchSync`、`checkOperation`、`runOperation`、`openRemotePage`、四个统计读取、排除列表、`estimateEvolution` / `analyzeEvolution`。`runOperation` 与 fetch 共用操作额度；统计读取各自一个通道，新请求取代旧请求；远端网页地址由 main 根据导航快照里的远端生成，renderer 不传 URL。超时：统计与估算 60 秒，执行操作 120 秒，演化分析最初为 615 秒（后续改为 daemon 工作预算，见下方调度跟进）。
 - 统计页（⌘4）：活动、改动、关注、演化四个分区使用真实数据；时间范围 1 小时至自定义、粒度自动或手动；排除列表编辑、目录下钻、点数字回查提交、按需演化分析（可取消并保留已到达的结果）。未做：图上框选放大；演化的路径为手动输入或从改动分区带入。
 - 基础操作：范围菜单分支行的领先 / 落后数、更新、切换、已分叉时交给 Agent；顶栏工作区项的落后数、fetch 后的“更新”；仓库弹层的分支与远端行；提交详情与分支行的“在远端网页打开”；新建分支；拒绝对话框覆盖全部 blocker；新增交接场景 `update-diverged`、`operation-blocked`、`operation-failed`、`fetch-failed`。核心未声明 `repositoryOperations` 时这些入口都不出现。
 - 检查：`pnpm typecheck`、`pnpm protocol:check`、`pnpm test:renderer`（213 项）、`pnpm test:protocol`（55 项）、`cargo test --workspace --locked`、`pnpm test:pages`（36 项）、`pnpm build`、`pnpm test:smoke:pages`、`pnpm test:smoke:scope-navigation`、`pnpm test:smoke:commit-details` 通过。新界面本身没有窗口级自动测试，新方法在 main 与真实 daemon 之间也没有端到端测试。`cargo fmt --check` 在 `crates/daemon/src/main.rs`（模块顺序）和 `history.rs` 有格式差异，未处理。
 
 2026-11-12 分工：M5 与 M6 的核心（Rust、协议生成）由 Codex 实现，界面与 main / preload 接线由 Claude 实现，两边按 [最终接口约定](implementation/m5-m6-backend-contract.md) 对齐。界面先行，后端未接入处标“占位 · 任务编号”。
+
+2026-11-12 M6 调度修复：普通读取不再取消统计 / 演化；四个统计读取降低当前线程优先级，统计和演化分为独立额度；分析在文件边界暂停，600 秒工作截止扣除暂停时长。首批未改桌面，协议和索引让路规则保持原样；桌面跟进见下一条。定向 daemon 对照 3 项、Rust workspace 119 项、协议生成检查、宿主 Node 协议 55 项与完整 pages 回归 38 项已通过；10140 提交 Prisma 仓库的 30 天 / 90 天 / 2 年九个统计读取全部完成；历史热页五组中位数空闲 4.414 ms、统计并发 4.478 ms，采样与限制见[实测报告](benchmarks/stats-scheduling.md)，证据汇总见[调度记录](validation/stats-scheduling.md)。
+
+2026-11-12 M6 桌面调度跟进（用户确认）：main transport 与 daemon 对齐为交互 2、统计 / 配置 1、演化 1、操作 1；演化不再使用 main 615 秒总超时，由 daemon 扣除暂停后计 600 秒工作预算。显式取消和会话切换仍需排空终态，5 秒未响应则回收核心；迟到的旧完成帧只用于排空。仅修改两个 main 文件，renderer / preload 保持原样。5 项新增协议测试通过，含主进程控制器 + transport + 真实 daemon 同时执行分析 / 统计 / 历史；700 秒静默等待和 5 秒取消保护使用虚拟时钟。`pnpm typecheck`、`pnpm protocol:check`、完整 `pnpm test:protocol`（60 项）与 `git diff --check` 通过，证据见[调度验证](validation/stats-scheduling.md)。
 
 2026-11-12：用户确认把统计做深并改为独立页面，新增 **M6（P6-01 至 P6-05）**，本批后端已实现，界面接线与整体验收另记，口径见 PRODUCT「统计页」。第四层（代码年龄、归属、存活）做成按需分析；需要解析代码的语义分析不做。
 
@@ -253,7 +257,7 @@
   - 文件数上限、单文件上限、二进制和排除文件均被跳过并列出；结果写明覆盖范围。
   - 复用逐行追溯的缓存，第二次分析同一版本不重跑已缓存的文件；不写被查看仓库。
   - 记录一次真实仓库上的耗时和进程树内存（区分目标与实测），据此确定文件数上限。
-  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-05-evolution.md)实现 estimate / analyze，累计推送结果，复用 blame 缓存，单独标注分母 coverage。3 项 daemon 对照通过，含独立 blame、重命名存活、全部跳过原因、缓存 gate、取消 / 交互抢占与已完成文件保留。本仓库 21 文件 / 25505 行实测估计 554 ms、冷分析 2.27 s、热分析 1.94 s，冷分析整树 RSS 18.22 MiB；见[测量报告](benchmarks/p6-05-evolution.md)。采用 200 文件保护上限，最坏规模完整分析与桌面流程未验收。
+  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-05-evolution.md)实现 estimate / analyze，累计推送结果，复用 blame 缓存，单独标注分母 coverage。3 项 daemon 对照通过，含独立 blame、重命名存活、全部跳过原因、缓存 gate、取消 / generation 替换与已完成文件保留；交互暂停与恢复验证见上述调度修复。本仓库 21 文件 / 25505 行实测估计 554 ms、冷分析 2.27 s、热分析 1.94 s，冷分析整树 RSS 18.22 MiB；见[测量报告](benchmarks/p6-05-evolution.md)。采用 200 文件保护上限，最坏规模完整分析与桌面流程未验收。
 
 ## 完成一项任务的记录格式
 

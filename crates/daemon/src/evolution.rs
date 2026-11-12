@@ -27,6 +27,90 @@ fn from_index(e: IndexError) -> DetailError {
 fn check(c: &AtomicBool, d: Instant) -> Result<(), DetailError> {
     active(c, d).map_err(from_index)
 }
+
+struct AnalysisControl<'a> {
+    cancelled: &'a AtomicBool,
+    deadline: Instant,
+    interactive_active: &'a dyn Fn() -> bool,
+}
+
+impl AnalysisControl<'_> {
+    fn file_boundary(&mut self) -> Result<(), DetailError> {
+        // Work that already exceeded its budget must not be rescued by a pause.
+        check(self.cancelled, self.deadline)?;
+        if !(self.interactive_active)() {
+            return Ok(());
+        }
+        let paused_at = Instant::now();
+        let work_deadline = self.deadline;
+        while (self.interactive_active)() {
+            // Only the cooperative wait is excluded from the 600-second work
+            // budget. Git, cache/SQLite reads, aggregation and output still count.
+            self.deadline = work_deadline + paused_at.elapsed();
+            check(self.cancelled, self.deadline)?;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.deadline = work_deadline + paused_at.elapsed();
+        check(self.cancelled, self.deadline)
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn pauses_preserve_work_budget_but_do_not_revive_expired_work() {
+        let cancelled = AtomicBool::new(false);
+        let start = Instant::now();
+        let busy = || start.elapsed() < Duration::from_millis(100);
+        let deadline = start + Duration::from_millis(40);
+        let mut control = AnalysisControl {
+            cancelled: &cancelled,
+            deadline,
+            interactive_active: &busy,
+        };
+        control.file_boundary().unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert!(control.deadline >= deadline + Duration::from_millis(90));
+        check(&cancelled, control.deadline).unwrap();
+        control.deadline = Instant::now() - Duration::from_millis(1);
+        control.interactive_active = &|| true;
+        assert_eq!(
+            control.file_boundary().unwrap_err().code,
+            ErrorCode::Timeout
+        );
+    }
+
+    #[test]
+    fn cancellation_ends_an_indefinite_pause() {
+        let cancelled = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let busy = || {
+            let _ = tx.send(());
+            true
+        };
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                AnalysisControl {
+                    cancelled: &cancelled,
+                    deadline: Instant::now() + TIMEOUT,
+                    interactive_active: &busy,
+                }
+                .file_boundary()
+            });
+            rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let start = Instant::now();
+            cancelled.store(true, Ordering::Release);
+            assert_eq!(
+                worker.join().unwrap().unwrap_err().code,
+                ErrorCode::Cancelled
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+        });
+    }
+}
 fn path_under(path: &[u8], prefix: &[u8]) -> bool {
     prefix.is_empty()
         || path == prefix
@@ -57,9 +141,10 @@ fn select(
     executable: &Path,
     session: &RepositorySession,
     p: &EvolutionParams,
-    cancelled: &AtomicBool,
-    deadline: Instant,
+    control: &mut AnalysisControl<'_>,
 ) -> Result<Selection, DetailError> {
+    control.file_boundary()?;
+    let cancelled = control.cancelled;
     validate(p, session)?;
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(from_git)?;
     let repo = Path::new(&session.discovered.info.path);
@@ -77,7 +162,14 @@ fn select(
         args.push(crate::details::raw_path_arg(&p.path_hex)?);
     }
     let out = git
-        .run(repo, &args, None, 16 * 1024 * 1024, cancelled, deadline)
+        .run(
+            repo,
+            &args,
+            None,
+            16 * 1024 * 1024,
+            cancelled,
+            control.deadline,
+        )
         .map_err(from_git)?;
     if !out.status.success() {
         return Err(git_output_error(&out.stderr));
@@ -100,7 +192,8 @@ fn select(
     };
     let mut selected = Vec::new();
     for entry in entries {
-        check(cancelled, deadline)?;
+        control.file_boundary()?;
+        let deadline = control.deadline;
         if !path_under(&entry.path, &prefix) {
             continue;
         }
@@ -159,7 +252,12 @@ pub fn estimate(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<EvolutionEstimate, DetailError> {
-    Ok(select(executable, session, p, cancelled, deadline)?.estimate)
+    let mut control = AnalysisControl {
+        cancelled,
+        deadline,
+        interactive_active: &|| false,
+    };
+    Ok(select(executable, session, p, &mut control)?.estimate)
 }
 fn in_range(time: i64, range: &Option<StatsRange>) -> bool {
     range
@@ -296,17 +394,25 @@ fn survival_added(
     )
     .map_err(from_index)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn analyze(
     executable: &Path,
     session: &RepositorySession,
     p: &EvolutionParams,
     cancelled: &AtomicBool,
     deadline: Instant,
+    interactive_active: &dyn Fn() -> bool,
     emit: &mut impl FnMut(EvolutionChunk, bool) -> bool,
 ) -> Result<(), DetailError> {
-    let selection = select(executable, session, p, cancelled, deadline)?;
+    let mut control = AnalysisControl {
+        cancelled,
+        deadline,
+        interactive_active,
+    };
+    let selection = select(executable, session, p, &mut control)?;
+    control.file_boundary()?;
     let (coverage, mut weeks, mut authors) =
-        survival_added(session, p, &selection, cancelled, deadline)?;
+        survival_added(session, p, &selection, cancelled, control.deadline)?;
     let now = (crate::details::now_unix_ms() / 1000) as i64;
     let mut result = EvolutionResult {
         as_of_unix: now,
@@ -360,7 +466,7 @@ pub fn analyze(
     };
     update(&mut result, &ownership, &weeks, &authors);
     for entry in selection.files {
-        check(cancelled, deadline)?;
+        control.file_boundary()?;
         let path = git_path(entry.path.clone());
         if !emit(
             EvolutionChunk {
@@ -385,7 +491,7 @@ pub fn analyze(
                 path_hex: path.raw_hex.clone(),
             },
             cancelled,
-            deadline,
+            control.deadline,
             &mut |chunk, _| {
                 for c in chunk.commits {
                     commits.insert(c.oid.clone(), c);
@@ -447,6 +553,7 @@ pub fn analyze(
         ) {
             return Err(detail_error(ErrorCode::Cancelled, "演化分析已取消", false));
         }
+        control.file_boundary()?;
     }
     result.complete = true;
     let chunk = EvolutionChunk {

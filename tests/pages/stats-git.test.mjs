@@ -665,7 +665,7 @@ test("P6-05 evolution agrees with independent blame, reports skipped files and r
   assert.deepEqual(await snapshotTree(f.repo), before);
 });
 
-test("P6-05 cancellation and interactive preemption reap blame while retaining completed-file progress", async (t) => {
+test("P6-05 cancellation and generation replacement reap blame while retaining completed-file progress", async (t) => {
   const f = await indexed(t, "evolution-cancel", async (repo) => {
     await commit(repo, "a.txt", "a\n", 1700000000, "feat: a");
     await commit(repo, "b.txt", "b\n", 1700000100, "feat: b");
@@ -714,7 +714,7 @@ test("P6-05 cancellation and interactive preemption reap blame while retaining c
     assert.ok(pid, "second uncached blame started");
     const at = Date.now();
     if (preempt) {
-      await client.readPage(client.session);
+      client.session = projectSession(await client.refresh(client.session));
     } else {
       client.cancel(job.requestId);
     }

@@ -21,6 +21,7 @@ const DEFAULT_QUEUE_FRAMES = 16;
 const DEFAULT_QUEUE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_PENDING = 2;
 const DEFAULT_TIMEOUT_MS = 5000;
+const CANCEL_DRAIN_TIMEOUT_MS = 5000;
 
 const { validateClient, validateServer, validateCoreReady } = validators;
 
@@ -44,13 +45,15 @@ export interface ProtocolTransportOptions {
   maxFrameBytes?: number;
   maxQueuedFrames?: number;
   maxQueuedBytes?: number;
+  /** Interactive read slots; statistics, evolution and operations each have one separate slot. */
   maxPendingRequests?: number;
   contextGate?: ViewContextGate;
   onFatal?: (error: ProtocolClientError) => void;
 }
 
 export interface RequestOptions {
-  timeoutMs?: number;
+  /** null delegates the work budget to the daemon, only for cancellable analyzeEvolution. */
+  timeoutMs?: number | null;
   signal?: AbortSignal;
   retainResultAfterAbort?: boolean;
   drainAfterAbort?: boolean;
@@ -60,13 +63,14 @@ export interface RequestOptions {
 
 export type RequestCompletion = Pick<ServerResponseMessage, "coverage" | "nextCursor">;
 
+type RequestLane = "interactive" | "statistics" | "evolution" | "operation";
+
 interface PendingRequest {
   context: RequestContext;
   gateBound: boolean;
   retainResultAfterAbort: boolean;
   drainAfterAbort: boolean;
-  /** P5-01: an operation has a slot of its own and does not count towards the read limit. */
-  operation: boolean;
+  lane: RequestLane;
   fatalOnTimeout: boolean;
   cancelRequested: boolean;
   cancelError?: ProtocolClientError;
@@ -74,7 +78,7 @@ interface PendingRequest {
   resolve: (completion: RequestCompletion) => void;
   reject: (error: ProtocolClientError) => void;
   onChunk?: (chunk: ServerResponseMessage) => void;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
   signal?: AbortSignal;
   abortHandler?: () => void;
   unregisterContext?: () => void;
@@ -186,10 +190,11 @@ export class ProtocolTransport {
     if (requestMode === "session" && (!context.repoId || !context.generation)) {
       return Promise.reject(new ProtocolClientError("STALE_CONTEXT", "当前没有可用的仓库会话"));
     }
-    const operation = OPERATION_METHODS.includes(method);
-    const pendingOperations = [...this.pending.values()].filter(request => request.operation).length;
-    if (operation ? pendingOperations > 0 : this.pending.size - pendingOperations >= this.maxPendingRequests) {
-      return Promise.reject(new ProtocolClientError("BUSY", operation ? "已有一个操作正在进行" : "读取暂时繁忙，请稍后重试", true));
+    const lane = requestLaneFor(method);
+    const pendingInLane = [...this.pending.values()].filter(request => request.lane === lane).length;
+    const laneLimit = lane === "interactive" ? this.maxPendingRequests : 1;
+    if (pendingInLane >= laneLimit) {
+      return Promise.reject(new ProtocolClientError("BUSY", lane === "operation" ? "已有一个操作正在进行" : "读取暂时繁忙，请稍后重试", true));
     }
     if (options.signal?.aborted) {
       return Promise.reject(new ProtocolClientError("CANCELLED", abortMessage(options.signal), true));
@@ -208,8 +213,11 @@ export class ProtocolTransport {
     }
 
     const requestId = this.nextRequestId();
-    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    const timeoutMs = options.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : options.timeoutMs;
+    if (timeoutMs === null && (method !== "analyzeEvolution" || !options.drainAfterAbort)) {
+      return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "仅可取消并排空的演化分析由核心管理超时"));
+    }
+    if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
       return Promise.reject(new ProtocolClientError("INVALID_REQUEST", "请求超时必须为正数"));
     }
 
@@ -219,14 +227,14 @@ export class ProtocolTransport {
         gateBound: requestMode === "session",
         retainResultAfterAbort: options.retainResultAfterAbort === true,
         drainAfterAbort: options.drainAfterAbort === true,
-        operation,
+        lane,
         fatalOnTimeout: options.fatalOnTimeout === true,
         cancelRequested: false,
         nextSequence: 0,
         resolve,
         reject,
         onChunk: options.onChunk,
-        timer: setTimeout(() => {
+        timer: timeoutMs === null ? undefined : setTimeout(() => {
           const message = `请求超时（${timeoutMs} ms）`;
           if (pending.fatalOnTimeout) this.fail(new ProtocolClientError("TIMEOUT", message, true));
           else this.cancel(requestId, "TIMEOUT", message);
@@ -334,7 +342,8 @@ export class ProtocolTransport {
       this.fail(new ProtocolClientError("PROTOCOL_ERROR", `请求 ${message.requestId} 分块序号错误：预期 ${pending.nextSequence}，收到 ${message.sequence}`));
       return;
     }
-    if (pending.gateBound && !this.contextGate.accepts(message.requestId, pending.context)) {
+    if (pending.gateBound && !this.contextGate.accepts(message.requestId, pending.context) &&
+      !(pending.drainAfterAbort && pending.cancelRequested)) {
       this.cancel(message.requestId, "STALE_CONTEXT", "请求所属的浏览上下文已切换");
       return;
     }
@@ -410,6 +419,13 @@ export class ProtocolTransport {
     if (!pending || pending.cancelRequested) return;
     pending.cancelRequested = true;
     pending.cancelError = error;
+    if (!pending.timer) {
+      // An analysis has no wall-clock request timer, but cancelling it must not
+      // leave the caller or a session transition waiting forever for a dead core.
+      pending.timer = setTimeout(() => {
+        this.fail(new ProtocolClientError("TIMEOUT", "取消演化分析后核心未返回终态", true));
+      }, CANCEL_DRAIN_TIMEOUT_MS);
+    }
     const cancelMessage = { type: "cancel", requestId } as const;
     void this.enqueue(cancelMessage).catch(writeError => this.fail(asProtocolError(writeError, "CORE_EXITED")));
   }
@@ -766,6 +782,18 @@ export function validEvolutionParams(params: unknown): boolean {
 
 /** P5-01: user-triggered operations that write to the repository or use the network; one at a time. */
 const OPERATION_METHODS = ["fetchRepository", "runOperation"];
+
+// Keep these lanes aligned with daemon admission. getActivityStats is the old
+// top-bar read and deliberately remains interactive, with its existing preemption.
+const STATISTICS_METHODS = ["getActivityOverview", "getChangeStats", "getNotableStats", "getStatsCommits", "getStatsExclusions", "setStatsExclusions"];
+const EVOLUTION_METHODS = ["estimateEvolution", "analyzeEvolution"];
+
+function requestLaneFor(method: ClientRequestMessage["method"]): RequestLane {
+  if (OPERATION_METHODS.includes(method)) return "operation";
+  if (STATISTICS_METHODS.includes(method)) return "statistics";
+  if (EVOLUTION_METHODS.includes(method)) return "evolution";
+  return "interactive";
+}
 
 /** P5-02 / P5-03 and M6: ordinary session reads that can be cancelled and drained. `runOperation` is in OPERATION_METHODS. */
 const M5_M6_READ_METHODS = [

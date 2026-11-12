@@ -981,3 +981,5 @@ async function exists(path) {
 // M5 fixed-template operation contracts and refusal snapshots.
 await import('./operations-git.test.mjs');
 await import('./stats-git.test.mjs');
+
+await import("./stats-scheduling.test.mjs");

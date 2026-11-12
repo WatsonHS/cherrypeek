@@ -1,0 +1,355 @@
+{
+  "date": "2026-11-12",
+  "repository": "/Users/huangsheng/Development/prisma",
+  "head": "6e5acbcd105b9bc3416c6fb62e262b877e1aae1f",
+  "commits": 10140,
+  "binarySha256": "f7d60c96e8030fa235d71931fdf5c61d0fd7146fee706858b866c9f8ed60da5c",
+  "environment": {
+    "platform": "darwin",
+    "release": "27.0.0",
+    "cpu": "Apple M1 Pro",
+    "logicalCpus": 10,
+    "memoryGiB": 32,
+    "git": "git version 2.54.0 (Apple Git-157)",
+    "node": "v26.0.0"
+  },
+  "sampleIntervalMs": 50,
+  "processScope": "daemon plus all descendants, excluding test Node and Electron; ps sampling may miss short-lived children; CPU is sum of ps lifetime-average %CPU, not integrated CPU time",
+  "endUnix": 1701100800,
+  "measurements": [
+    {
+      "phase": "getActivityOverview-30",
+      "days": 30,
+      "method": "getActivityOverview",
+      "elapsedMs": 21.81320799997775,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "9903cf36f04df7dd2c4cdc15df3bd6688fdaa4bb757529c5ce7bc4a6209a0eec",
+      "totals": {
+        "commits": 140,
+        "activeDays": 24,
+        "authors": 14
+      }
+    },
+    {
+      "phase": "getChangeStats-30",
+      "days": 30,
+      "method": "getChangeStats",
+      "elapsedMs": 65.20429199998034,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "0d1243bc1c9d86259b4822f8631dc3a3a646012df4d8bbd64313bb5259047951",
+      "totals": {
+        "additions": 8187,
+        "deletions": 5411,
+        "filesChanged": 932,
+        "filesAdded": 99,
+        "filesDeleted": 24,
+        "filesRenamed": 29
+      }
+    },
+    {
+      "phase": "getNotableStats-30",
+      "days": 30,
+      "method": "getNotableStats",
+      "elapsedMs": 81.15916699997615,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "27c1b87e6c9210ed9e94ecc45d4edd1b2d79c8ec98ef97ee1be41d0ad068e712"
+    },
+    {
+      "phase": "getActivityOverview-90",
+      "days": 90,
+      "method": "getActivityOverview",
+      "elapsedMs": 21.693832999968436,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "c114c41b3ed1ab8b0001016b9a0f63c5450bbb83e4529150c91d5a978ebf95d5",
+      "totals": {
+        "commits": 449,
+        "activeDays": 67,
+        "authors": 30
+      }
+    },
+    {
+      "phase": "getChangeStats-90",
+      "days": 90,
+      "method": "getChangeStats",
+      "elapsedMs": 71.9599589999998,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850",
+      "totals": {
+        "additions": 29522,
+        "deletions": 19227,
+        "filesChanged": 2823,
+        "filesAdded": 291,
+        "filesDeleted": 105,
+        "filesRenamed": 175
+      }
+    },
+    {
+      "phase": "getNotableStats-90",
+      "days": 90,
+      "method": "getNotableStats",
+      "elapsedMs": 108.71329200000037,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "d0607c5222622d1b864d5b76f078a6cb6b88e69832dd411e7b3313aecf4cb07d"
+    },
+    {
+      "phase": "getActivityOverview-730",
+      "days": 730,
+      "method": "getActivityOverview",
+      "elapsedMs": 23.565332999976818,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "5e9a4a0162fba60fc0117c7bf77507e39f7fd9677d0d47103683ce3694117af9",
+      "totals": {
+        "commits": 2709,
+        "activeDays": 552,
+        "authors": 108
+      }
+    },
+    {
+      "phase": "getChangeStats-730",
+      "days": 730,
+      "method": "getChangeStats",
+      "elapsedMs": 116.75612500001444,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "cc3cf8be0fca3efef6e23dcf5dfc10d7e7a0a41d0176415e7e7cb0c4e6d1b924",
+      "totals": {
+        "additions": 408962,
+        "deletions": 246275,
+        "filesChanged": 18932,
+        "filesAdded": 2061,
+        "filesDeleted": 559,
+        "filesRenamed": 820
+      }
+    },
+    {
+      "phase": "getNotableStats-730",
+      "days": 730,
+      "method": "getNotableStats",
+      "elapsedMs": 386.8321659999783,
+      "success": true,
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "resultSha256": "f26797a5d95db3b70898b866cb62ce38085b6da35e44d4fd06a1f3d28377cd02"
+    }
+  ],
+  "history": [
+    {
+      "pair": 1,
+      "loaded": false,
+      "phase": "history-1-idle",
+      "elapsedMs": 4.314291999966372,
+      "statisticsActiveAtCompletion": false,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5"
+    },
+    {
+      "pair": 1,
+      "loaded": true,
+      "phase": "history-1-loaded",
+      "elapsedMs": 4.533166999986861,
+      "statisticsActiveAtCompletion": true,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5",
+      "statisticsResultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850"
+    },
+    {
+      "pair": 2,
+      "loaded": false,
+      "phase": "history-2-idle",
+      "elapsedMs": 4.333749999990687,
+      "statisticsActiveAtCompletion": false,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5"
+    },
+    {
+      "pair": 2,
+      "loaded": true,
+      "phase": "history-2-loaded",
+      "elapsedMs": 4.477542000007816,
+      "statisticsActiveAtCompletion": true,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5",
+      "statisticsResultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850"
+    },
+    {
+      "pair": 3,
+      "loaded": false,
+      "phase": "history-3-idle",
+      "elapsedMs": 4.413875000027474,
+      "statisticsActiveAtCompletion": false,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5"
+    },
+    {
+      "pair": 3,
+      "loaded": true,
+      "phase": "history-3-loaded",
+      "elapsedMs": 4.510041999979876,
+      "statisticsActiveAtCompletion": true,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5",
+      "statisticsResultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850"
+    },
+    {
+      "pair": 4,
+      "loaded": false,
+      "phase": "history-4-idle",
+      "elapsedMs": 4.498707999999169,
+      "statisticsActiveAtCompletion": false,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5"
+    },
+    {
+      "pair": 4,
+      "loaded": true,
+      "phase": "history-4-loaded",
+      "elapsedMs": 4.463708000024781,
+      "statisticsActiveAtCompletion": true,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5",
+      "statisticsResultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850"
+    },
+    {
+      "pair": 5,
+      "loaded": false,
+      "phase": "history-5-idle",
+      "elapsedMs": 4.4207920000189915,
+      "statisticsActiveAtCompletion": false,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5"
+    },
+    {
+      "pair": 5,
+      "loaded": true,
+      "phase": "history-5-loaded",
+      "elapsedMs": 4.412917000008747,
+      "statisticsActiveAtCompletion": true,
+      "historySha256": "2f60e264da0efbbf0f20dcf99d06b00cafeb50919b9161b5e16f9d56bea007e5",
+      "statisticsResultSha256": "4f43f0b8085b0cae73548fd58dafc4498261efb01f5eb7ca0b931e1def2d9850"
+    }
+  ],
+  "index": {
+    "elapsedMs": 289995.406542,
+    "status": {
+      "snapshotKey": "4156b7e17b92e274b1dc1b33979abbeb8c3d46e4aa214138f3c54c62d903a127",
+      "state": "complete",
+      "coverage": {
+        "processed": 10140,
+        "complete": true
+      },
+      "diskBytes": 33103872,
+      "quotaBytes": 2147483648,
+      "error": null
+    }
+  },
+  "stderr": "",
+  "processTrees": {
+    "index": {
+      "samples": 3734,
+      "maxRssMiB": 80.734375,
+      "maxCpuPercent": 57.1,
+      "maxProcesses": 4
+    },
+    "getChangeStats-30": {
+      "samples": 1,
+      "maxRssMiB": 32.828125,
+      "maxCpuPercent": 10.3,
+      "maxProcesses": 2
+    },
+    "getNotableStats-30": {
+      "samples": 1,
+      "maxRssMiB": 37.34375,
+      "maxCpuPercent": 0.1,
+      "maxProcesses": 2
+    },
+    "getChangeStats-90": {
+      "samples": 1,
+      "maxRssMiB": 43.734375,
+      "maxCpuPercent": 0.1,
+      "maxProcesses": 2
+    },
+    "getNotableStats-90": {
+      "samples": 1,
+      "maxRssMiB": 46.90625,
+      "maxCpuPercent": 12.8,
+      "maxProcesses": 2
+    },
+    "getActivityOverview-730": {
+      "samples": 1,
+      "maxRssMiB": 52.65625,
+      "maxCpuPercent": 0.1,
+      "maxProcesses": 2
+    },
+    "getChangeStats-730": {
+      "samples": 1,
+      "maxRssMiB": 65.546875,
+      "maxCpuPercent": 10.6,
+      "maxProcesses": 2
+    },
+    "getNotableStats-730": {
+      "samples": 5,
+      "maxRssMiB": 86.609375,
+      "maxCpuPercent": 65.5,
+      "maxProcesses": 2
+    },
+    "history-1-loaded": {
+      "samples": 1,
+      "maxRssMiB": 83.46875,
+      "maxCpuPercent": 6.1,
+      "maxProcesses": 2
+    },
+    "history-2-loaded": {
+      "samples": 1,
+      "maxRssMiB": 86.28125,
+      "maxCpuPercent": 0,
+      "maxProcesses": 2
+    },
+    "history-3-loaded": {
+      "samples": 1,
+      "maxRssMiB": 89.09375,
+      "maxCpuPercent": 0.1,
+      "maxProcesses": 2
+    },
+    "history-4-loaded": {
+      "samples": 1,
+      "maxRssMiB": 91.90625,
+      "maxCpuPercent": 12,
+      "maxProcesses": 2
+    },
+    "history-5-loaded": {
+      "samples": 1,
+      "maxRssMiB": 94.71875,
+      "maxCpuPercent": 0.2,
+      "maxProcesses": 2
+    }
+  },
+  "sampleCount": 3750,
+  "actualSampleIntervalMedianMs": 77.56908399998792,
+  "rawEvidence": "output/benchmarks/stats-scheduling/prisma.json",
+  "macOS": "27.0.1",
+  "model": "MacBookPro18,3"
+}
