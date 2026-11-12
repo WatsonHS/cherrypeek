@@ -22,6 +22,8 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 
 窗口窄于 1100px 时列表占满，点击提交或在列表按 Enter 打开右侧详情抽屉，顶部可切换前后提交；Esc、关闭按钮或点遮罩返回列表。搜索结果同样适用，调整窗口宽度会保留选择和滚动位置。见 [P4-06 实现记录](implementation/p4-06-narrow-window.md)。
 
+2026-11-12 后端批次：P5-02 / P5-03 已有分支同步、预检 / 执行和净化远端地址；P6-01 至 P6-05 已有统计、schema 2 文件索引及按需演化分析。桌面接线与实窗验收由并行界面工作继续。最终字段、回归结果与未验证范围见 [接口约定](implementation/m5-m6-backend-contract.md) 和 [后端验证](validation/m5-m6-backend.md)。十万实际文件改动提交的索引体积增加 33.3%，构建耗时增加 171.4%，属于本次实测成本，不作为发布性能通过结论。
+
 ## 已确定的方向
 
 - 独立新建项目，不 fork GitComet，不引入或复制其后端及状态层代码。
@@ -84,8 +86,17 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 | [P3-01 代码级计划](implementation/p3-01-path-history.md) | 字面文件 / 目录筛选、冻结快照补全与命中父说明 |
 | [M3 功能批次](implementation/p3-02-05-mvp-batch.md) | 统计、外部更新和 Agent 提示词的代码计划 |
 | [M3 主流程记录](validation/m3-mvp.md) | 定向检查、实窗闭环与未验证范围 |
+| [M5 / M6 后端接口](implementation/m5-m6-backend-contract.md) | 最终方法、字段、协议差异与预算，供桌面接线 |
+| [P5-02 / P5-03 后端计划](implementation/p5-02-03-backend.md) | 预检、快进、切换、新建、配置与拒绝零写入 |
+| [P6-01 计划](implementation/p6-01-activity-overview.md) | 元数据活动统计与辅助调度 |
+| [P6-02 计划](implementation/p6-02-file-change-index.md) | schema 升级、第一父文件记录与续建 |
+| [P6-03 / P6-04 计划](implementation/p6-03-04-change-statistics.md) | 改动量、排除列表、观察项与提交回查 |
+| [P6-05 计划](implementation/p6-05-evolution.md) | 按需估计、blame 累计结果、覆盖与缓存 |
+| [M5 / M6 后端验证](validation/m5-m6-backend.md) | 各任务对照证据、完整检查与未验证范围 |
+| [P6-02 索引测量](benchmarks/p6-02-file-change-index.md) | 十万实际改动提交的 schema 1 / 2 成本 |
+| [P6-05 演化测量](benchmarks/p6-05-evolution.md) | 真实仓库的估计、冷 / 热分析与整树内存 |
 
-建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。2026-11-08 确认的后续规划 `P4-09` 工作区状态与改动展示、`P4-10` 文件二级页面，以及随后拆出的 `P4-11` diff 显示增强、`P4-12` 逐行追溯，已于 2026-11-09 实现并验收。2026-11-12 确认加入基础 Git 操作（fetch、快进更新、切换分支、新建分支、复制与打开），排为 M5 的 `P5-01` 至 `P5-05`；其中手动 Fetch（P5-01）和复制、在 Finder / 终端 / 编辑器中打开（P5-05）已接入但未完成验收，快进更新、切换与新建分支尚未开始；冲突、分叉等情况不由 App 处理，提示交给 Agent。同日确认把统计做深并改为独立页面，排为 M6 的 `P6-01` 至 `P6-05`，尚未开始。`M4 / P4-01` 性能达标、边界恢复与发行验收继续保留，具体范围和完成条件见[实施计划](PLAN.md)。
+建议按产品范围 → 技术架构 → 路线图 → 实施计划阅读。2026-11-08 确认的后续规划 `P4-09` 工作区状态与改动展示、`P4-10` 文件二级页面，以及随后拆出的 `P4-11` diff 显示增强、`P4-12` 逐行追溯，已于 2026-11-09 实现并验收。2026-11-12 确认加入基础 Git 操作（fetch、快进更新、切换分支、新建分支、复制与打开），排为 M5 的 `P5-01` 至 `P5-05`；其中手动 Fetch（P5-01）和复制、在 Finder / 终端 / 编辑器中打开（P5-05）已接入但未完成验收，快进更新、切换与新建分支后端已实现，桌面接线另记；冲突、分叉等情况不由 App 处理，提示交给 Agent。同日确认把统计做深并改为独立页面，排为 M6 的 `P6-01` 至 `P6-05`，后端已实现并完成对照，整体任务仍需桌面验收。`M4 / P4-01` 性能达标、边界恢复与发行验收继续保留，具体范围和完成条件见[实施计划](PLAN.md)。
 
 ## macOS 本机打包
 
@@ -125,6 +136,7 @@ pnpm test:sessions
 pnpm test:history
 pnpm test:navigation
 pnpm test:indexing
+pnpm test:pages
 pnpm test:renderer
 pnpm test:repository
 pnpm test:smoke
@@ -143,6 +155,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 `pnpm protocol:generate` 从 Rust 类型导出三份 schema 和 TypeScript，`protocol:check` 只校验产物一致性。`test:protocol` 覆盖真实 daemon、受控故障协议和慢 Git 子进程回收。Smoke 会启动并关闭真实 Electron 窗口，覆盖正常启动、失败状态、隔离与进程退出；本地截图写入已忽略的 `output/playwright/`。`test:repository` 自动生成临时真实 Git 仓库，完成独立字段对照、只读快照与 Electron 界面验证。性能实测见首屏基线；发布预算尚未验收。
+
+M5 / M6 daemon 对照已并入 `pnpm test:pages`；可用 `pnpm test:pages --test-name-pattern=M5` 或 `pnpm test:pages --test-name-pattern=P6` 定向运行。修改后端提交前运行 `cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm test:pages`、`pnpm test:protocol`；涉及索引再运行 `pnpm test:indexing`。`tests/benchmarks/` 的测量命令与目标目录规则见上述两份性能报告。
 
 `test:renderer` 用假接口测试会话、翻页与刷新状态（判旧、取消、记录时机），不启动 Electron。`test:sessions` 只构建 daemon，使用临时 Git fixture 与独立应用数据目录验证会话 / 查看记录；`test:history` 验证真实游标完整遍历、淘汰重放、取消和刷新，这些检查不启动 UI。`test:navigation` 使用临时真实仓库对照多范围历史、默认基准、合入状态、worktree 和失败恢复。`test:smoke:history` 使用已构建的 Electron 应用验证翻页、刷新、选择与锚点；`test:smoke:virtual-history` 验证 2205 条正反向遍历、1800 条主列表上限、虚拟 DOM、键盘、复制及只读快照；`test:smoke:scope-navigation` 验证真实选择器、多范围切换、失败保留与恢复、原生窗口内容边界；先运行 `pnpm build`。滚动测量命令和 release 标记诊断见 [P1-03 基线](benchmarks/p1-03-history-scroll.md)，应与构建、测试串行执行。旧预览的纯 headless 回归可运行 `node scripts/test-repository.mjs`。应用通过 main 把 `userData/repository-state` 传给核心；直接运行 daemon 时，未配置 `COMMITSCOPE_APP_DATA_DIR` 会禁用持久化，仍可浏览。存储不会因打开仓库就标记已读，调用方需在真实内容展示后显式记录查看。
 
