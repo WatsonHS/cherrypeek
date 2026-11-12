@@ -40,6 +40,7 @@ pub(crate) struct ActiveRequest {
     pub(crate) blocks_background: bool,
     /// P5-01: an operation has a slot of its own, so a long fetch never uses up the two read slots.
     is_operation: bool,
+    is_auxiliary: bool,
 }
 
 #[derive(Debug)]
@@ -62,6 +63,14 @@ enum RequestOperation {
     ListSearchIdentities(SearchIdentitiesParams),
     ListSearchPaths(ListSearchPathsParams),
     GetActivityStats(GetActivityStatsParams),
+    GetActivityOverview(commitscope_core::GetActivityOverviewParams),
+    EstimateEvolution(commitscope_core::EvolutionParams),
+    AnalyzeEvolution(commitscope_core::EvolutionParams),
+    SetStatsExclusions(commitscope_core::SetStatsExclusionsParams),
+    GetStatsExclusions(commitscope_core::EmptyParams),
+    GetStatsCommits(commitscope_core::GetStatsCommitsParams),
+    GetNotableStats(commitscope_core::GetActivityOverviewParams),
+    GetChangeStats(commitscope_core::GetChangeStatsParams),
     ObserveRepository,
     DiffRefSnapshots,
     GetHandoffFacts(GetHandoffFactsParams),
@@ -80,6 +89,9 @@ enum RequestOperation {
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
     FetchRepository(commitscope_core::FetchRepositoryParams),
+    GetBranchSync(commitscope_core::GetBranchSyncParams),
+    CheckOperation(commitscope_core::OperationParams),
+    RunOperation(commitscope_core::OperationParams),
     RecordRepositoryView,
     CloseRepository,
     ListRecentRepositories,
@@ -387,15 +399,41 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             None
                         };
 
-                        let is_operation =
-                            matches!(operation, RequestOperation::FetchRepository(_));
+                        let is_operation = matches!(
+                            operation,
+                            RequestOperation::FetchRepository(_)
+                                | RequestOperation::RunOperation(_)
+                        );
+                        let is_auxiliary = matches!(
+                            operation,
+                            RequestOperation::EstimateEvolution(_)
+                                | RequestOperation::AnalyzeEvolution(_)
+                                | RequestOperation::SetStatsExclusions(_)
+                                | RequestOperation::GetStatsExclusions(_)
+                                | RequestOperation::GetStatsCommits(_)
+                                | RequestOperation::GetNotableStats(_)
+                                | RequestOperation::GetActivityOverview(_)
+                                | RequestOperation::GetChangeStats(_)
+                        );
                         let mut active = requests.lock().expect("request map poisoned");
+                        if !is_operation
+                            && !is_auxiliary
+                            && !matches!(operation, RequestOperation::GetMetadataIndexStatus)
+                        {
+                            for request in active.values().filter(|r| r.is_auxiliary) {
+                                request.cancelled.store(true, Ordering::Release);
+                            }
+                        }
                         let busy = if is_operation {
                             active.values().any(|request| request.is_operation)
+                        } else if is_auxiliary {
+                            active
+                                .values()
+                                .any(|r| r.is_auxiliary || (!r.is_operation && r.blocks_background))
                         } else {
                             active
                                 .values()
-                                .filter(|request| !request.is_operation)
+                                .filter(|request| !request.is_operation && !request.is_auxiliary)
                                 .count()
                                 >= MAX_ACTIVE_REQUESTS
                         };
@@ -430,6 +468,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 cancelled: Arc::clone(&cancelled),
                                 repo_id: repo_id.clone(),
                                 is_operation,
+                                is_auxiliary,
                                 blocks_background: !matches!(
                                     operation,
                                     RequestOperation::GetMetadataIndexStatus
@@ -535,6 +574,14 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ListSearchIdentities(_)
             | RequestOperation::ListSearchPaths(_)
             | RequestOperation::GetActivityStats(_)
+            | RequestOperation::GetActivityOverview(_)
+            | RequestOperation::EstimateEvolution(_)
+            | RequestOperation::AnalyzeEvolution(_)
+            | RequestOperation::SetStatsExclusions(_)
+            | RequestOperation::GetStatsExclusions(_)
+            | RequestOperation::GetStatsCommits(_)
+            | RequestOperation::GetNotableStats(_)
+            | RequestOperation::GetChangeStats(_)
             | RequestOperation::ObserveRepository
             | RequestOperation::DiffRefSnapshots
             | RequestOperation::GetHandoffFacts(_)
@@ -553,6 +600,9 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ListPathChanges(_)
             | RequestOperation::ReadBlame(_)
             | RequestOperation::FetchRepository(_)
+            | RequestOperation::GetBranchSync(_)
+            | RequestOperation::CheckOperation(_)
+            | RequestOperation::RunOperation(_)
             | RequestOperation::RecordRepositoryView
             | RequestOperation::CloseRepository
     )
@@ -622,6 +672,103 @@ fn spawn_blame_worker(
                 &params,
                 &cancelled,
                 std::time::Instant::now() + crate::blame::BLAME_TIMEOUT,
+                &mut emit,
+            )
+        };
+        if let Err(error) = result {
+            if oversized {
+                send_terminal_error(
+                    &sender,
+                    &shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    ErrorCode::ResourceLimit,
+                    "Blame chunk exceeds the 512 KiB target".into(),
+                    false,
+                );
+            } else if error.code == ErrorCode::Cancelled || cancelled.load(Ordering::Acquire) {
+                finish_cancelled(&sender, &shutdown, &request_id, repo_id, generation);
+            } else {
+                send_terminal_error(
+                    &sender,
+                    &shutdown,
+                    Some(request_id.clone()),
+                    repo_id,
+                    generation,
+                    error.code,
+                    error.message,
+                    error.retryable,
+                );
+            }
+        }
+        remove_request(&requests, &request_id, &cancelled);
+    }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_evolution_worker(
+    workers: &mut Vec<JoinHandle<()>>,
+    sender: SyncSender<OutFrame>,
+    shutdown: Arc<AtomicBool>,
+    requests: ActiveRequests,
+    request_id: String,
+    repo_id: Option<String>,
+    generation: Option<String>,
+    cancelled: Arc<AtomicBool>,
+    git_path: Option<std::path::PathBuf>,
+    session: Arc<session::RepositorySession>,
+    params: commitscope_core::EvolutionParams,
+) {
+    workers.push(thread::spawn(move || {
+        let Some(git_path) = git_path else {
+            send_terminal_error(
+                &sender,
+                &shutdown,
+                Some(request_id.clone()),
+                repo_id,
+                generation,
+                ErrorCode::GitUnavailable,
+                "Git executable was not found".into(),
+                false,
+            );
+            remove_request(&requests, &request_id, &cancelled);
+            return;
+        };
+        let mut sequence = 0_u32;
+        let mut processed = 0_u32;
+        let mut oversized = false;
+        let result = {
+            let mut emit = |chunk: commitscope_core::EvolutionChunk, done: bool| {
+                processed = chunk.progress.files_done;
+                let message = ServerMessage::Response {
+                    request_id: request_id.clone(),
+                    repo_id: repo_id.clone(),
+                    generation: generation.clone(),
+                    sequence,
+                    done,
+                    coverage: Coverage {
+                        complete: done,
+                        processed,
+                    },
+                    next_cursor: None,
+                    data: ResponseData::EvolutionChunk { chunk },
+                };
+                if serde_json::to_vec(&message)
+                    .map_or(true, |bytes| bytes.len() > RESPONSE_TARGET_BYTES)
+                {
+                    oversized = true;
+                    return false;
+                }
+                sequence += 1;
+                send_task_message(&sender, &shutdown, &cancelled, &message)
+            };
+            crate::evolution::analyze(
+                &git_path,
+                &session,
+                &params,
+                &cancelled,
+                std::time::Instant::now() + crate::evolution::TIMEOUT,
                 &mut emit,
             )
         };
@@ -1024,6 +1171,203 @@ fn dispatch_request(
                 },
             );
         }
+        RequestOperation::GetChangeStats(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let _ = (&params, cancelled, deadline);
+                    let stats =
+                        crate::change_stats::change_stats(session, &params, cancelled, deadline)
+                            .map_err(|e| crate::details::DetailError {
+                                code: e.code,
+                                message: e.message,
+                                retryable: false,
+                            })?;
+                    Ok((ResponseData::ChangeStats { stats }, 1))
+                },
+            );
+        }
+        RequestOperation::GetNotableStats(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let _ = (&params, cancelled, deadline);
+                    let stats =
+                        crate::change_stats::notable_stats(session, &params, cancelled, deadline)
+                            .map_err(|e| crate::details::DetailError {
+                            code: e.code,
+                            message: e.message,
+                            retryable: false,
+                        })?;
+                    Ok((ResponseData::NotableStats { stats }, 1))
+                },
+            );
+        }
+        RequestOperation::GetStatsCommits(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let _ = (&params, cancelled, deadline);
+                    let page =
+                        crate::change_stats::stats_commits(session, &params, cancelled, deadline)
+                            .map_err(|e| crate::details::DetailError {
+                            code: e.code,
+                            message: e.message,
+                            retryable: false,
+                        })?;
+                    Ok((ResponseData::StatsCommitPage { page }, 1))
+                },
+            );
+        }
+        RequestOperation::GetStatsExclusions(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let _ = (&params, cancelled, deadline);
+                    let result = crate::change_stats::exclusions(session).map_err(|e| {
+                        crate::details::DetailError {
+                            code: e.code,
+                            message: e.message,
+                            retryable: false,
+                        }
+                    })?;
+                    Ok((ResponseData::StatsExclusions { result }, 1))
+                },
+            );
+        }
+        RequestOperation::SetStatsExclusions(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let _ = (&params, cancelled, deadline);
+                    let result =
+                        crate::change_stats::set_exclusions(session, &params).map_err(|e| {
+                            crate::details::DetailError {
+                                code: e.code,
+                                message: e.message,
+                                retryable: false,
+                            }
+                        })?;
+                    Ok((ResponseData::StatsExclusions { result }, 1))
+                },
+            );
+        }
+        RequestOperation::EstimateEvolution(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, _| {
+                    let estimate = crate::evolution::estimate(
+                        git,
+                        session,
+                        &params,
+                        cancelled,
+                        std::time::Instant::now() + crate::evolution::TIMEOUT,
+                    )?;
+                    Ok((ResponseData::EvolutionEstimate { estimate }, 1))
+                },
+            );
+        }
+        RequestOperation::AnalyzeEvolution(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_evolution_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                params,
+            );
+        }
+        RequestOperation::GetActivityOverview(params) => {
+            let session = bound_session.expect("checked session");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |_, session, cancelled, deadline| {
+                    let stats =
+                        crate::stats::activity_overview(session, &params, cancelled, deadline)
+                            .map_err(|e| crate::details::DetailError {
+                                code: e.code,
+                                message: e.message,
+                                retryable: false,
+                            })?;
+                    Ok((ResponseData::ActivityOverview { stats }, 1))
+                },
+            );
+        }
         RequestOperation::GetActivityStats(params) => {
             let session = bound_session.expect("session context was checked before dispatch");
             let request_map = Arc::clone(requests);
@@ -1400,6 +1744,69 @@ fn dispatch_request(
                 git_path.map(std::path::Path::to_path_buf),
                 session,
                 params,
+            );
+        }
+        RequestOperation::GetBranchSync(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let result = crate::operations::get_branch_sync(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::BranchSync { result }, 1))
+                },
+            );
+        }
+        RequestOperation::CheckOperation(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let result = crate::operations::check_operation(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::OperationCheck { result }, 1))
+                },
+            );
+        }
+        RequestOperation::RunOperation(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let result = crate::operations::run_operation(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::OperationRun { result }, 1))
+                },
             );
         }
         RequestOperation::FetchRepository(params) => {
@@ -2273,6 +2680,14 @@ fn validate_request(
         | "listSearchIdentities"
         | "listSearchPaths"
         | "getActivityStats"
+        | "getActivityOverview"
+        | "estimateEvolution"
+        | "analyzeEvolution"
+        | "setStatsExclusions"
+        | "getStatsExclusions"
+        | "getStatsCommits"
+        | "getNotableStats"
+        | "getChangeStats"
         | "observeRepository"
         | "diffRefSnapshots"
         | "getHandoffFacts"
@@ -2291,6 +2706,9 @@ fn validate_request(
         | "listPathChanges"
         | "readBlame"
         | "fetchRepository"
+        | "getBranchSync"
+        | "checkOperation"
+        | "runOperation"
         | "recordRepositoryView"
         | "closeRepository"
             if session_context =>
@@ -2399,6 +2817,86 @@ fn validate_request(
                             )
                         })
                 }
+                "getChangeStats" => {
+                    serde_json::from_value::<commitscope_core::GetChangeStatsParams>(params.clone())
+                        .map(RequestOperation::GetChangeStats)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "getChangeStats params 无效".into(),
+                            )
+                        })
+                }
+                "getNotableStats" => serde_json::from_value::<
+                    commitscope_core::GetActivityOverviewParams,
+                >(params.clone())
+                .map(RequestOperation::GetNotableStats)
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        "getNotableStats params 无效".into(),
+                    )
+                }),
+                "getStatsCommits" => serde_json::from_value::<
+                    commitscope_core::GetStatsCommitsParams,
+                >(params.clone())
+                .map(RequestOperation::GetStatsCommits)
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        "getStatsCommits params 无效".into(),
+                    )
+                }),
+                "getStatsExclusions" => {
+                    serde_json::from_value::<commitscope_core::EmptyParams>(params.clone())
+                        .map(RequestOperation::GetStatsExclusions)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "getStatsExclusions params 无效".into(),
+                            )
+                        })
+                }
+                "setStatsExclusions" => serde_json::from_value::<
+                    commitscope_core::SetStatsExclusionsParams,
+                >(params.clone())
+                .map(RequestOperation::SetStatsExclusions)
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        "setStatsExclusions params 无效".into(),
+                    )
+                }),
+                "estimateEvolution" => {
+                    serde_json::from_value::<commitscope_core::EvolutionParams>(params.clone())
+                        .map(RequestOperation::EstimateEvolution)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "estimateEvolution params 无效".into(),
+                            )
+                        })
+                }
+                "analyzeEvolution" => {
+                    serde_json::from_value::<commitscope_core::EvolutionParams>(params.clone())
+                        .map(RequestOperation::AnalyzeEvolution)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "analyzeEvolution params 无效".into(),
+                            )
+                        })
+                }
+                "getActivityOverview" => serde_json::from_value::<
+                    commitscope_core::GetActivityOverviewParams,
+                >(params.clone())
+                .map(RequestOperation::GetActivityOverview)
+                .map_err(|_| {
+                    (
+                        ErrorCode::InvalidRequest,
+                        "getActivityOverview params 无效".into(),
+                    )
+                }),
                 "getActivityStats" => {
                     serde_json::from_value::<GetActivityStatsParams>(params.clone())
                         .map(RequestOperation::GetActivityStats)
@@ -2569,6 +3067,31 @@ fn validate_request(
                 "readBlame" => serde_json::from_value::<ReadBlameParams>(params.clone())
                     .map(RequestOperation::ReadBlame)
                     .map_err(|_| (ErrorCode::InvalidRequest, "readBlame params 无效".into())),
+                "getBranchSync" => {
+                    serde_json::from_value::<commitscope_core::GetBranchSyncParams>(params.clone())
+                        .map(RequestOperation::GetBranchSync)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "getBranchSync params 无效".into(),
+                            )
+                        })
+                }
+                "checkOperation" => {
+                    serde_json::from_value::<commitscope_core::OperationParams>(params.clone())
+                        .map(RequestOperation::CheckOperation)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "checkOperation params 无效".into(),
+                            )
+                        })
+                }
+                "runOperation" => {
+                    serde_json::from_value::<commitscope_core::OperationParams>(params.clone())
+                        .map(RequestOperation::RunOperation)
+                        .map_err(|_| (ErrorCode::InvalidRequest, "runOperation params 无效".into()))
+                }
                 "fetchRepository" => serde_json::from_value::<
                     commitscope_core::FetchRepositoryParams,
                 >(params.clone())
@@ -2613,6 +3136,14 @@ fn validate_request(
         | "listSearchIdentities"
         | "listSearchPaths"
         | "getActivityStats"
+        | "getActivityOverview"
+        | "estimateEvolution"
+        | "analyzeEvolution"
+        | "setStatsExclusions"
+        | "getStatsExclusions"
+        | "getStatsCommits"
+        | "getNotableStats"
+        | "getChangeStats"
         | "observeRepository"
         | "diffRefSnapshots"
         | "getHandoffFacts"
@@ -2631,6 +3162,9 @@ fn validate_request(
         | "listPathChanges"
         | "readBlame"
         | "fetchRepository"
+        | "getBranchSync"
+        | "checkOperation"
+        | "runOperation"
         | "recordRepositoryView"
         | "closeRepository" => Err((ErrorCode::StaleContext, "仓库会话上下文缺失或无效".into())),
         "getRuntimeInfo"

@@ -1,3 +1,7 @@
+mod stats;
+pub use stats::*;
+mod operations;
+pub use operations::*;
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -294,6 +298,10 @@ pub enum Capability {
     HistoryGraph,
     CommitDetails,
     ActivityStats,
+    ActivityOverview,
+    ChangeStats,
+    NotableStats,
+    Evolution,
     RepositoryObservation,
     HandoffFacts,
     /// P4-09. Declared in `CoreReady` only once the daemon implements the workspace reads.
@@ -341,6 +349,10 @@ impl CoreReady {
                 Capability::HistoryGraph,
                 Capability::CommitDetails,
                 Capability::ActivityStats,
+                Capability::ActivityOverview,
+                Capability::ChangeStats,
+                Capability::NotableStats,
+                Capability::Evolution,
                 Capability::RepositoryObservation,
                 Capability::HandoffFacts,
                 Capability::WorkspaceStatus,
@@ -413,6 +425,14 @@ pub enum RequestParams {
     ReadDiff(ReadDiffParams),
     ListSearchPaths(ListSearchPathsParams),
     GetActivityStats(GetActivityStatsParams),
+    GetActivityOverview(GetActivityOverviewParams),
+    GetChangeStats(GetChangeStatsParams),
+    GetNotableStats(GetActivityOverviewParams),
+    GetStatsExclusions(EmptyParams),
+    SetStatsExclusions(SetStatsExclusionsParams),
+    GetStatsCommits(GetStatsCommitsParams),
+    EstimateEvolution(EvolutionParams),
+    AnalyzeEvolution(EvolutionParams),
     ObserveRepository(EmptyParams),
     DiffRefSnapshots(EmptyParams),
     GetHandoffFacts(GetHandoffFactsParams),
@@ -429,6 +449,9 @@ pub enum RequestParams {
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
     FetchRepository(FetchRepositoryParams),
+    GetBranchSync(GetBranchSyncParams),
+    CheckOperation(OperationParams),
+    RunOperation(OperationParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1836,52 +1859,129 @@ pub struct Coverage {
 #[serde(rename_all_fields = "camelCase")]
 #[serde(tag = "section")]
 pub enum ResponseData {
+    EvolutionEstimate {
+        estimate: EvolutionEstimate,
+    },
+    EvolutionChunk {
+        chunk: EvolutionChunk,
+    },
+    ChangeStats {
+        stats: ChangeStats,
+    },
+    NotableStats {
+        stats: NotableStats,
+    },
+    StatsExclusions {
+        result: StatsExclusions,
+    },
+    StatsCommitPage {
+        page: StatsCommitPage,
+    },
+    ActivityOverview {
+        stats: ActivityOverview,
+    },
     #[serde(rename = "core")]
-    Core { core_version: String, pid: u32 },
+    Core {
+        core_version: String,
+        pid: u32,
+    },
     #[serde(rename = "metadataIndex")]
-    MetadataIndex { status: MetadataIndexStatus },
+    MetadataIndex {
+        status: MetadataIndexStatus,
+    },
     #[serde(rename = "searchPage")]
-    SearchPage { page: SearchPage },
+    SearchPage {
+        page: SearchPage,
+    },
     #[serde(rename = "searchIdentities")]
-    SearchIdentities { result: SearchIdentities },
+    SearchIdentities {
+        result: SearchIdentities,
+    },
     #[serde(rename = "searchPaths")]
-    SearchPaths { paths: SearchPaths },
+    SearchPaths {
+        paths: SearchPaths,
+    },
     #[serde(rename = "activityStats")]
-    ActivityStats { stats: ActivityStats },
+    ActivityStats {
+        stats: ActivityStats,
+    },
+    BranchSync {
+        result: BranchSyncResult,
+    },
+    OperationCheck {
+        result: OperationCheck,
+    },
+    OperationRun {
+        result: OperationRun,
+    },
     #[serde(rename = "repositoryObservation")]
-    RepositoryObservation { observation: RepositoryObservation },
+    RepositoryObservation {
+        observation: RepositoryObservation,
+    },
     #[serde(rename = "refSnapshotDiff")]
-    RefSnapshotDiff { diff: RefSnapshotDiff },
+    RefSnapshotDiff {
+        diff: RefSnapshotDiff,
+    },
     #[serde(rename = "handoffFacts")]
-    HandoffFacts { facts: HandoffFacts },
+    HandoffFacts {
+        facts: HandoffFacts,
+    },
     #[serde(rename = "commitDetails")]
-    CommitDetails { details: CommitDetails },
+    CommitDetails {
+        details: CommitDetails,
+    },
     #[serde(rename = "changedFiles")]
-    ChangedFiles { page: ChangedFilesPage },
+    ChangedFiles {
+        page: ChangedFilesPage,
+    },
     #[serde(rename = "mergeCommits")]
-    MergeCommits { page: MergeCommitsPage },
+    MergeCommits {
+        page: MergeCommitsPage,
+    },
     #[serde(rename = "branchesContaining")]
-    BranchesContaining { result: BranchesContainingResult },
+    BranchesContaining {
+        result: BranchesContainingResult,
+    },
     #[serde(rename = "fileDiff")]
-    FileDiff { diff: FileDiff },
+    FileDiff {
+        diff: FileDiff,
+    },
     #[serde(rename = "workspaceStatus")]
-    WorkspaceStatus { status: WorkspaceStatus },
+    WorkspaceStatus {
+        status: WorkspaceStatus,
+    },
     #[serde(rename = "workspaceDiff")]
-    WorkspaceDiff { diff: WorkspaceDiff },
+    WorkspaceDiff {
+        diff: WorkspaceDiff,
+    },
     #[serde(rename = "workspaceFile")]
-    WorkspaceFile { file: WorkspaceFile },
+    WorkspaceFile {
+        file: WorkspaceFile,
+    },
     #[serde(rename = "treePage")]
-    TreePage { page: TreePage },
+    TreePage {
+        page: TreePage,
+    },
     #[serde(rename = "fileContent")]
-    FileContent { content: FileContent },
+    FileContent {
+        content: FileContent,
+    },
     #[serde(rename = "fileHistory")]
-    FileHistory { page: FileHistoryPage },
+    FileHistory {
+        page: FileHistoryPage,
+    },
     #[serde(rename = "blameChunk")]
-    BlameChunk { chunk: BlameChunk },
+    BlameChunk {
+        chunk: BlameChunk,
+    },
     #[serde(rename = "repositoryFetched")]
-    RepositoryFetched { result: FetchResult },
+    RepositoryFetched {
+        result: FetchResult,
+    },
     #[serde(rename = "git")]
-    Git { git: GitInfo },
+    Git {
+        git: GitInfo,
+    },
     #[serde(rename = "repository")]
     Repository {
         repository: RepositoryInfo,
@@ -1894,11 +1994,18 @@ pub enum ResponseData {
         has_more: bool,
     },
     #[serde(rename = "repositorySession")]
-    RepositorySession { session: RepositorySessionInfo },
+    RepositorySession {
+        session: RepositorySessionInfo,
+    },
     #[serde(rename = "repositoryViewRecorded")]
-    RepositoryViewRecorded { saved: bool, status: StoreStatus },
+    RepositoryViewRecorded {
+        saved: bool,
+        status: StoreStatus,
+    },
     #[serde(rename = "repositoryClosed")]
-    RepositoryClosed { closed: bool },
+    RepositoryClosed {
+        closed: bool,
+    },
     #[serde(rename = "recentRepositories")]
     RecentRepositories {
         repositories: Vec<RecentRepository>,
@@ -1925,11 +2032,17 @@ pub enum ResponseData {
         last_seen_divider_oid: Option<String>,
     },
     #[serde(rename = "historyDateLocation")]
-    HistoryDateLocation { location: HistoryDateLocation },
+    HistoryDateLocation {
+        location: HistoryDateLocation,
+    },
     #[serde(rename = "repositoryNavigation")]
-    RepositoryNavigation { navigation: RepositoryNavigation },
+    RepositoryNavigation {
+        navigation: RepositoryNavigation,
+    },
     #[serde(rename = "refMergeStatus")]
-    RefMergeStatus { result: RefMergeStatusResult },
+    RefMergeStatus {
+        result: RefMergeStatusResult,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2085,6 +2198,9 @@ pub struct DefaultBase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RepositoryNavigation {
+    pub remotes: Vec<RemoteInfo>,
+    pub branch_upstreams: Vec<BranchUpstream>,
+    pub last_fetch_unix_ms: Option<u64>,
     #[schemars(length(max = 2000))]
     pub refs: Vec<RefInfo>,
     pub refs_truncated: bool,

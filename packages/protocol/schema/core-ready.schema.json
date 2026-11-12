@@ -17,6 +17,10 @@
             "historyGraph",
             "commitDetails",
             "activityStats",
+            "activityOverview",
+            "changeStats",
+            "notableStats",
+            "evolution",
             "repositoryObservation",
             "handoffFacts"
           ],

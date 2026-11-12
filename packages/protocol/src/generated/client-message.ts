@@ -37,6 +37,11 @@ export type RequestParams =
   | ReadDiffParams
   | ListSearchPathsParams
   | GetActivityStatsParams
+  | GetActivityOverviewParams
+  | GetChangeStatsParams
+  | SetStatsExclusionsParams
+  | GetStatsCommitsParams
+  | EvolutionParams
   | GetHandoffFactsParams
   | ReadWorkspaceStatusParams
   | ReadWorkspaceDiffParams
@@ -47,7 +52,9 @@ export type RequestParams =
   | ReadFileChangeParams
   | ListPathChangesParams
   | ReadBlameParams
-  | FetchRepositoryParams;
+  | FetchRepositoryParams
+  | GetBranchSyncParams
+  | OperationParams;
 export type RepositoryScope =
   | ("head" | "allBranches")
   | {
@@ -59,7 +66,52 @@ export type RepositoryScope =
 export type MetadataIndexAction = "pause" | "resume" | "cancel" | "rebuild";
 export type SearchPathKind = "file" | "directory";
 export type SearchTimeField = "author" | "committer";
+export type StatsBucket = "tenMinutes" | "hour" | "day" | "week" | "month";
+export type StatsSelection =
+  | {
+      kind: "file";
+      pathHex: string;
+    }
+  | {
+      kind: "directory";
+      pathHex: string;
+    }
+  | {
+      aHex: string;
+      bHex: string;
+      kind: "pair";
+    }
+  | {
+      kind: "untested";
+    };
 export type WorkspaceSide = "staged" | "unstaged";
+export type RepositoryOperation =
+  | {
+      expectedOid: string;
+      kind: "fastForward";
+      refName: string;
+      upstreamOid: string;
+    }
+  | {
+      expectedHeadOid: string;
+      expectedOid: string;
+      kind: "switch";
+      target: SwitchTarget;
+    }
+  | {
+      expectedHeadOid: string;
+      kind: "createBranch";
+      name: string;
+      startOid: string;
+      switchAfter: boolean;
+    };
+export type SwitchTarget =
+  | {
+      refName: string;
+    }
+  | {
+      remoteRefName: string;
+    };
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -185,6 +237,36 @@ export interface ListSearchPathsParams {
 export interface GetActivityStatsParams {
   query: SearchQuery;
 }
+export interface GetActivityOverviewParams {
+  bucket: StatsBucket;
+  query: SearchQuery;
+  range: StatsRange;
+}
+export interface StatsRange {
+  endUnix: number;
+  startUnix: number;
+}
+export interface GetChangeStatsParams {
+  bucket: StatsBucket;
+  directoryPrefix?: string;
+  query: SearchQuery;
+  range: StatsRange;
+}
+export interface SetStatsExclusionsParams {
+  patterns: string[];
+}
+export interface GetStatsCommitsParams {
+  limit: number;
+  offset: number;
+  query: SearchQuery;
+  range: StatsRange;
+  selection: StatsSelection;
+}
+export interface EvolutionParams {
+  commit: string;
+  pathHex: string;
+  range?: StatsRange | null;
+}
 export interface GetHandoffFactsParams {
   branchRef: string | null;
   operationWorktreeId: string | null;
@@ -289,4 +371,10 @@ export interface FetchRepositoryParams {
    * The name of a configured remote, or null for every remote.
    */
   remote: string | null;
+}
+export interface GetBranchSyncParams {
+  refNames: string[];
+}
+export interface OperationParams {
+  operation: RepositoryOperation;
 }

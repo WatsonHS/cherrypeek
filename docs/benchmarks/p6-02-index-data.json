@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-12",
+  "environment": {
+    "os": "27.0.1",
+    "model": "MacBookPro18,3",
+    "git": "git version 2.54.0 (Apple Git-157)"
+  },
+  "fixture": {
+    "commits": 100000,
+    "filesPerCommit": 1,
+    "counts": {
+      "commits": 100000,
+      "changes": 100000,
+      "paths": 100000
+    }
+  },
+  "schema1": {
+    "elapsedMs": 57607.668834000004,
+    "databaseBytes": 76890112,
+    "diskBytes": 76890761,
+    "maxTreeRssKiB": 92704,
+    "maxTreeProcesses": 4,
+    "samples": 446,
+    "binarySha256": "ce6749f873413773430aa89bf74fac7038911e1332e6a273d5edc09476eb3d7d"
+  },
+  "schema2": {
+    "elapsedMs": 156325.22125,
+    "databaseBytes": 102473728,
+    "diskBytes": 102474377,
+    "maxTreeRssKiB": 100912,
+    "maxTreeProcesses": 4,
+    "samples": 1186,
+    "binarySha256": "651a48ab8256b05e6deca4a168d0e5fde3c9dd6bc253dcefaaa04801f33f9463"
+  },
+  "sampling": "100 ms requested; ps snapshots of daemon plus all descendants; short-lived children may be missed",
+  "runs": 1
+}

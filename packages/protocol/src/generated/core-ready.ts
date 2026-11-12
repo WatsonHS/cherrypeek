@@ -13,6 +13,10 @@ export type Capability =
       | "historyGraph"
       | "commitDetails"
       | "activityStats"
+      | "activityOverview"
+      | "changeStats"
+      | "notableStats"
+      | "evolution"
       | "repositoryObservation"
       | "handoffFacts"
     )

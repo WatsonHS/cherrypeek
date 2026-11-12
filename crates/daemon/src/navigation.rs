@@ -48,7 +48,12 @@ pub fn capture(
     } else {
         default_base(executable, repository_path, refs, cancelled, deadline)?
     };
+    let (remotes, branch_upstreams, last_fetch_unix_ms) =
+        capture_operation_metadata(executable, repository_path, cancelled, deadline)?;
     Ok(RepositoryNavigation {
+        remotes,
+        branch_upstreams,
+        last_fetch_unix_ms,
         refs: refs.to_vec(),
         refs_truncated,
         worktrees: worktrees.0,
@@ -986,4 +991,111 @@ mod tests {
             Some(window_tip.as_str())
         );
     }
+}
+
+/// Capture names and upstream mappings alongside the frozen reference snapshot.
+#[allow(clippy::type_complexity)]
+fn capture_operation_metadata(
+    executable: &Path,
+    directory: &str,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<
+    (
+        Vec<commitscope_core::RemoteInfo>,
+        Vec<commitscope_core::BranchUpstream>,
+        Option<u64>,
+    ),
+    NavigationError,
+> {
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
+    let run = |args: &[&str]| {
+        git.run(
+            Path::new(directory),
+            &args.iter().map(string_arg).collect::<Vec<_>>(),
+            None,
+            1024 * 1024,
+            cancelled,
+            deadline,
+        )
+        .map_err(map_git_error)
+    };
+    let refs = run(&[
+        "for-each-ref",
+        "--format=%(refname)%00%(upstream)",
+        "refs/heads/",
+    ])?;
+    if !refs.status.success() {
+        return Err(scope_unavailable("Cannot capture branch upstreams"));
+    }
+    let branch_upstreams = String::from_utf8_lossy(&refs.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, upstream) = line.split_once('\0')?;
+            (!upstream.is_empty()).then(|| commitscope_core::BranchUpstream {
+                ref_name: name.into(),
+                upstream_ref_name: upstream.into(),
+            })
+        })
+        .collect();
+    let names = run(&["remote"])?;
+    if !names.status.success() {
+        return Err(scope_unavailable("Cannot capture remotes"));
+    }
+    let names = String::from_utf8_lossy(&names.stdout);
+    if names.lines().count() > 64 {
+        return Err(scope_unavailable("Too many remotes"));
+    }
+    let mut remotes = Vec::new();
+    for name in names.lines() {
+        let url = run(&["config", "--get", &format!("remote.{name}.url")])?;
+        remotes.push(commitscope_core::RemoteInfo {
+            name: name.into(),
+            web_url: if url.status.success() {
+                remote_web_url(String::from_utf8_lossy(&url.stdout).trim())
+            } else {
+                None
+            },
+        });
+    }
+    let fetch_path = run(&["rev-parse", "--git-path", "FETCH_HEAD"])?;
+    let path_text = String::from_utf8_lossy(&fetch_path.stdout);
+    let path = Path::new(directory).join(path_text.trim());
+    let last_fetch_unix_ms = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64);
+    Ok((remotes, branch_upstreams, last_fetch_unix_ms))
+}
+
+pub(crate) fn remote_web_url(raw: &str) -> Option<String> {
+    let (host, path) = if let Some(rest) = raw.strip_prefix("https://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?, path)
+    } else if let Some(rest) = raw.strip_prefix("git@") {
+        rest.split_once(':')?
+    } else {
+        return None;
+    };
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+    {
+        return None;
+    }
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    if path.is_empty()
+        || !path.split('/').all(|p| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && p.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
+    {
+        return None;
+    }
+    Some(format!("https://{host}/{path}"))
 }

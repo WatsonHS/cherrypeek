@@ -1268,7 +1268,7 @@ pub(crate) fn read_diff(
     parse_diff_output(&output.stdout, oid_length)
 }
 
-fn parse_diff_output(bytes: &[u8], oid_length: usize) -> DetailResult<Vec<ChangedFile>> {
+pub(crate) fn parse_diff_output(bytes: &[u8], oid_length: usize) -> DetailResult<Vec<ChangedFile>> {
     // The raw and numstat streams are emitted in corresponding path order.
     // Parse raw records first, then pair each record with its numstat record.
     let fields: Vec<&[u8]> = bytes.split(|byte| *byte == 0).collect();

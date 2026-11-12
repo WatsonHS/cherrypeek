@@ -2207,3 +2207,94 @@ mod tests {
         assert!(!identity_matches("é", "e\u{301}", "x@example.test"));
     }
 }
+
+/// Statistics reuse metadata search semantics and a single SQLite read transaction.
+/// No Git subprocess is launched here. The callback runs under the same watermark.
+pub(crate) fn with_stats_rows<T>(
+    store: &SessionStore,
+    session: &session::RepositorySession,
+    query: &SearchQuery,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    callback: impl FnOnce(
+        Option<&Connection>,
+        &SearchSnapshot,
+        Vec<(CommitSummary, i64, bool)>,
+    ) -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
+    let (key, _) = metadata_index::snapshot_identity(session)?;
+    let compiled = compile_query(query, session, &key)?;
+    metadata_index::with_readonly_search_snapshot(
+        store,
+        session,
+        metadata_index::configured_quota()?,
+        0,
+        cancelled,
+        deadline,
+        |connection, snapshot| {
+            let mut commits = Vec::new();
+            if let Some(connection) = connection {
+                if compiled.path_bytes.is_some() {
+                    let version: i32 = connection
+                        .pragma_query_value(None, "user_version", |r| r.get(0))
+                        .map_err(map_sql_error)?;
+                    if version < 2 {
+                        return Err(IndexError {
+                            code: ErrorCode::IndexUnavailable,
+                            message: "路径统计需要文件改动索引".into(),
+                        });
+                    }
+                    let missing:i64=connection.query_row("SELECT count(*) FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.changes_complete<>1",params![snapshot.snapshot_key,snapshot.watermark as i64],|r|r.get(0)).map_err(map_sql_error)?;
+                    if missing > 0 {
+                        return Err(IndexError {
+                            code: ErrorCode::IndexUnavailable,
+                            message: "当前覆盖的提交尚有文件记录未补完，请稍后重试路径统计".into(),
+                        });
+                    }
+                }
+                let mut statement = connection.prepare(scan_sql("")).map_err(map_sql_error)?;
+                let mut rows = statement
+                    .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+                    .map_err(map_sql_error)?;
+                while let Some(row) = rows.next().map_err(map_sql_error)? {
+                    check_active(cancelled, deadline)?;
+                    if commits.len() >= 250_000 {
+                        return Err(IndexError {
+                            code: ErrorCode::ResourceLimit,
+                            message: "统计上限为 250000 个已索引提交；请缩小浏览范围".into(),
+                        });
+                    }
+                    let summary = summary_from_row(row)?;
+                    let timestamp = match query.time_field {
+                        SearchTimeField::Author => &summary.author.timestamp,
+                        SearchTimeField::Committer => &summary.committer.timestamp,
+                    }
+                    .parse::<i64>()
+                    .map_err(|_| corrupt_index("Invalid timestamp"))?;
+                    let mut matched =
+                        matching_row_key(row, &compiled, cancelled, deadline)?.is_some();
+                    if matched
+                        && let (Some(raw), Some(filter)) =
+                            (&compiled.path_bytes, &compiled.query.path)
+                    {
+                        let mut paths = connection
+                            .prepare("SELECT path FROM commit_path_changes WHERE oid=?1")
+                            .map_err(map_sql_error)?;
+                        let mut values = paths.query([&summary.oid]).map_err(map_sql_error)?;
+                        matched = false;
+                        while let Some(path) = values.next().map_err(map_sql_error)? {
+                            check_active(cancelled, deadline)?;
+                            let bytes: Vec<u8> = path.get(0).map_err(map_sql_error)?;
+                            if path_matches(filter, raw, &bytes) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                    commits.push((summary, timestamp, matched));
+                }
+            }
+            callback(connection, snapshot, commits)
+        },
+    )
+}

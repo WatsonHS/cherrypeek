@@ -1,6 +1,9 @@
 mod blame;
+mod change_index;
+mod change_stats;
 mod details;
 mod files;
+mod evolution;
 mod framing;
 mod git_command;
 mod graph;
@@ -13,6 +16,7 @@ mod patch_equivalence;
 mod repository;
 mod runtime;
 mod search;
+mod stats;
 mod server;
 mod session;
 mod session_store;

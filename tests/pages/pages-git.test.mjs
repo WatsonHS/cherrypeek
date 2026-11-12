@@ -977,3 +977,7 @@ async function waitForExit(pid, timeoutMs) {
 async function exists(path) {
   try { await lstat(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; }
 }
+
+// M5 fixed-template operation contracts and refusal snapshots.
+await import('./operations-git.test.mjs');
+await import('./stats-git.test.mjs');

@@ -31,6 +31,32 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "EvolutionParams": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "pathHex": {
+          "type": "string"
+        },
+        "range": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StatsRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commit",
+        "pathHex"
+      ],
+      "type": "object"
+    },
     "FetchRepositoryParams": {
       "additionalProperties": false,
       "description": "P5-01: fetch remote-tracking refs. Never touches the working tree, the index, HEAD or local branches.",
@@ -53,6 +79,26 @@
       ],
       "type": "object"
     },
+    "GetActivityOverviewParams": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "$ref": "#/definitions/StatsBucket"
+        },
+        "query": {
+          "$ref": "#/definitions/SearchQuery"
+        },
+        "range": {
+          "$ref": "#/definitions/StatsRange"
+        }
+      },
+      "required": [
+        "query",
+        "range",
+        "bucket"
+      ],
+      "type": "object"
+    },
     "GetActivityStatsParams": {
       "additionalProperties": false,
       "properties": {
@@ -62,6 +108,45 @@
       },
       "required": [
         "query"
+      ],
+      "type": "object"
+    },
+    "GetBranchSyncParams": {
+      "additionalProperties": false,
+      "properties": {
+        "refNames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "refNames"
+      ],
+      "type": "object"
+    },
+    "GetChangeStatsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {
+          "$ref": "#/definitions/StatsBucket"
+        },
+        "directoryPrefix": {
+          "default": "",
+          "type": "string"
+        },
+        "query": {
+          "$ref": "#/definitions/SearchQuery"
+        },
+        "range": {
+          "$ref": "#/definitions/StatsRange"
+        }
+      },
+      "required": [
+        "query",
+        "range",
+        "bucket"
       ],
       "type": "object"
     },
@@ -120,6 +205,39 @@
         "selectedOid",
         "operationWorktreeId",
         "staleWorktreeId"
+      ],
+      "type": "object"
+    },
+    "GetStatsCommitsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query": {
+          "$ref": "#/definitions/SearchQuery"
+        },
+        "range": {
+          "$ref": "#/definitions/StatsRange"
+        },
+        "selection": {
+          "$ref": "#/definitions/StatsSelection"
+        }
+      },
+      "required": [
+        "query",
+        "range",
+        "selection",
+        "offset",
+        "limit"
       ],
       "type": "object"
     },
@@ -342,6 +460,18 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "OperationParams": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "$ref": "#/definitions/RepositoryOperation"
+        }
+      },
+      "required": [
+        "operation"
       ],
       "type": "object"
     },
@@ -718,6 +848,89 @@
       ],
       "type": "object"
     },
+    "RepositoryOperation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "fastForward",
+              "type": "string"
+            },
+            "refName": {
+              "type": "string"
+            },
+            "upstreamOid": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "refName",
+            "expectedOid",
+            "upstreamOid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedHeadOid": {
+              "type": "string"
+            },
+            "expectedOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "switch",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/SwitchTarget"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "expectedOid",
+            "expectedHeadOid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedHeadOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "createBranch",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "startOid": {
+              "type": "string"
+            },
+            "switchAfter": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "startOid",
+            "switchAfter",
+            "expectedHeadOid"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RepositoryScope": {
       "oneOf": [
         {
@@ -829,6 +1042,30 @@
           "$ref": "#/definitions/GetActivityStatsParams"
         },
         {
+          "$ref": "#/definitions/GetActivityOverviewParams"
+        },
+        {
+          "$ref": "#/definitions/GetChangeStatsParams"
+        },
+        {
+          "$ref": "#/definitions/GetActivityOverviewParams"
+        },
+        {
+          "$ref": "#/definitions/EmptyParams"
+        },
+        {
+          "$ref": "#/definitions/SetStatsExclusionsParams"
+        },
+        {
+          "$ref": "#/definitions/GetStatsCommitsParams"
+        },
+        {
+          "$ref": "#/definitions/EvolutionParams"
+        },
+        {
+          "$ref": "#/definitions/EvolutionParams"
+        },
+        {
           "$ref": "#/definitions/EmptyParams"
         },
         {
@@ -875,6 +1112,15 @@
         },
         {
           "$ref": "#/definitions/FetchRepositoryParams"
+        },
+        {
+          "$ref": "#/definitions/GetBranchSyncParams"
+        },
+        {
+          "$ref": "#/definitions/OperationParams"
+        },
+        {
+          "$ref": "#/definitions/OperationParams"
         }
       ]
     },
@@ -1088,6 +1334,149 @@
         "pageSize"
       ],
       "type": "object"
+    },
+    "SetStatsExclusionsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "patterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "patterns"
+      ],
+      "type": "object"
+    },
+    "StatsBucket": {
+      "enum": [
+        "tenMinutes",
+        "hour",
+        "day",
+        "week",
+        "month"
+      ],
+      "type": "string"
+    },
+    "StatsRange": {
+      "additionalProperties": false,
+      "properties": {
+        "endUnix": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "startUnix": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "startUnix",
+        "endUnix"
+      ],
+      "type": "object"
+    },
+    "StatsSelection": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "file",
+              "type": "string"
+            },
+            "pathHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pathHex"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "directory",
+              "type": "string"
+            },
+            "pathHex": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "pathHex"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "aHex": {
+              "type": "string"
+            },
+            "bHex": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "pair",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "aHex",
+            "bHex"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "untested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SwitchTarget": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "refName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "refName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "remoteRefName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remoteRefName"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkspaceSide": {
       "oneOf": [

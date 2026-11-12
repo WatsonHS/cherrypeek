@@ -38,6 +38,10 @@ export type Capability =
       | "historyGraph"
       | "commitDetails"
       | "activityStats"
+      | "activityOverview"
+      | "changeStats"
+      | "notableStats"
+      | "evolution"
       | "repositoryObservation"
       | "handoffFacts"
     )
@@ -47,6 +51,34 @@ export type Capability =
   | "blame"
   | "repositoryOperations";
 export type ResponseData =
+  | {
+      estimate: EvolutionEstimate;
+      section: "evolutionEstimate";
+    }
+  | {
+      chunk: EvolutionChunk;
+      section: "evolutionChunk";
+    }
+  | {
+      section: "changeStats";
+      stats: ChangeStats;
+    }
+  | {
+      section: "notableStats";
+      stats: NotableStats;
+    }
+  | {
+      result: StatsExclusions;
+      section: "statsExclusions";
+    }
+  | {
+      page: StatsCommitPage;
+      section: "statsCommitPage";
+    }
+  | {
+      section: "activityOverview";
+      stats: ActivityOverview;
+    }
   | {
       coreVersion: string;
       pid: number;
@@ -71,6 +103,18 @@ export type ResponseData =
   | {
       section: "activityStats";
       stats: ActivityStats;
+    }
+  | {
+      result: BranchSyncResult;
+      section: "branchSync";
+    }
+  | {
+      result: OperationCheck;
+      section: "operationCheck";
+    }
+  | {
+      result: OperationRun;
+      section: "operationRun";
     }
   | {
       observation: RepositoryObservation;
@@ -223,6 +267,65 @@ export type MetadataIndexState =
   "idle" | "queued" | "running" | "paused" | "cancelled" | "complete" | "quotaLimited" | "unavailable" | "failed";
 export type SearchTimeField = "author" | "committer";
 export type SearchPathKind = "file" | "directory";
+export type BranchSyncState = "upToDate" | "behind" | "ahead" | "diverged" | "noUpstream" | "unavailable";
+export type OperationBlocker =
+  | {
+      ahead: number;
+      behind: number;
+      kind: "diverged";
+      localCommits: OperationCommit[];
+      localCommitsTruncated: boolean;
+      overlapPaths: GitPath[];
+      overlapPathsTruncated: boolean;
+      upstreamCommits: OperationCommit[];
+      upstreamCommitsTruncated: boolean;
+    }
+  | {
+      kind: "dirty";
+      paths: DirtyOperationPath[];
+      pathsTruncated: boolean;
+    }
+  | {
+      kind: "checkedOutElsewhere";
+      worktreePath: string;
+    }
+  | {
+      kind: "inProgress";
+      operation: string;
+    }
+  | {
+      kind: "noUpstream";
+    }
+  | {
+      kind: "notFastForward";
+    }
+  | {
+      kind: "refChanged";
+    }
+  | {
+      kind: "nameInvalid";
+    }
+  | {
+      kind: "nameExists";
+    }
+  | {
+      kind: "bare";
+    }
+  | {
+      kind: "unsafeState";
+      message: string;
+    };
+export type OperationRun =
+  | {
+      blockers: OperationBlocker[];
+      outcome: "rejected";
+    }
+  | {
+      headOid?: string | null;
+      headReference?: string | null;
+      outcome: "done";
+      updatedRef?: UpdatedRef | null;
+    };
 export type RefSnapshotChangeKind = "fastForward" | "rewritten" | "created" | "deleted" | "unknown";
 export type MergeStatus = "merged" | "patchEquivalent" | "notMerged" | "unavailable";
 export type RefKind = "localBranch" | "remoteBranch" | "tag";
@@ -265,6 +368,271 @@ export interface Coverage {
   complete: boolean;
   processed: number;
 }
+export interface EvolutionEstimate {
+  bytes: number;
+  fileLimit: number;
+  files: number;
+  lines: number;
+  skipped: EvolutionSkipped[];
+  totalFiles: number;
+}
+export interface EvolutionSkipped {
+  path: GitPath;
+  reason: string;
+}
+export interface GitPath {
+  display: string;
+  rawHex: string;
+  textLossy: boolean;
+}
+export interface EvolutionChunk {
+  progress: EvolutionProgress;
+  result: EvolutionResult;
+}
+export interface EvolutionProgress {
+  currentPath?: GitPath | null;
+  filesDone: number;
+  filesTotal: number;
+}
+export interface EvolutionResult {
+  age: EvolutionAge;
+  asOfUnix: number;
+  complete: boolean;
+  covered: EvolutionCovered;
+  ownership: EvolutionOwner[];
+  skipped: EvolutionSkipped[];
+  survival: EvolutionSurvival;
+}
+export interface EvolutionAge {
+  older: number;
+  within1y: number;
+  within30d: number;
+  within7d: number;
+  within90d: number;
+}
+export interface EvolutionCovered {
+  files: number;
+  lines: number;
+}
+export interface EvolutionOwner {
+  author: SearchIdentity;
+  commits: number;
+  lines: number;
+}
+export interface SearchIdentity {
+  email: string;
+  name: string;
+}
+export interface EvolutionSurvival {
+  byAuthor: SurvivalAuthor[];
+  coverage: MetadataIndexCoverage;
+  weeks: SurvivalWeek[];
+}
+export interface SurvivalAuthor {
+  added: number;
+  author: SearchIdentity;
+  kept: number;
+}
+export interface MetadataIndexCoverage {
+  complete: boolean;
+  processed: number;
+}
+export interface SurvivalWeek {
+  added: number;
+  kept: number;
+  startUnix: number;
+}
+export interface ChangeStats {
+  authorDirectories: AuthorDirectories[];
+  authorDirectoriesTruncated: boolean;
+  buckets: ChangeBucket[];
+  coverage: MetadataIndexCoverage;
+  directories: DirectoryChanges[];
+  directoriesTruncated: boolean;
+  excluded: ExcludedChanges;
+  extensions: ExtensionChanges[];
+  extensionsTruncated: boolean;
+  files: FileChanges[];
+  filesTruncated: boolean;
+  kinds: ChangeKinds;
+  largest: LargeCommit[];
+  previousTotals: ChangeTotals;
+  sessions: ChangeSession[];
+  sessionsTruncated: boolean;
+  sizeHistogram: number[];
+  totals: ChangeTotals;
+}
+export interface AuthorDirectories {
+  author: SearchIdentity;
+  cells: AuthorDirectoryCell[];
+}
+export interface AuthorDirectoryCell {
+  directory: GitPath;
+  lines: number;
+}
+export interface ChangeBucket {
+  additions: number;
+  deletions: number;
+  netGrowth: number;
+  startUnix: number;
+}
+export interface DirectoryChanges {
+  commits: number;
+  lines: number;
+  path: GitPath;
+}
+export interface ExcludedChanges {
+  lines: number;
+  lockFiles: number;
+  mergeCommits: number;
+}
+export interface ExtensionChanges {
+  additions: number;
+  deletions: number;
+  extension: string;
+  filesChanged: number;
+}
+export interface FileChanges {
+  additions: number;
+  commits: number;
+  deletions: number;
+  path: GitPath;
+}
+export interface ChangeKinds {
+  code: number;
+  docs: number;
+  test: number;
+}
+export interface LargeCommit {
+  additions: number;
+  author: SearchIdentity;
+  deletions: number;
+  oid: string;
+  summary: string;
+}
+export interface ChangeTotals {
+  additions: number;
+  deletions: number;
+  filesAdded: number;
+  filesChanged: number;
+  filesDeleted: number;
+  filesRenamed: number;
+}
+export interface ChangeSession {
+  additions: number;
+  authors: string[];
+  count: number;
+  deletions: number;
+  directories: GitPath[];
+  endUnix: number;
+  startUnix: number;
+}
+export interface NotableStats {
+  churnFiles: ChurnFile[];
+  churnFilesTruncated: boolean;
+  coverage: MetadataIndexCoverage;
+  pairCommitsSkipped: number;
+  pairs: FilePair[];
+  pairsTruncated: boolean;
+  soloDirectories: SoloDirectory[];
+  soloDirectoriesTruncated: boolean;
+  untested: UntestedChanges;
+}
+export interface ChurnFile {
+  authors: number;
+  commits: number;
+  days: number[];
+  path: GitPath;
+}
+export interface FilePair {
+  a: GitPath;
+  b: GitPath;
+  shareOfAPerMille: number;
+  together: number;
+}
+export interface SoloDirectory {
+  author: SearchIdentity;
+  commits: number;
+  lines: number;
+  path: GitPath;
+}
+export interface UntestedChanges {
+  commits: LargeCommit[];
+  commitsTruncated: boolean;
+  count: number;
+  total: number;
+}
+export interface StatsExclusions {
+  defaults: string[];
+  patterns: string[];
+}
+export interface StatsCommitPage {
+  commits: OperationCommit[];
+  coverage: MetadataIndexCoverage;
+  nextOffset?: number | null;
+  total: number;
+}
+export interface OperationCommit {
+  oid: string;
+  summary: string;
+}
+export interface ActivityOverview {
+  authors: ActivityAuthor[];
+  authorsTruncated: boolean;
+  branches: BranchActivity[];
+  branchesTruncated: boolean;
+  buckets: ActivityBucket[];
+  coverage: MetadataIndexCoverage;
+  fixupCount: number;
+  mergeCount: number;
+  previousTotals: ActivityTotals;
+  revertCount: number;
+  rhythm: ActivityRhythm;
+  sessions: ActivitySession[];
+  sessionsTruncated: boolean;
+  totals: ActivityTotals;
+  types: CommitTypeCount[];
+  weekHour: number[][];
+}
+export interface ActivityAuthor {
+  count: number;
+  email: string;
+  name: string;
+}
+export interface BranchActivity {
+  complete: boolean;
+  count: number;
+  lastCommitUnix?: number | null;
+  refName: string;
+}
+export interface ActivityBucket {
+  count: number;
+  startUnix: number;
+}
+export interface ActivityTotals {
+  activeDays: number;
+  authors: number;
+  commits: number;
+}
+export interface ActivityRhythm {
+  busiestDay?: ActivityDay | null;
+  longestGapDays: number;
+  longestStreakDays: number;
+}
+export interface ActivityDay {
+  count: number;
+  day: string;
+}
+export interface ActivitySession {
+  authors: string[];
+  count: number;
+  endUnix: number;
+  startUnix: number;
+}
+export interface CommitTypeCount {
+  count: number;
+  prefix: string;
+}
 export interface MetadataIndexStatus {
   coverage: MetadataIndexCoverage;
   diskBytes: number;
@@ -272,10 +640,6 @@ export interface MetadataIndexStatus {
   quotaBytes: number;
   snapshotKey: string | null;
   state: MetadataIndexState;
-}
-export interface MetadataIndexCoverage {
-  complete: boolean;
-  processed: number;
 }
 export interface MetadataIndexFailure {
   code: ErrorCode;
@@ -333,10 +697,6 @@ export interface SearchIdentities {
   index: MetadataIndexStatus;
   truncated: boolean;
 }
-export interface SearchIdentity {
-  email: string;
-  name: string;
-}
 export interface SearchPaths {
   /**
    * @maxItems 100
@@ -347,11 +707,6 @@ export interface SearchPaths {
 export interface SearchPathEntry {
   kind: SearchPathKind;
   path: GitPath;
-}
-export interface GitPath {
-  display: string;
-  rawHex: string;
-  textLossy: boolean;
 }
 export interface ActivityStats {
   /**
@@ -371,14 +726,38 @@ export interface ActivityStats {
   timeField: SearchTimeField;
   timeZone: string;
 }
-export interface ActivityAuthor {
-  count: number;
-  email: string;
-  name: string;
+export interface BranchSyncResult {
+  branches: BranchSync[];
+  lastFetchUnixMs?: number | null;
 }
-export interface ActivityDay {
-  count: number;
-  day: string;
+export interface BranchSync {
+  ahead?: number | null;
+  behind?: number | null;
+  checkedOutBy: string[];
+  oid: string;
+  refName: string;
+  state: BranchSyncState;
+  upstream?: RefTarget | null;
+}
+export interface RefTarget {
+  oid: string;
+  refName: string;
+}
+export interface OperationCheck {
+  allowed: boolean;
+  blockers: OperationBlocker[];
+  preservedDirtyCount: number;
+}
+export interface DirtyOperationPath {
+  path: GitPath;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+export interface UpdatedRef {
+  newOid: string;
+  oldOid?: string | null;
+  refName: string;
 }
 export interface RepositoryObservation {
   changeCount: number;
@@ -1284,18 +1663,29 @@ export interface HistoryDateLocation {
   pageSize: number;
 }
 export interface RepositoryNavigation {
+  branchUpstreams: BranchUpstream[];
   defaultBase: DefaultBase | null;
+  lastFetchUnixMs?: number | null;
   observedAtUnixMs: number;
   /**
    * @maxItems 2000
    */
   refs: RefInfo[];
   refsTruncated: boolean;
+  remotes: RemoteInfo[];
   /**
    * @maxItems 128
    */
   worktrees: WorktreeInfo[];
   worktreesTruncated: boolean;
+}
+export interface BranchUpstream {
+  refName: string;
+  upstreamRefName: string;
+}
+export interface RemoteInfo {
+  name: string;
+  webUrl?: string | null;
 }
 export interface RefMergeStatusResult {
   defaultBase: DefaultBase | null;

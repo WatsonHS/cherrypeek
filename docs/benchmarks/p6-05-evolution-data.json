@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-12",
+  "repository": "/Users/huangsheng/Development/commitscope",
+  "commit": "1ffbf61eb8dc9042622ed5a73de27cc47bca7d0e",
+  "path": "crates/daemon/src",
+  "sampleIntervalMs": 100,
+  "measures": {
+    "estimate": {
+      "elapsedMs": 553.5859580000001,
+      "chunks": 1,
+      "estimate": {
+        "files": 21,
+        "totalFiles": 21,
+        "lines": 25505,
+        "bytes": 883482,
+        "fileLimit": 200,
+        "skipped": []
+      },
+      "maxTreeRssKiB": 18080,
+      "maxTreeProcesses": 2
+    },
+    "cold": {
+      "elapsedMs": 2267.7520000000004,
+      "chunks": 43,
+      "covered": {
+        "files": 21,
+        "lines": 25505
+      },
+      "skipped": [],
+      "denominatorCoverage": {
+        "processed": 67,
+        "complete": true
+      },
+      "maxTreeRssKiB": 18656,
+      "maxTreeProcesses": 2
+    },
+    "warm": {
+      "elapsedMs": 1941.0105000000003,
+      "chunks": 43,
+      "covered": {
+        "files": 21,
+        "lines": 25505
+      },
+      "skipped": [],
+      "denominatorCoverage": {
+        "processed": 67,
+        "complete": true
+      },
+      "maxTreeRssKiB": 16832,
+      "maxTreeProcesses": 2
+    }
+  },
+  "samplesCount": 48,
+  "sampling": "100 ms requested; daemon plus all descendants; other regression jobs were active on the host"
+}
