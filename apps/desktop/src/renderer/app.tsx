@@ -8,11 +8,12 @@ import type { RepositoryNavigation } from "../../../../packages/protocol/src/rep
 import type { HandoffRequest } from "./components/handoff-dialog.js";
 import { fetchFailedRequest, handoffFactsTarget } from "./lib/handoff-prompt.js";
 import { CreateBranchDialog, type BranchStart } from "./components/create-branch-dialog.js";
+import { FastForwardMergeDialog, type FastForwardMergeTarget } from "./components/fast-forward-merge-dialog.js";
 import { FetchFailureBanner, type FetchNoticeValue } from "./components/operation-banners.js";
 import { OperationFailureBanner, OperationNoticeBanner, OperationRefusal } from "./components/operation-outcomes.js";
 import { OperationsStore } from "./lib/operations-store.js";
 import { useOperations, type OperationsActions } from "./lib/use-operations.js";
-import { webRemote } from "./lib/operations.js";
+import { refTip, webRemote } from "./lib/operations.js";
 import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
 import { COMMIT_DETAIL_SCROLL_EVENT, CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
@@ -23,7 +24,7 @@ import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
 import { FOCUS_SEARCH_EVENT, TopBar } from "./components/top-bar.js";
 import type { AppPage } from "./components/page-switch.js";
-import { PageSearchBox } from "./components/search-controls.js";
+import { PageSearchBox, SearchControls } from "./components/search-controls.js";
 import { StatsPage } from "./components/stats-page.js";
 import { WorkspacePage } from "./components/workspace-page.js";
 import { DiffFullContext, useDiffDisplayShortcuts } from "./components/diff-view.js";
@@ -61,8 +62,8 @@ export interface RepositoryActions {
   nextPage(): Promise<string | undefined>;
   refresh(): Promise<void>;
   switchScope(scope: RepositoryScope): Promise<void>;
-  /** P5-01: null while the core cannot run operations. Fetches every remote, then refreshes the snapshot. */
-  fetch: { running: boolean; start(prune?: boolean): Promise<void>; cancel(): void; notice: FetchNoticeValue | null; dismissNotice(): void } | null;
+  /** P5-01: null while the core cannot run operations. Fetches all remotes or a named remote, then refreshes. */
+  fetch: { running: boolean; startedAt: number | null; start(prune?: boolean, remote?: string | null): Promise<void>; cancel(): void; notice: FetchNoticeValue | null; dismissNotice(): void } | null;
   /** M5: null while the core cannot run operations. Update, switch, create branch and the branch sync behind the tags. */
   operations: OperationsActions | null;
 }
@@ -227,11 +228,14 @@ export function App(): React.JSX.Element {
   const ready = status.state === "ready";
   const metadataIndexSupported = ready && status.core.capabilities.includes("metadataIndex");
   const operationsSupported = ready && status.core.capabilities.includes("repositoryOperations");
-  const [fetching, setFetching] = React.useState(false);
+  const [fetchPhase, setFetchPhase] = React.useState<number | "refreshing" | null>(null);
+  const fetching = fetchPhase !== null;
   const fetchRunning = React.useRef(false);
+  const fetchCancelled = React.useRef(false);
   const [fetchNotice, setFetchNotice] = React.useState<(FetchNoticeValue & { repoId: string }) | null>(null);
-  const [fetchFailure, setFetchFailure] = React.useState<{ message: string; prune: boolean; atUnixMs: number; repoId: string } | null>(null);
+  const [fetchFailure, setFetchFailure] = React.useState<{ message: string; prune: boolean; remote: string | null; atUnixMs: number; repoId: string } | null>(null);
   const [branchStart, setBranchStart] = React.useState<BranchStart | null>(null);
+  const [ffMergeTarget, setFfMergeTarget] = React.useState<FastForwardMergeTarget | null>(null);
   const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
   const [path, setPathState] = React.useState("");
@@ -848,40 +852,55 @@ export function App(): React.JSX.Element {
     const containerTop = container?.getBoundingClientRect().top ?? 0;
     const anchorRow = container ? [...container.querySelectorAll<HTMLElement>('[data-testid="commit-row"]')]
       .find(row => row.getBoundingClientRect().bottom > containerTop) : undefined;
-    anchorBeforeRefresh.current = anchorRow ? {
+    // At the very top of the newest page the reader is following the tip: keeping the old first commit in
+    // place would push whatever the refresh brought (after a fetch or an update) out of sight above it.
+    const followingTip = Boolean(container) && container!.scrollTop <= 4 && store.getView().windowPreviousCursor === null;
+    anchorBeforeRefresh.current = anchorRow && !followingTip ? {
       oid: anchorRow.dataset.oid ?? "",
       offset: anchorRow.getBoundingClientRect().top - containerTop,
     } : undefined;
     await store.refresh(selectedOid, anchorBeforeRefresh.current);
   });
   // P5-01. A fetch only moves remote-tracking refs; the view changes when the refresh after it lands.
-  const startFetch = async (prune = false): Promise<boolean> => {
+  const startFetch = async (prune = false, remote: string | null = null): Promise<boolean> => {
     if (fetchRunning.current) return false;
     fetchRunning.current = true;
-    setFetching(true);
+    fetchCancelled.current = false;
+    setFetchPhase(performance.now());
     setActionError(undefined);
     setFetchNotice(null);
     setFetchFailure(null);
-    const repoId = view.session?.repoId ?? "";
+    // A refresh gives the session a new repoId, so what a fetch reports is tied to the directory instead.
+    const repoId = view.repository?.path ?? "";
     try {
-      const result = await window.commitScope.fetchRepository({ remote: null, prune });
+      const result = await window.commitScope.fetchRepository({ remote, prune });
+      if (store.getView().repository?.path !== repoId) return false;
       if (!result.ok) {
-        if (result.error.code !== "CANCELLED") setFetchFailure({ message: result.error.message, prune, atUnixMs: Date.now(), repoId });
+        if (result.error.code !== "CANCELLED") setFetchFailure({ message: result.error.message, prune, remote, atUnixMs: Date.now(), repoId });
         return false;
       }
+      setFetchPhase("refreshing");
       setFetchNotice({ remotes: result.value.remotes, finishedAtUnixMs: result.value.finishedAtUnixMs, repoId });
+      const beforeRefresh = store.getView().session;
       await refresh();
-      return true;
+      const refreshed = store.getView();
+      if (!refreshed.session || refreshed.session === beforeRefresh || refreshed.scopeError) {
+        setActionError("Fetch 已完成，但刷新失败；没有继续更新本地分支，请刷新后重试。");
+        return false;
+      }
+      return !fetchCancelled.current && refreshed.repository?.path === repoId;
     } catch (error) {
       setActionError(String(error));
       return false;
     } finally {
       fetchRunning.current = false;
-      setFetching(false);
+      setFetchPhase(null);
     }
   };
   const { actions: operations, view: operationsView } = useOperations({
     store: operationsStore, sessionStore: store, view, supported: operationsSupported && !view.repository?.isBare,
+    remotes: view.navigation?.remotes ?? [],
+    pushRepository: window.commitScope.pushRepository,
     fetchAll: () => startFetch(false), fetching, refresh,
     afterChange: () => { void workspaceStore.readStatus(true); },
     dismissFetchNotice: () => setFetchNotice(null), openHandoff,
@@ -890,9 +909,10 @@ export function App(): React.JSX.Element {
     operations,
     fetch: operationsSupported && view.session ? {
       running: fetching,
-      start: async prune => { await startFetch(prune); },
-      cancel: () => { void window.commitScope.cancelRepositoryOperation(); },
-      notice: fetchNotice && fetchNotice.repoId === view.session?.repoId ? fetchNotice : null,
+      startedAt: typeof fetchPhase === "number" ? fetchPhase : null,
+      start: async (prune, remote) => { if (!operationsStore.getView().running) await startFetch(prune, remote); },
+      cancel: () => { fetchCancelled.current = true; void window.commitScope.cancelRepositoryOperation(); },
+      notice: fetchNotice && fetchNotice.repoId === view.repository?.path ? fetchNotice : null,
       dismissNotice: () => setFetchNotice(null),
     } : null,
     path,
@@ -1142,8 +1162,19 @@ export function App(): React.JSX.Element {
     openCommit: oid => { void openCommitFromFiles(oid); },
   }), [filesStore, openCommitFromFiles, recordJump, scopeTreeVersion]);
   const versionOptions = React.useMemo(() => treeVersionOptions(view, scopeTreeVersion), [view.navigation, view.refs, scopeTreeVersion]);
-  const shortcutActions = React.useRef({ historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump });
-  shortcutActions.current = { historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump };
+  let pageSearch: React.JSX.Element | null = null;
+  if (page === "commits" && sessionKey && coreCapabilities.includes("metadataSearch")) {
+    pageSearch = <SearchControls view={searchView} sessionKey={sessionKey} onQueryChange={updateSearchQuery}
+      onComposition={finishSearchComposition} onLoadIdentities={loadSearchIdentities} onLoadPaths={loadSearchPaths} />;
+  } else if (page === "workspace" && workspaceView.supported) {
+    pageSearch = <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value={workspaceFilter}
+      onChange={setWorkspaceFilter} title="按路径过滤左栏，不重新读取工作区（⌘F）" />;
+  } else if (page === "files") {
+    pageSearch = filesSearchBox(filesView, filesFind, filesFindCount, setFilesFind, filesHistoryQuery, setFilesHistoryQuery);
+  }
+  const hasPageSearch = pageSearch !== null;
+  const shortcutActions = React.useRef({ hasPageSearch, historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump });
+  shortcutActions.current = { hasPageSearch, historyLocation, searchView, returnToSearch, locateSelectedInHistory, refresh, page, changePage, filesActions, filesStore, navigateBack, navigateForward, recordJump };
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return;
@@ -1151,7 +1182,7 @@ export function App(): React.JSX.Element {
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
       const actions = shortcutActions.current;
       const key = event.key.toLowerCase();
-      if (event.code === "KeyF" && !event.altKey) {
+      if (event.code === "KeyF" && !event.altKey && actions.hasPageSearch) {
         event.preventDefault();
         const focus = () => window.dispatchEvent(new Event(FOCUS_SEARCH_EVENT));
         if (actions.page === "commits" && actions.historyLocation) void actions.returnToSearch().then(focus);
@@ -1209,6 +1240,37 @@ export function App(): React.JSX.Element {
   const paletteSelectedMessage = !paletteSelectedOid ? null
     : page === "commits" && detailView.details.value?.commit.oid === paletteSelectedOid ? detailView.details.value.message
     : (searchView.active ? searchView.window?.commits : view.commits)?.find(commit => commit.oid === paletteSelectedOid)?.summary ?? null;
+  const headMergeTarget = React.useMemo<FastForwardMergeTarget | null>(() => {
+    const repo = view.repository;
+    const nav = view.navigation;
+    if (!operations || !repo || repo.isBare || !repo.headReference?.startsWith("refs/heads/") || !repo.headOid || !nav) return null;
+    const localRefs = nav.refs.filter(ref => ref.kind === "localBranch");
+    const defaultBaseName = nav.defaultBase?.name ?? "";
+    const defaultBaseLocal = defaultBaseName.startsWith("refs/heads/")
+      ? localRefs.find(ref => ref.name === defaultBaseName) ?? null
+      : defaultBaseName.startsWith("refs/remotes/")
+        ? localRefs.find(ref => ref.name === `refs/heads/${defaultBaseName.replace(/^refs\/remotes\/[^/]+\//u, "")}`) ?? null
+        : null;
+    if (!defaultBaseLocal || defaultBaseLocal.name === repo.headReference) return null;
+    const targetOid = refTip(defaultBaseLocal);
+    if (targetOid === repo.headOid) return null;
+    return {
+      sourceRef: repo.headReference,
+      sourceOid: repo.headOid,
+      targetRef: defaultBaseLocal.name,
+      targetOid,
+      targetIsHead: false,
+      isBare: false,
+    };
+  }, [operations, view.repository, view.navigation]);
+  const palettePushLabel = operations?.headPush
+    ? operations.headPush.setUpstream
+      ? `发布分支 ${operations.headPush.branch} 到 ${operations.headPush.remote}`
+      : `推送 ${operations.headPush.branch} 到 ${operations.headPush.upstream}（↑${operations.headPush.ahead}）`
+    : null;
+  const paletteMergeBaseLabel = headMergeTarget
+    ? `把 ${shortRefName(headMergeTarget.sourceRef)} 快进合入 ${shortRefName(headMergeTarget.targetRef)}…`
+    : null;
   const executePalette = (action: PaletteAction) => {
     if (action.kind === "commit") {
       setJumpOrigin(recordJump());
@@ -1231,6 +1293,15 @@ export function App(): React.JSX.Element {
       void run(async () => { await window.commitScope.openWorkspaceIn(target); });
     } else if (action.command === "fetch" || action.command === "fetchPrune") {
       void actions.fetch?.start(action.command === "fetchPrune");
+    } else if (action.command === "push") {
+      if (operations?.headPush) {
+        void operations.pushBranch(operations.headPush.refName, {
+          remote: operations.headPush.remote,
+          setUpstream: operations.headPush.setUpstream,
+        });
+      }
+    } else if (action.command === "mergeIntoBase") {
+      if (headMergeTarget) setFfMergeTarget(headMergeTarget);
     } else changePage(action.command);
   };
   const displayedCommit = searchView.active
@@ -1279,25 +1350,81 @@ export function App(): React.JSX.Element {
   const loadSearchPrevious = React.useCallback(() => { void searchStore.loadPrevious(); }, [searchStore]);
   const retrySearch = React.useCallback(() => { void searchStore.retry(); }, [searchStore]);
 
-  return <DiffFullContext.Provider value={filesCapabilities.fullFile}><div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+  const [dropActive, setDropActive] = React.useState(false);
+  const readyRef = React.useRef(ready);
+  readyRef.current = ready;
+  const actionsRef = React.useRef<RepositoryActions | null>(null);
+  actionsRef.current = actions;
+  const pendingExternalOpenRef = React.useRef<string | null>(null);
+  React.useEffect(() => window.commitScope.onOpenRepositoryRequested(requestedPath => {
+    if (!readyRef.current) {
+      pendingExternalOpenRef.current = requestedPath;
+      return;
+    }
+    pathEdited.current = true;
+    setPathState(requestedPath);
+    void actionsRef.current?.open(requestedPath);
+  }), []);
+  React.useEffect(() => {
+    if (!ready || !pendingExternalOpenRef.current) return;
+    const requestedPath = pendingExternalOpenRef.current;
+    pendingExternalOpenRef.current = null;
+    pathEdited.current = true;
+    setPathState(requestedPath);
+    void actionsRef.current?.open(requestedPath);
+  }, [ready]);
+  const hasDroppedFiles = (event: React.DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  const handleDragEnter = (event: React.DragEvent) => {
+    if (!hasDroppedFiles(event)) return;
+    event.preventDefault();
+    setDropActive(true);
+  };
+  const handleDragOver = (event: React.DragEvent) => {
+    if (!hasDroppedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (!dropActive) setDropActive(true);
+  };
+  const handleDragLeave = (event: React.DragEvent) => {
+    if (!dropActive) return;
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+    setDropActive(false);
+  };
+  const handleDrop = (event: React.DragEvent) => {
+    if (!hasDroppedFiles(event)) return;
+    event.preventDefault();
+    setDropActive(false);
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    const droppedPath = window.commitScope.getPathForFile(file);
+    if (!droppedPath) return;
+    if (!readyRef.current) {
+      pendingExternalOpenRef.current = droppedPath;
+      return;
+    }
+    pathEdited.current = true;
+    setPathState(droppedPath);
+    void actionsRef.current?.open(droppedPath);
+  };
+
+  return <DiffFullContext.Provider value={filesCapabilities.fullFile}><div
+    className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+    {dropActive ? <div data-testid="drop-overlay" aria-live="polite"
+      className="pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent bg-panel/85 backdrop-blur-[2px]">
+      <div className="rounded-xl border border-line bg-panel px-5 py-3 text-sm font-medium text-fg shadow-lg">松开以打开仓库目录</div>
+    </div> : null}
     {view.repository
       ? <TopBar preview={view} actions={actions} recent={recent} onRefreshRecent={refreshRecent} onSelectCommit={activateDisplayedCommit}
         history={{ view: navigationView, hint: returnHint, onBack: navigateBack, onForward: navigateForward, onReturn: returnToOrigin }}
         onLoadNavigation={loadNavigation} onLoadMergeStatus={loadMergeStatus} onCancelMergeStatus={cancelMergeStatus} onRefresh={refresh}
-        searchView={searchView} activityQuery={displayedQuery} onSearchQueryChange={updateSearchQuery} onSearchComposition={finishSearchComposition} onLoadSearchIdentities={loadSearchIdentities} onLoadSearchPaths={loadSearchPaths}
+        activityQuery={displayedQuery} onSearchQueryChange={updateSearchQuery}
         observation={observation} refDiff={refDiff} refDiffLoading={refDiffLoading} refDiffError={refDiffError} onLoadRefDiff={loadRefDiff} onCancelRefDiff={cancelRefDiff} onObserve={observeNow}
         activityStats={activityStats?.key === activityKey ? activityStats.value : null} activityLoading={activityLoading} activityError={activityError}
         onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
-        onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} onCreateBranch={setBranchStart}
+        onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} onCreateBranch={setBranchStart} onFastForwardMerge={operations ? setFfMergeTarget : undefined}
         page={page} onPageChange={changePage} workspace={workspaceBadge(workspaceIndicatorFor(workspaceView), view.repository, workspaceBranch)}
-        workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
-        pageSearch={page === "workspace"
-          ? <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value={workspaceFilter} onChange={setWorkspaceFilter}
-            disabled={!workspaceView.supported} title={workspaceView.supported ? "按路径过滤左栏，不重新读取工作区（⌘F）" : "工作区状态尚未接入（占位 · P4-09）"} />
-          : page === "stats"
-            ? <PageSearchBox scope="统计页" label="在统计页筛选" placeholder="统计页暂不支持筛选" value="" onChange={() => undefined} disabled
-              title="统计页沿用提交页的范围和筛选；在统计页内筛选尚未接入（占位 · P6-01）" />
-            : filesSearchBox(filesView, filesFind, filesFindCount, setFilesFind, filesHistoryQuery, setFilesHistoryQuery)} />
+        workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} pageSearch={pageSearch} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
     {status.state === "error" || alerts.length || notice || view.scopeError ? <div role="alert" className="flex flex-col gap-1 border-b border-bad-line bg-bad-bg px-4 py-2 text-[13px] text-bad">
       {status.state === "error" ? <div className="flex items-center gap-2">
@@ -1319,10 +1446,14 @@ export function App(): React.JSX.Element {
           onClick={() => store.dismissNotice()}><X className="size-3.5" strokeWidth={1.75} /></button>
       </div> : null}
     </div> : null}
-    {fetchFailure && view.repository && fetchFailure.repoId === view.session?.repoId ? <FetchFailureBanner message={fetchFailure.message} retrying={fetching} canOpenTerminal={!view.repository.isBare}
-      onRetry={() => { void startFetch(fetchFailure.prune); }} onClose={() => setFetchFailure(null)}
+    {fetchFailure && view.repository && fetchFailure.repoId === view.repository?.path ? <FetchFailureBanner message={fetchFailure.message} retrying={fetching || Boolean(operationsView.running)} canOpenTerminal={!view.repository.isBare}
+      onRetry={() => { void startFetch(fetchFailure.prune, fetchFailure.remote); }} onClose={() => setFetchFailure(null)}
       onHandoff={() => { if (view.repository) openHandoff(fetchFailedRequest(view.repository, fetchFailure.message, fetchFailure.atUnixMs)); }} /> : null}
     {operationsView.failure && view.repository && operationsView.sessionKey?.startsWith(`${view.session?.repoId}:`) ? <OperationFailureBanner failure={operationsView.failure} canOpenTerminal={!view.repository.isBare}
+      onRetry={operationsView.failure.meta.step === "push" && operations ? () => {
+        const meta = operationsView.failure!.meta;
+        void operations.pushBranch(meta.refName, { remote: meta.remote ?? null, setUpstream: meta.upstream === null });
+      } : undefined}
       onHandoff={() => { const request = operations?.failureHandoff(); if (request) openHandoff(request); }} onClose={() => operationsStore.dismissFailure()} /> : null}
     {operationsView.notice ? <OperationNoticeBanner message={operationsView.notice} onClose={() => operationsStore.dismissNotice()} /> : null}
     {view.repository
@@ -1402,7 +1533,8 @@ export function App(): React.JSX.Element {
         <WorkspacePage repository={view.repository} view={workspaceView} filter={workspaceFilter}
           onSelect={item => workspaceStore.select({ group: item.group, pathHex: item.entry.path.rawHex })}
           onRefresh={() => { void workspaceStore.readStatus(true); }} onLoadMore={() => workspaceStore.loadMorePreview()}
-          onRetryContent={() => workspaceStore.retryContent()} onOpenFile={filesView.supported && workspaceHead ? openFileFromWorkspace : undefined} />
+          onRetryContent={() => workspaceStore.retryContent()} onOpenFile={filesView.supported && workspaceHead ? openFileFromWorkspace : undefined}
+          operations={operations} onOpenHandoff={openHandoff} />
       </div> : null}
       {page === "stats" || statsVisited.current ? <div className={cn("flex min-h-0 flex-1 flex-col overflow-hidden", page !== "stats" && "invisible absolute inset-0")}
         inert={page !== "stats"} data-testid="stats-page-slot">
@@ -1434,14 +1566,22 @@ export function App(): React.JSX.Element {
         selectedOid: paletteSelectedOid, oidLength: view.repository?.objectFormat === "sha256" ? 64 : 40,
         selectedMessage: paletteSelectedMessage, headReference: view.repository?.headReference ?? null,
         hasWorkingDirectory: Boolean(view.repository && !view.repository.isBare),
-        fetchAvailable: Boolean(actions.fetch && !actions.fetch.running) }}
+        fetchAvailable: Boolean(actions.fetch && !actions.fetch.running && !operationsView.running),
+        pushLabel: palettePushLabel,
+        mergeBaseLabel: paletteMergeBaseLabel }}
       onLoadNavigation={() => { if (!store.getView().navigation) void loadNavigation(); }} onExecute={executePalette} />
-    {operationsView.refusal && view.repository ? <OperationRefusal refusal={operationsView.refusal} canOpenTerminal={!view.repository.isBare}
+    {operationsView.refusal && view.repository ? <OperationRefusal key={operationsView.refusal.id} refusal={operationsView.refusal} canOpenTerminal={!view.repository.isBare}
       hasHandoff={Boolean(operations?.refusalHandoff())} onClose={() => operationsStore.dismissRefusal()} onOpenWorkspace={() => changePage("workspace")}
+      onReplaceUntracked={operations ? choice => { void operations.replaceUntrackedAndUpdate(choice); } : undefined}
+      onFetch={actions.fetch ? () => { void actions.fetch?.start(false); } : undefined}
       onHandoff={() => { const request = operations?.refusalHandoff(); if (request) openHandoff(request); }} /> : null}
     <CreateBranchDialog start={operations ? branchStart : null} onClose={() => setBranchStart(null)}
       busy={Boolean(operations?.busy)} onCreate={(name, startOid, switchAfter) => operations ? operations.createBranch(name, startOid, switchAfter) : Promise.resolve({ close: true })}
       existingBranches={(view.navigation?.refs ?? view.refs).filter(ref => ref.kind === "localBranch").map(ref => shortRefName(ref.name))} />
+    <FastForwardMergeDialog target={operations ? ffMergeTarget : null} busy={Boolean(operations?.busy)} onClose={() => setFfMergeTarget(null)}
+      onConfirm={(target, switchToTarget) => operations
+        ? operations.fastForwardMerge(target.targetRef, target.targetOid, target.sourceRef, target.sourceOid, switchToTarget)
+        : Promise.resolve(false)} />
     <HandoffDialog open={handoffOpen} onOpenChange={setHandoffOpen} request={handoffRequest} sessionKey={detailSessionKey}
       onLoadFacts={loadHandoffFacts} onCancelFacts={async () => { await window.commitScope.cancelHandoffFacts(); }}
       onCopyText={text => window.commitScope.copyText(text)} />
@@ -1482,16 +1622,13 @@ function treeVersionOptions(view: RepositoryView, scopeVersion: TreeVersion | nu
 
 /** The top-bar search on the files page: find in the loaded content, or search the path's history by message. */
 function filesSearchBox(files: ReturnType<FilesStore["getView"]>, find: { query: string; current: number }, count: number,
-  setFind: React.Dispatch<React.SetStateAction<{ query: string; current: number }>>, historyQuery: string, setHistoryQuery: (value: string) => void): React.ReactNode {
+  setFind: React.Dispatch<React.SetStateAction<{ query: string; current: number }>>, historyQuery: string, setHistoryQuery: (value: string) => void): React.JSX.Element | null {
   const selection = files.selection;
-  if (!files.supported || !selection) {
-    return <PageSearchBox scope="文件页" label="在文件页查找" placeholder="查找" value="" onChange={() => undefined} disabled
-      title={files.supported ? "先选择一个文件或目录" : "文件页尚未接入（占位 · P4-10）"} />;
-  }
-  // A file is always shown, so the box finds in it; a directory's box searches its history.
+  if (!files.supported || !selection) return null;
   if (selection.kind === "file") {
-    const truncated = files.content?.value?.truncated ?? false;
-    const lines = files.content?.value?.lines ?? 0;
+    const content = files.content?.value;
+    if (content?.kind !== "text" || (files.tab === "history" && files.selectedCommit !== null)) return null;
+    const { truncated, lines } = content;
     const position = count ? ((find.current % count) + count) % count + 1 : 0;
     const trailing = find.query
       ? <span className="shrink-0 font-mono text-[11.5px] whitespace-nowrap text-fg3 tabular-nums" data-testid="find-count">
@@ -1507,7 +1644,7 @@ function filesSearchBox(files: ReturnType<FilesStore["getView"]>, find: { query:
         setFind(current => ({ ...current, current: current.current + (event.shiftKey ? -1 : 1) }));
       }} />;
   }
-  return <PageSearchBox scope={selection.kind === "directory" ? "目录历史" : "文件历史"} label="按提交消息搜索这个路径的历史" placeholder="搜索提交消息"
+  return <PageSearchBox scope="目录历史" label="按提交消息搜索这个路径的历史" placeholder="搜索提交消息"
     value={historyQuery} onChange={setHistoryQuery} title="按提交消息搜索，路径条件固定为当前文件或目录（⌘F）" />;
 }
 

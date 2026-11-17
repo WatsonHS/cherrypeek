@@ -1,16 +1,19 @@
 import * as React from "react";
-import { FileText, Info, LoaderCircle, RefreshCw } from "lucide-react";
+import { ChevronDown, FileText, Info, LoaderCircle, RefreshCw } from "lucide-react";
 import type { ChangedFileStatus, GitPath, RepositoryInfo, WorkspaceDiff, WorkspaceFile } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { repositoryName, shortOid, shortRefName } from "../lib/format.js";
 import { cn } from "../lib/utils.js";
 import { workspaceHeadText } from "../lib/workspace-indicator.js";
 import { workspaceIsClean, workspaceItems, type WorkspaceGroup, type WorkspaceItem, type WorkspaceView } from "../lib/workspace-store.js";
+import { workspaceCommitRequest, workspaceReviewRequest, type HandoffRequest } from "../lib/handoff-prompt.js";
+import type { OperationsActions } from "../lib/use-operations.js";
 import { DiffView } from "./diff-view.js";
 import { SyntaxLine } from "./syntax-text.js";
 import { languageForPath } from "../lib/syntax/languages.js";
 import { useSyntaxLines } from "../lib/syntax/highlight.js";
 import { PlaceholderBox } from "./placeholder.js";
 import { Button } from "./ui/button.js";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
 const GROUP_TITLE: Record<WorkspaceGroup, string> = { conflict: "冲突", staged: "已暂存", unstaged: "未暂存", untracked: "未跟踪" };
 const GROUP_BASE: Record<WorkspaceGroup, string> = { conflict: "", staged: "HEAD → index", unstaged: "index → 工作区", untracked: "" };
@@ -41,8 +44,12 @@ function Counts({ additions, deletions }: { additions: number | null | undefined
   return <span className="font-mono text-[11.5px] whitespace-nowrap tabular-nums"><span className="text-add">+{additions}</span> <span className="text-del">−{deletions}</span></span>;
 }
 
+function unstageTargets(item: WorkspaceItem): string[] {
+  return item.entry.originalPath ? [item.entry.path.rawHex, item.entry.originalPath.rawHex] : [item.entry.path.rawHex];
+}
+
 /** The workspace page: files changed in this window's directory on the left, the chosen file on the right. */
-export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, onLoadMore, onRetryContent, onOpenFile }: {
+export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, onLoadMore, onRetryContent, onOpenFile, operations, onOpenHandoff }: {
   repository: RepositoryInfo;
   view: WorkspaceView;
   filter: string;
@@ -50,11 +57,56 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
   onRefresh(): void;
   onLoadMore(): void;
   onRetryContent(): void;
-  /** Opens the files page on this path's committed history (P4-10). */
   /** "在文件页打开": the committed file (its path before a staged rename) on the files page. */
   onOpenFile?(path: GitPath): void;
+  operations?: OperationsActions | null;
+  onOpenHandoff?(request: HandoffRequest): void;
 }): React.JSX.Element {
   const directory = repository.worktreePath ?? repository.path;
+  const repoKey = `${repository.path}:${repository.worktreePath ?? ""}`;
+  const status = view.status;
+  const [handoffOpen, setHandoffOpen] = React.useState(false);
+  const [discardTarget, setDiscardTarget] = React.useState<WorkspaceItem | null>(null);
+  const [discardSubmitting, setDiscardSubmitting] = React.useState(false);
+  const [commitMessage, setCommitMessage] = React.useState("");
+  const [userEditedMessage, setUserEditedMessage] = React.useState(false);
+  const [appliedDraftText, setAppliedDraftText] = React.useState<string | null>(null);
+  const [commitComposing, setCommitComposing] = React.useState(false);
+  const commitComposingRef = React.useRef(false);
+
+  React.useEffect(() => {
+    setHandoffOpen(false);
+    setDiscardTarget(null);
+    setDiscardSubmitting(false);
+    setCommitMessage("");
+    setUserEditedMessage(false);
+    setAppliedDraftText(null);
+  }, [repoKey]);
+
+  React.useEffect(() => {
+    if (userEditedMessage) return;
+    const draft = status?.draftCommitMessage ?? null;
+    if (draft && draft !== appliedDraftText) {
+      setCommitMessage(draft);
+      setAppliedDraftText(draft);
+    } else if (!draft && appliedDraftText !== null) {
+      setCommitMessage("");
+      setAppliedDraftText(null);
+    }
+  }, [status?.draftCommitMessage, userEditedMessage, appliedDraftText]);
+
+  React.useEffect(() => {
+    if (!discardTarget) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !discardSubmitting) {
+        event.preventDefault();
+        setDiscardTarget(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [discardTarget, discardSubmitting]);
+
   if (!view.supported) {
     return <div className="flex min-h-0 flex-1 overflow-hidden" data-testid="workspace-page">
       <nav aria-label="工作区改动的文件" className="flex min-h-0 max-w-[400px] flex-[1_1_340px] flex-col border-r border-line">
@@ -72,7 +124,6 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
       </main>
     </div>;
   }
-  const status = view.status;
   const items = workspaceItems(status);
   const needle = filter.trim().toLocaleLowerCase();
   const shown = needle ? items.filter(item => item.entry.path.display.toLocaleLowerCase().includes(needle)) : items;
@@ -80,6 +131,38 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
   const selected = view.selection ? items.find(item => item.group === view.selection!.group && item.entry.path.rawHex === view.selection!.pathHex) ?? null : null;
   const head = status ? status.headReference ? shortRefName(status.headReference) : status.headOid ? `detached ${shortOid(status.headOid)}` : "尚无提交" : workspaceHeadText(repository);
   const operation = status && status.operation !== "none" ? OPERATION_LABEL[status.operation] : "";
+  const stagedCount = items.filter(item => item.group === "staged").length;
+  const stageableCount = items.filter(item => item.group === "unstaged" || item.group === "untracked").length;
+  const canMutate = Boolean(!repository.isBare && operations && status && status.conflictCount === 0 && status.operation === "none");
+  const opBusy = Boolean(operations?.busy);
+  const draftText = status?.draftCommitMessage ?? null;
+  const hasUnloadableDraft = Boolean(draftText && userEditedMessage && commitMessage !== draftText);
+  const canCommit = Boolean(canMutate && !opBusy && stagedCount > 0 && commitMessage.trim().length > 0 && !commitComposing);
+  const submitCommit = async () => {
+    if (!operations || !canCommit) return;
+    const res = await operations.commitWorkspace(commitMessage, status?.headOid ?? repository.headOid ?? null);
+    if (res.committed) {
+      setCommitMessage("");
+      setUserEditedMessage(false);
+      setAppliedDraftText(null);
+    }
+  };
+  const confirmDiscard = async () => {
+    if (!discardTarget || !operations || opBusy || discardSubmitting) return;
+    setDiscardSubmitting(true);
+    try {
+      const done = await operations.discardPath(
+        discardTarget.entry.path.rawHex,
+        discardTarget.group === "untracked",
+        discardTarget.entry.path.display,
+        status?.headOid ?? repository.headOid ?? null,
+      );
+      if (done) setDiscardTarget(null);
+    } finally {
+      setDiscardSubmitting(false);
+    }
+  };
+
   return <div className="flex min-h-0 flex-1 overflow-hidden" data-testid="workspace-page">
     <nav aria-label="工作区改动的文件" className="flex min-h-0 max-w-[400px] flex-[1_1_340px] flex-col border-r border-line">
       <div className="flex items-center gap-1.5 pt-2 pr-2.5 pb-0.5 pl-[18px]">
@@ -93,6 +176,49 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
           <RefreshCw className={cn("size-3.5", view.loading && "animate-spin motion-reduce:animate-none")} strokeWidth={1.75} />
         </button>
       </div>
+      {!repository.isBare && status && (items.length > 0 || (canMutate && stageableCount > 0)) ? (
+        <div className="flex items-center gap-1.5 px-3 py-1.5">
+          {items.length > 0 && onOpenHandoff ? (
+            <Popover open={handoffOpen} onOpenChange={setHandoffOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" data-testid="workspace-handoff-button" className="h-7 gap-1 px-2 text-xs">
+                  <span>交给 Agent</span>
+                  <ChevronDown className="size-3 text-fg3" strokeWidth={1.75} aria-hidden="true" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-[216px] p-1.5">
+                <div role="menu" aria-label="交给 Agent" className="flex flex-col">
+                  <button type="button" role="menuitem" data-testid="workspace-handoff-review"
+                    className="rounded-[7px] px-2.5 py-1.5 text-left text-[13px] outline-none hover:bg-hover focus-visible:bg-hover"
+                    onClick={() => {
+                      setHandoffOpen(false);
+                      onOpenHandoff(workspaceReviewRequest(repository, status, status.observedAtUnixMs, selected?.entry.path ?? null));
+                    }}>
+                    <span className="block font-medium">审阅未提交改动…</span>
+                    <span className="block text-[11px] text-fg3">只读检查风险与遗漏</span>
+                  </button>
+                  <button type="button" role="menuitem" data-testid="workspace-handoff-commit"
+                    className="rounded-[7px] px-2.5 py-1.5 text-left text-[13px] outline-none hover:bg-hover focus-visible:bg-hover"
+                    onClick={() => {
+                      setHandoffOpen(false);
+                      onOpenHandoff(workspaceCommitRequest(repository, status, status.observedAtUnixMs, selected?.entry.path ?? null));
+                    }}>
+                    <span className="block font-medium">让 Agent 整理并提交…</span>
+                    <span className="block text-[11px] text-fg3">核对、验证检查后生成提交</span>
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
+          ) : null}
+          {canMutate && stageableCount > 0 ? (
+            <Button variant="soft" size="sm" data-testid="workspace-stage-all" disabled={opBusy}
+              className="ml-auto h-7 px-2 text-xs"
+              onClick={() => { void operations?.stagePaths([], true); }}>
+              全部暂存
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-auto px-2 pb-4" data-testid="workspace-files">
         {operation ? <p role="status" className="mx-1 mt-2 mb-0 rounded-lg bg-warn-bg px-3 py-2 text-xs text-warn">{operation}{status?.conflictCount ? ` · ${status.conflictCount} 个冲突` : ""}</p> : null}
         {view.stale ? <p role="status" className="mx-1 mt-2 mb-0 text-xs text-fg3">文件有变化，正在重新读取；下面是 {status ? clock(status.observedAtUnixMs) : ""} 的结果。</p> : null}
@@ -114,38 +240,163 @@ export function WorkspacePage({ repository, view, filter, onSelect, onRefresh, o
           const additions = groupItems.reduce((sum, item) => sum + (item.change?.additions ?? 0), 0);
           const deletions = groupItems.reduce((sum, item) => sum + (item.change?.deletions ?? 0), 0);
           return <div key={group} role="group" aria-label={GROUP_TITLE[group]}>
-            <div className="flex h-[30px] items-baseline gap-2 px-2.5 pt-2 text-xs">
+            <div className="flex h-[30px] items-center gap-2 px-2.5 pt-2 text-xs">
               <b className="font-semibold text-fg2">{GROUP_TITLE[group]}</b><span className="text-fg3">{groupItems.length}</span>
               {GROUP_BASE[group] ? <span className="font-mono text-[11px] text-fg3">{GROUP_BASE[group]}</span> : null}
-              {group === "staged" || group === "unstaged" ? <span className="ml-auto"><Counts additions={additions} deletions={deletions} /></span> : null}
+              <span className="ml-auto flex items-center gap-2">
+                {group === "staged" || group === "unstaged" ? <Counts additions={additions} deletions={deletions} /> : null}
+                {group === "staged" && canMutate ? (
+                  <button type="button" data-testid="workspace-unstage-all" disabled={opBusy}
+                    className="rounded px-1.5 py-0.5 text-[11px] text-fg2 hover:bg-hover hover:text-fg disabled:opacity-45"
+                    onClick={() => { void operations?.unstagePaths([], true); }}>
+                    全部取消暂存
+                  </button>
+                ) : null}
+              </span>
             </div>
             {groupItems.map(item => {
               const { name, dir } = splitPath(item.entry.path.display);
               const isSelected = selected?.group === item.group && selected.entry.path.rawHex === item.entry.path.rawHex;
-              return <button key={`${item.group}:${item.entry.path.rawHex}`} type="button" data-testid="workspace-file" aria-pressed={isSelected}
-                aria-label={`${GROUP_TITLE[item.group]}：${item.entry.path.display}`} onClick={() => onSelect(item)}
-                className={cn("flex h-10 w-full items-center gap-2 rounded-[9px] px-2.5 text-left hover:bg-hover", isSelected && "bg-panel shadow-selected hover:bg-panel")}>
-                <StatusBadge item={item} small />
-                <span className="flex min-w-0 flex-1 items-baseline gap-[7px] overflow-hidden whitespace-nowrap" title={item.entry.originalPath ? `${item.entry.originalPath.display} → ${item.entry.path.display}` : item.entry.path.display}>
-                  <span className="text-[13.5px] font-medium">{name}</span><span className="truncate text-xs text-fg3">{dir}</span>
-                </span>
-                {item.alsoIn ? <span className="inline-flex h-[18px] shrink-0 items-center rounded-[9px] bg-sunken px-1.5 text-[10.5px] font-medium whitespace-nowrap text-fg3">也有{GROUP_TITLE[item.alsoIn]}</span> : null}
-                {item.change ? <Counts additions={item.change.additions} deletions={item.change.deletions} />
-                  : item.group === "untracked" && item.entry.untrackedSize !== null ? <span className="text-[11.5px] whitespace-nowrap text-fg3 tabular-nums">{formatBytes(item.entry.untrackedSize)}</span> : null}
-              </button>;
+              return <div key={`${item.group}:${item.entry.path.rawHex}`} data-testid="workspace-file-row"
+                className={cn("group/ws flex h-10 w-full items-center gap-1 rounded-[9px] pr-1.5 hover:bg-hover", isSelected && "bg-panel shadow-selected hover:bg-panel")}>
+                <button type="button" data-testid="workspace-file" aria-pressed={isSelected}
+                  aria-label={`${GROUP_TITLE[item.group]}：${item.entry.path.display}`} onClick={() => onSelect(item)}
+                  className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2.5 pr-1 text-left">
+                  <StatusBadge item={item} small />
+                  <span className="flex min-w-0 flex-1 items-baseline gap-[7px] overflow-hidden whitespace-nowrap" title={item.entry.originalPath ? `${item.entry.originalPath.display} → ${item.entry.path.display}` : item.entry.path.display}>
+                    <span className="text-[13.5px] font-medium">{name}</span><span className="truncate text-xs text-fg3">{dir}</span>
+                  </span>
+                  {item.alsoIn ? <span className="inline-flex h-[18px] shrink-0 items-center rounded-[9px] bg-sunken px-1.5 text-[10.5px] font-medium whitespace-nowrap text-fg3">也有{GROUP_TITLE[item.alsoIn]}</span> : null}
+                  {item.change ? <Counts additions={item.change.additions} deletions={item.change.deletions} />
+                    : item.group === "untracked" && item.entry.untrackedSize !== null ? <span className="text-[11.5px] whitespace-nowrap text-fg3 tabular-nums">{formatBytes(item.entry.untrackedSize)}</span> : null}
+                </button>
+                {canMutate && item.group === "staged" ? (
+                  <button type="button" data-testid="workspace-unstage-file" disabled={opBusy}
+                    aria-label={`取消暂存 ${item.entry.path.display}`} title="从暂存区撤回"
+                    className={cn("h-6 shrink-0 rounded px-1.5 text-[11px] text-fg2 hover:bg-sunken hover:text-fg disabled:opacity-45",
+                      isSelected ? "opacity-100" : "opacity-0 group-hover/ws:opacity-100 focus-visible:opacity-100")}
+                    onClick={() => { void operations?.unstagePaths(unstageTargets(item)); }}>
+                    撤回
+                  </button>
+                ) : null}
+                {canMutate && (item.group === "unstaged" || item.group === "untracked") ? (
+                  <>
+                    <button type="button" data-testid="workspace-stage-file" disabled={opBusy}
+                      aria-label={`暂存 ${item.entry.path.display}`} title="暂存到 index"
+                      className={cn("h-6 shrink-0 rounded px-1.5 text-[11px] font-medium text-accent-fg hover:bg-accent-soft disabled:opacity-45",
+                        isSelected ? "opacity-100" : "opacity-0 group-hover/ws:opacity-100 focus-visible:opacity-100")}
+                      onClick={() => { void operations?.stagePaths([item.entry.path.rawHex]); }}>
+                      暂存
+                    </button>
+                    <button type="button" data-testid="workspace-discard-file" disabled={opBusy}
+                      aria-label={`丢弃 ${item.entry.path.display}`} title="丢弃工作区修改或删除未跟踪文件（需确认）"
+                      className={cn("h-6 shrink-0 rounded px-1.5 text-[11px] text-bad hover:bg-bad-bg disabled:opacity-45",
+                        isSelected ? "opacity-100" : "opacity-0 group-hover/ws:opacity-100 focus-visible:opacity-100")}
+                      onClick={() => setDiscardTarget(item)}>
+                      丢弃…
+                    </button>
+                  </>
+                ) : null}
+              </div>;
             })}
           </div>;
         })}
       </div>
+      {!repository.isBare && operations ? (
+        <div className="flex shrink-0 flex-col gap-2 border-t border-line bg-bg px-3 py-2.5" data-testid="workspace-commit-panel">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="font-medium text-fg2">提交说明</span>
+            {appliedDraftText && !userEditedMessage ? <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10.5px] text-accent-fg" data-testid="workspace-draft-badge">已载入草稿</span> : null}
+            {hasUnloadableDraft ? <button type="button" data-testid="workspace-load-draft"
+              className="text-[11px] text-accent-fg underline"
+              onClick={() => { if (draftText) { setCommitMessage(draftText); setAppliedDraftText(draftText); setUserEditedMessage(false); } }}>
+              载入草稿
+            </button> : null}
+            {commitMessage ? <button type="button" className="ml-auto text-[11px] text-fg3 hover:text-fg"
+              onClick={() => { setCommitMessage(""); setUserEditedMessage(true); }}>
+              清空
+            </button> : null}
+          </div>
+          {status && (status.conflictCount > 0 || status.operation !== "none") ? (
+            <p className="m-0 rounded bg-warn-bg px-2.5 py-1.5 text-[11.5px] text-warn">
+              工作区有冲突或进行中的合并/变基，不能直接暂存或提交；可交给 Agent 或在终端处理。
+            </p>
+          ) : null}
+          <textarea
+            data-testid="workspace-commit-message"
+            aria-label="提交说明"
+            placeholder="输入提交说明（⌘Enter 或 Ctrl+Enter 提交）"
+            rows={3}
+            disabled={Boolean(!status || status.conflictCount > 0 || status.operation !== "none")}
+            value={commitMessage}
+            onChange={event => {
+              setCommitMessage(event.target.value);
+              setUserEditedMessage(true);
+            }}
+            onCompositionStart={() => { commitComposingRef.current = true; setCommitComposing(true); }}
+            onCompositionEnd={() => { commitComposingRef.current = false; setCommitComposing(false); }}
+            onKeyDown={event => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing && !commitComposingRef.current && event.keyCode !== 229) {
+                event.preventDefault();
+                void submitCommit();
+              }
+            }}
+            className="min-h-[68px] resize-y rounded-lg border border-line2 bg-panel px-2.5 py-2 text-[12.5px] leading-relaxed text-fg outline-none placeholder:text-fg3 focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50"
+          />
+          <div className="flex items-center gap-2">
+            <span className="text-[11.5px] text-fg3">
+              {stagedCount > 0 ? `已暂存 ${stagedCount} 个文件` : "请先暂存改动再提交"}
+            </span>
+            <Button size="sm" className="ml-auto" data-testid="workspace-commit-submit" disabled={!canCommit}
+              onClick={() => { void submitCommit(); }}>
+              提交已暂存改动（{stagedCount}）
+            </Button>
+          </div>
+        </div>
+      ) : null}
       <div className="flex h-[34px] shrink-0 items-center border-t border-line px-[18px] text-xs text-fg3">
         {status ? `${needle ? `${shown.length} / ` : ""}${status.complete ? "" : "至少 "}${status.totalPaths.toLocaleString()} 个文件` : ""}
       </div>
     </nav>
     <main aria-label={selected ? `${selected.entry.path.display} 的改动` : "所选文件的改动"} className="min-h-0 min-w-0 flex-[999_1_560px] overflow-auto overscroll-contain bg-panel">
       {selected ? <SelectedFile item={selected} view={view} onLoadMore={onLoadMore} onRetry={onRetryContent}
-        onOpenFile={onOpenFile && committed(selected) ? () => onOpenFile(selected.entry.originalPath ?? selected.entry.path) : undefined} />
+        onOpenFile={onOpenFile && committed(selected) ? () => onOpenFile(selected.entry.originalPath ?? selected.entry.path) : undefined}
+        onStage={canMutate && (selected.group === "unstaged" || selected.group === "untracked") ? () => { void operations?.stagePaths([selected.entry.path.rawHex]); } : undefined}
+        onUnstage={canMutate && selected.group === "staged" ? () => { void operations?.unstagePaths(unstageTargets(selected)); } : undefined}
+        onDiscard={canMutate && (selected.group === "unstaged" || selected.group === "untracked") ? () => setDiscardTarget(selected) : undefined}
+        onHandoff={onOpenHandoff && status ? () => onOpenHandoff(workspaceReviewRequest(repository, status, status.observedAtUnixMs, selected.entry.path)) : undefined}
+        busy={opBusy} />
         : <p className="m-0 flex h-full items-center justify-center text-[13px] text-fg3">{status ? "选择左侧的文件查看改动。" : ""}</p>}
     </main>
+    {discardTarget ? (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4" data-testid="workspace-discard-backdrop">
+        <section role="dialog" aria-modal="true" aria-labelledby="workspace-discard-title" data-testid="workspace-discard-dialog"
+          className="flex w-full max-w-[440px] flex-col gap-3 rounded-xl border border-line bg-panel p-5 shadow-xl">
+          <h2 id="workspace-discard-title" className="m-0 text-[16px] font-semibold">
+            {discardTarget.group === "untracked" ? "删除未跟踪文件？" : "丢弃未暂存改动？"}
+          </h2>
+          <code className="rounded-lg bg-bg px-3 py-2 font-mono text-xs break-all text-fg">{discardTarget.entry.path.display}</code>
+          <p className="m-0 text-[13px] leading-5 text-fg2">
+            {discardTarget.group === "untracked"
+              ? "该未跟踪文件将从磁盘删除，无法撤回。"
+              : discardTarget.alsoIn === "staged"
+                ? "工作区未暂存部分的修改将被还原为当前暂存区版本；已暂存的内容会保留。"
+                : "该文件在工作区相对于 index 的修改将被还原，无法撤回。"}
+          </p>
+          <footer className="mt-1 flex items-center justify-end gap-2">
+            <Button variant="outline" size="sm" autoFocus data-testid="workspace-discard-cancel"
+              disabled={discardSubmitting} onClick={() => setDiscardTarget(null)}>
+              取消
+            </Button>
+            <Button size="sm" data-testid="workspace-discard-confirm" disabled={opBusy || discardSubmitting}
+              className="bg-bad text-panel hover:bg-bad/90"
+              onClick={() => { void confirmDiscard(); }}>
+              确认丢弃
+            </Button>
+          </footer>
+        </section>
+      </div>
+    ) : null}
   </div>;
 }
 
@@ -162,14 +413,36 @@ function committed(item: WorkspaceItem): boolean {
   return !added || item.entry.originalPath !== null;
 }
 
-function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: WorkspaceItem; view: WorkspaceView; onLoadMore(): void; onRetry(): void; onOpenFile?(): void }): React.JSX.Element {
+function SelectedFile({
+  item,
+  view,
+  onLoadMore,
+  onRetry,
+  onOpenFile,
+  onStage,
+  onUnstage,
+  onDiscard,
+  onHandoff,
+  busy,
+}: {
+  item: WorkspaceItem;
+  view: WorkspaceView;
+  onLoadMore(): void;
+  onRetry(): void;
+  onOpenFile?(): void;
+  onStage?(): void;
+  onUnstage?(): void;
+  onDiscard?(): void;
+  onHandoff?(): void;
+  busy?: boolean;
+}): React.JSX.Element {
   const [controls, setControls] = React.useState<HTMLElement | null>(null);
   const { name, dir } = splitPath(item.entry.path.display);
   const content = view.content;
   const side = item.group === "staged" ? "已暂存 · HEAD → index" : item.group === "unstaged" ? "未暂存 · index → 工作区" : item.group === "untracked" ? "未跟踪 · 只在工作区" : "冲突 · 工作区里带冲突标记的内容";
   const other = item.alsoIn ? item.entry[item.alsoIn] : null;
   return <div className="mx-auto flex max-w-[960px] flex-col gap-3.5 px-9 pt-[22px] pb-12" data-testid="workspace-selected">
-    <div className="flex flex-wrap items-center gap-3">
+    <div className="flex flex-wrap items-center gap-2">
       <StatusBadge item={item} />
       <div className="flex min-w-[200px] flex-1 flex-col gap-px">
         <span className="flex items-baseline gap-2 overflow-hidden whitespace-nowrap"><span className="text-[17px] font-semibold">{name}</span><span className="truncate text-[12.5px] text-fg3">{dir}</span></span>
@@ -177,6 +450,10 @@ function SelectedFile({ item, view, onLoadMore, onRetry, onOpenFile }: { item: W
           {item.entry.originalPath ? ` · 来自 ${item.entry.originalPath.display}` : ""}</span>
       </div>
       <div ref={setControls} data-testid="workspace-diff-controls" className="flex shrink-0 items-center gap-1" />
+      {onStage ? <Button variant="soft" size="sm" disabled={busy} onClick={onStage} data-testid="workspace-selected-stage">暂存</Button> : null}
+      {onUnstage ? <Button variant="outline" size="sm" disabled={busy} onClick={onUnstage} data-testid="workspace-selected-unstage">取消暂存</Button> : null}
+      {onDiscard ? <Button variant="outline" size="sm" disabled={busy} onClick={onDiscard} className="text-bad hover:bg-bad-bg" data-testid="workspace-selected-discard">丢弃…</Button> : null}
+      {onHandoff ? <Button variant="outline" size="sm" onClick={onHandoff} data-testid="workspace-handoff-file">交给 Agent…</Button> : null}
       {onOpenFile ? <Button variant="outline" size="sm" onClick={onOpenFile} data-testid="workspace-open-file" title="在文件页看这个文件在 HEAD 里的版本（这些改动的出发点）和它的历史">
         <FileText className="size-3.5" strokeWidth={1.75} />在文件页打开</Button> : null}
     </div>

@@ -18,8 +18,8 @@ export function SyncTags({ model, lastFetchUnixMs }: { model: SyncRowModel; last
   </span>;
 }
 
-/** The row-end action: 更新 when it can fast-forward, 交给 Agent when diverged. Nothing otherwise. */
-export function SyncAction({ model, name, busy, running, onUpdate, onHandoff }: {
+/** The row-end action: 更新 when it can fast-forward, 推送 when ahead, 交给 Agent when diverged. */
+export function SyncAction({ model, name, busy, running, onUpdate, onPush, onHandoff }: {
   model: SyncRowModel;
   name: string;
   /** Another operation is running: the control is disabled. */
@@ -27,6 +27,7 @@ export function SyncAction({ model, name, busy, running, onUpdate, onHandoff }: 
   /** This control's own operation is running. */
   running: boolean;
   onUpdate(): void;
+  onPush?(): void;
   onHandoff(): void;
 }): React.JSX.Element | null {
   if (model.action === "update") {
@@ -34,6 +35,13 @@ export function SyncAction({ model, name, busy, running, onUpdate, onHandoff }: 
       aria-label={`更新 ${name}（快进到上游）`} title="快进到上游；当前分支会先 fetch"
       onClick={onUpdate}>
       {running ? <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" /> : null}更新
+    </Button>;
+  }
+  if (model.action === "push" && onPush) {
+    return <Button variant="soft" size="sm" data-testid="branch-push" className="h-7 shrink-0 px-2 text-xs" disabled={busy}
+      aria-label={`推送 ${name} 到 ${model.upstream ?? "上游"}`} title="非强制推送到上游"
+      onClick={onPush}>
+      {running ? <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" /> : null}推送
     </Button>;
   }
   if (model.action === "diverged") {

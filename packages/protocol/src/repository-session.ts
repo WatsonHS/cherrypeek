@@ -56,10 +56,10 @@ export type { GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, B
 export type { ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams, WorkspaceSide } from "./generated/client-message.js";
 export type { ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams } from "./generated/client-message.js";
 
-import type { FetchRepositoryParams } from "./generated/client-message.js";
-import type { FetchResult } from "./generated/server-message.js";
-export type { FetchRepositoryParams } from "./generated/client-message.js";
-export type { FetchResult } from "./generated/server-message.js";
+import type { FetchRepositoryParams, PushRepositoryParams } from "./generated/client-message.js";
+import type { FetchResult, PushResult } from "./generated/server-message.js";
+export type { FetchRepositoryParams, PushRepositoryParams } from "./generated/client-message.js";
+export type { FetchResult, PushResult } from "./generated/server-message.js";
 import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "./generated/client-message.js";
 import type { BranchSyncResult, BranchSync, BranchSyncState, OperationCheck, OperationRun, OperationBlocker, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
   EvolutionEstimate, EvolutionChunk, EvolutionResult } from "./generated/server-message.js";
@@ -199,6 +199,8 @@ export interface RepositorySessionApi {
    * index, HEAD and local branches alone and does not change the browsing snapshot; refresh afterwards.
    */
   fetchRepository(params: FetchRepositoryParams): Promise<RepositorySessionResult<FetchResult>>;
+  /** P7-01: non-force push (or initial `--set-upstream`). Leaves local history untouched on refusal. */
+  pushRepository(params: PushRepositoryParams): Promise<RepositorySessionResult<PushResult>>;
   /** Stops the operation in progress, if any, and waits until the core has stopped it. */
   cancelRepositoryOperation(): Promise<RepositorySessionResult<{ cancelled: boolean }>>;
 

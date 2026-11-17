@@ -56,15 +56,26 @@ function ActivityCards({ stats, request, actions }: { stats: ActivityOverview; r
 function BucketCard({ stats, bucket, range, actions }: { stats: ActivityOverview; bucket: StatsBucket; range: { startUnix: number; endUnix: number }; actions: StatsActions }): React.JSX.Element {
   const title = bucketChartTitle(bucket);
   const total = stats.buckets.reduce((sum, item) => sum + item.count, 0);
-  const items = stats.buckets.map(item => ({ key: item.startUnix, label: bucketLabel(item.startUnix, bucket), value: item.count, title: `${bucketLabel(item.startUnix, bucket)} · ${item.count} 个提交` }));
+  const items = stats.buckets.map((item, index) => {
+    const end = stats.buckets[index + 1]?.startUnix ?? bucketEnd(item.startUnix, bucket);
+    const clipped = clipToRange(item.startUnix, end, range);
+    return {
+      key: item.startUnix,
+      label: bucketLabel(item.startUnix, bucket),
+      value: item.count,
+      title: `${bucketLabel(item.startUnix, bucket)} · ${item.count} 个提交`,
+      startUnix: clipped.startUnix,
+      endUnix: clipped.endUnix,
+    };
+  });
   const pick = (startUnix: number) => {
-    const index = stats.buckets.findIndex(item => item.startUnix === startUnix);
-    const end = stats.buckets[index + 1]?.startUnix ?? bucketEnd(startUnix, bucket);
-    const clipped = clipToRange(startUnix, end, range);
-    actions.filterTime(clipped.startUnix, clipped.endUnix);
+    const item = items.find(entry => entry.key === startUnix);
+    if (!item) return;
+    actions.filterTime(item.startUnix, item.endUnix);
   };
-  return <StatsCard title={title} label={title} coverage={stats.coverage} className="min-h-[260px]" hint="点击一个柱，在提交页按这段时间筛选">
-    <BucketBars items={items} label={`${title}柱状图，共 ${formatCount(total)} 个提交${stats.coverage.complete ? "" : "（部分统计）"}`} onPick={pick} empty="当前范围内没有提交。" />
+  return <StatsCard title={title} label={title} coverage={stats.coverage} className="min-h-[260px]" hint="点击一个柱筛选，或拖动框选多柱放大 / 查看">
+    <BucketBars items={items} label={`${title}柱状图，共 ${formatCount(total)} 个提交${stats.coverage.complete ? "" : "（部分统计）"}`} onPick={pick}
+      onZoom={actions.zoomTime} onFilterRange={actions.filterTime} empty="当前范围内没有提交。" />
     <p className="m-0 text-xs text-fg3">共 <b className="font-semibold text-fg tabular-nums">{formatCount(total)}</b> 个提交 · {formatDate(range.startUnix)} 起 {formatDate(range.endUnix - 1)} 止（本地时间）</p>
   </StatsCard>;
 }

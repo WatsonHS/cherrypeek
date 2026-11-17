@@ -2,7 +2,7 @@ import type { RefInfo, RepositoryScope, WorktreeInfo } from "../../../../../pack
 import { repositoryName, shortRefName } from "./format.js";
 
 export type PaletteCommand = "openRepository" | "commits" | "files" | "workspace" | "stats" | "copyCommit" | "copyMessage" | "copyBranch"
-  | "openFinder" | "openTerminal" | "openEditor" | "fetch" | "fetchPrune";
+  | "openFinder" | "openTerminal" | "openEditor" | "fetch" | "fetchPrune" | "push" | "mergeIntoBase";
 export type PaletteAction = { kind: "commit"; oid: string } | { kind: "scope"; scope: RepositoryScope } | { kind: "command"; command: PaletteCommand };
 export interface PaletteItem {
   id: string;
@@ -29,6 +29,10 @@ export interface PaletteContext {
   hasWorkingDirectory?: boolean;
   /** P5-01: the core can run operations and no fetch is in progress. */
   fetchAvailable?: boolean;
+  /** M7: label for non-force push/publish of current branch when available. */
+  pushLabel?: string | null;
+  /** M7: label for fast-forward merging current branch into local default base. */
+  mergeBaseLabel?: string | null;
 }
 
 /** Only uses the current frozen navigation snapshot; never reads the repository from the renderer. */
@@ -62,6 +66,8 @@ export function paletteItems(query: string, context: PaletteContext, modifier = 
     ["stats", "切换到统计页", context.repositoryReady, `${modifier}4`],
     ["fetch", "Fetch：从所有远端获取新提交", context.repositoryReady && Boolean(context.fetchAvailable)],
     ["fetchPrune", "Fetch 并清理远端已删除的分支", context.repositoryReady && Boolean(context.fetchAvailable)],
+    ["push", context.pushLabel ?? "推送当前分支", context.repositoryReady && Boolean(context.fetchAvailable && context.pushLabel)],
+    ["mergeIntoBase", context.mergeBaseLabel ?? "快进合入默认基准分支…", context.repositoryReady && Boolean(context.fetchAvailable && context.mergeBaseLabel)],
     ["copyCommit", "复制当前提交 hash", context.repositoryReady && Boolean(context.selectedOid)],
     ["copyMessage", "复制当前提交消息", context.repositoryReady && Boolean(context.selectedOid && context.selectedMessage)],
     ["copyBranch", context.headReference ? `复制当前分支名 ${shortRefName(context.headReference)}` : "复制当前分支名", context.repositoryReady && Boolean(context.headReference)],

@@ -259,3 +259,39 @@ test("changing the evolution commit drops the estimate", async () => {
   assert.equal(store.getView().evolution.estimate, null);
   store.dispose();
 });
+
+test("zoomRange refines bucket granularity and clearZoom / setPreset restores", async () => {
+  const { api, store, binding } = setup();
+  store.bind(binding());
+  await tick();
+  api.resolve("activity", ok(overview("thirty days")));
+  await tick();
+  assert.equal(store.getView().bucket, "day");
+  assert.equal(store.getView().zoomedRange, null);
+
+  const start = Math.floor(NOW.getTime() / 1_000) - 6 * 3_600;
+  const end = Math.floor(NOW.getTime() / 1_000);
+  store.zoomRange({ startUnix: start, endUnix: end });
+  await tick();
+  assert.deepEqual(store.getView().zoomedRange, { startUnix: start, endUnix: end });
+  assert.equal(store.getView().bucket, "tenMinutes");
+  assert.deepEqual(api.calls.at(-1).params.range, { startUnix: start, endUnix: end });
+  api.resolve("activity", ok(overview("zoomed")));
+  await tick();
+
+  store.clearZoom();
+  await tick();
+  assert.equal(store.getView().zoomedRange, null);
+  assert.equal(store.getView().bucket, "day");
+  api.resolve("activity", ok(overview("restored")));
+  await tick();
+
+  store.zoomRange({ startUnix: start, endUnix: end });
+  await tick();
+  store.setPreset("7d");
+  await tick();
+  assert.equal(store.getView().zoomedRange, null);
+  assert.equal(store.getView().preset, "7d");
+  assert.equal(store.getView().bucket, "day");
+  store.dispose();
+});

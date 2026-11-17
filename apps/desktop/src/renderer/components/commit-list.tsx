@@ -365,7 +365,19 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     if (preview.pageRevision === 0 || preview.pageRevision === lastRestoredPageRevision.current) return;
     const anchor = restorationAnchor;
     const element = listRef.current;
-    if (!anchor || preview.anchorMissing || !element) {
+    // A refreshed first page may no longer contain the old viewport. Its old scroll offset is meaningless
+    // in the new window and can hide the new tip even though there is no earlier page to scroll into.
+    if (preview.anchorMissing && element) {
+      resetScrollSpeed();
+      programmaticScrollTop.current = 0;
+      element.scrollTop = 0;
+      lastScrollTop.current = 0;
+      onViewportAnchor(preview.commits[0]?.oid);
+      setRange(virtual.range(0, element.clientHeight, 12));
+      lastRestoredPageRevision.current = preview.pageRevision;
+      return;
+    }
+    if (!anchor || !element) {
       lastRestoredPageRevision.current = preview.pageRevision;
       return;
     }

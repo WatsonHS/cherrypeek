@@ -1,6 +1,8 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { CommitScopeApi, CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { BlameChunkEvent, EvolutionChunkEvent, RepositoryObservationEvent, WorkspaceChangeEvent } from "../../../../packages/protocol/src/repository-session.js";
+
+const MAX_PATH_BYTES = 16 * 1024;
 
 const api: CommitScopeApi = {
   getCoreStatus: () => ipcRenderer.invoke("commitscope:core:get-status") as Promise<CoreStatus>,
@@ -12,6 +14,21 @@ const api: CommitScopeApi = {
   restartCore: () => ipcRenderer.invoke("commitscope:core:restart") as Promise<void>,
   chooseRepository: () => ipcRenderer.invoke("commitscope:repository:choose") as Promise<string | null>,
   getLaunchRepository: () => ipcRenderer.invoke("commitscope:repository:launch") as Promise<string | null>,
+  getPathForFile(file) {
+    try {
+      const raw = webUtils.getPathForFile(file);
+      if (typeof raw !== "string" || raw.length === 0 || raw.includes("\0")) return null;
+      if (new TextEncoder().encode(raw).length > MAX_PATH_BYTES) return null;
+      return /^(?:\/|[A-Za-z]:[\\/]|\\\\)/u.test(raw) ? raw : null;
+    } catch {
+      return null;
+    }
+  },
+  onOpenRepositoryRequested(listener) {
+    const wrapped = (_event: Electron.IpcRendererEvent, path: string) => listener(path);
+    ipcRenderer.on("commitscope:repository:open-requested", wrapped);
+    return () => ipcRenderer.removeListener("commitscope:repository:open-requested", wrapped);
+  },
   copyText: text => ipcRenderer.invoke("commitscope:clipboard:write-text", text) as Promise<void>,
   openWorkspaceIn: (target, reselect = false) => ipcRenderer.invoke("commitscope:workspace:open-in", target, reselect) as Promise<boolean>,
   onRepositoryObservationChanged(listener) {
@@ -67,6 +84,7 @@ const api: CommitScopeApi = {
   readBlame: (params, streamId) => ipcRenderer.invoke("commitscope:files:blame", params, streamId),
   cancelFiles: () => ipcRenderer.invoke("commitscope:files:cancel"),
   fetchRepository: params => ipcRenderer.invoke("commitscope:operations:fetch", params),
+  pushRepository: params => ipcRenderer.invoke("commitscope:operations:push", params),
   cancelRepositoryOperation: () => ipcRenderer.invoke("commitscope:operations:cancel"),
   getBranchSync: params => ipcRenderer.invoke("commitscope:operations:branch-sync", params),
   checkOperation: operation => ipcRenderer.invoke("commitscope:operations:check", operation),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, writeFile, readFile, rm, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename, rm, chmod, stat, symlink, readlink, realpath, truncate } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import {
   PagesDaemonClient,
@@ -26,7 +26,7 @@ async function commit(repo, path, text) {
   await git(repo, ["commit", "-qm", path], { env: identity });
   return git(repo, ["rev-parse", "HEAD"]);
 }
-async function fixture(t, label, sha256 = false) {
+async function fixture(t, label, sha256 = false, extraEnv = {}) {
   const base = join(root, label),
     remote = join(base, "remote"),
     repo = join(base, "local");
@@ -49,6 +49,7 @@ async function fixture(t, label, sha256 = false) {
     env: createDaemonEnvironment(join(base, "data"), {
       HOME: process.env.COMMITSCOPE_PAGES_HOME,
       XDG_CONFIG_HOME: join(process.env.COMMITSCOPE_PAGES_HOME, ".config"),
+      ...extraEnv,
     }),
   });
   await client.start();
@@ -78,6 +79,303 @@ async function rejected(f, op, kind) {
     "rejection leaves every file, index, ref, config and hook unchanged",
   );
 }
+
+async function collisionOperation(f) {
+  await git(f.remote, ["add", "-A"]);
+  await git(f.remote, ["commit", "-qm", "upstream adds files"], { env: identity });
+  await git(f.repo, ["fetch", "-q"]);
+  return { kind: "fastForward", refName: "refs/heads/main", expectedOid: f.first, upstreamOid: await git(f.remote, ["rev-parse", "HEAD"]) };
+}
+
+test("P5-06 ignored directory, untracked executable and identical files survive a confirmed update", async t => {
+  const f = await fixture(t, "confirmed-untracked");
+  for (const dir of [f.repo, f.remote]) await mkdir(join(dir, "ignored"));
+  await writeFile(join(f.repo, ".git/info/exclude"), "ignored/\n");
+  for (const dir of [f.repo, f.remote]) {
+    await writeFile(join(dir, "ignored/same.txt"), "same\n");
+    await symlink("same.txt", join(dir, "ignored/link"));
+  }
+  await writeFile(join(f.repo, "ignored/local only.txt"), "unrelated\n");
+  await writeFile(join(f.remote, "ignored/upstream only.txt"), "only upstream\n");
+  const oldText = "shared\nold\n";
+  const newText = "shared\nnew\nmore\n";
+  await writeFile(join(f.repo, "ignored/草稿.txt"), oldText);
+  await writeFile(join(f.remote, "ignored/草稿.txt"), newText);
+  await writeFile(join(f.repo, "run.sh"), "#!/bin/sh\n", { mode: 0o755 });
+  await writeFile(join(f.remote, "run.sh"), "#!/bin/sh\n", { mode: 0o644 });
+  await chmod(join(f.repo, "run.sh"), 0o750);
+  await git(f.repo, ["config", "branch.main.mergeOptions", "--squash"]);
+  const op = await collisionOperation(f);
+  const before = await snapshotTree(f.repo);
+  const check = await f.call("checkOperation", op);
+  assert.equal(check.allowed, false);
+  assert.equal(check.identicalUntrackedCount, 2);
+  const [dirty] = check.blockers;
+  assert.equal(dirty.kind, "dirty");
+  assert.ok(dirty.replaceToken);
+  assert.deepEqual(dirty.paths.map(p => p.path.display).sort(), ["ignored/草稿.txt", "run.sh"]);
+  assert.deepEqual(dirty.paths.find(p => p.path.display === "ignored/草稿.txt").replace, { upstreamOnlyLines: 2, localOnlyLines: 1 });
+  assert.equal((await f.call("runOperation", op)).outcome, "rejected");
+  const approved = { ...op, replaceUntracked: dirty.replaceToken };
+  assert.equal((await f.call("checkOperation", approved)).allowed, true);
+  assert.deepEqual(await snapshotTree(f.repo), before, "no preflight or default rejection may write the index or objects");
+  const run = await f.call("runOperation", approved);
+  assert.equal(run.outcome, "done");
+  const { backupDir, backedUpCount, identicalCount } = run.untracked;
+  assert.equal(identicalCount, 2);
+  assert.equal(backedUpCount, 2);
+  assert.ok(backupDir.startsWith((await realpath(join(f.base, "data/backups"))) + "/"));
+  assert.equal(await readFile(join(backupDir, "ignored/草稿.txt"), "utf8"), oldText);
+  assert.equal(await readFile(join(backupDir, "run.sh"), "utf8"), "#!/bin/sh\n");
+  assert.equal((await stat(join(backupDir, "run.sh"))).mode & 0o777, 0o750);
+  assert.equal((await stat(join(f.repo, "run.sh"))).mode & 0o100, 0);
+  await assert.rejects(stat(join(backupDir, "ignored/same.txt")), { code: "ENOENT" });
+  assert.equal(await readFile(join(f.repo, "ignored/草稿.txt"), "utf8"), newText);
+  assert.equal(await readFile(join(f.repo, "ignored/local only.txt"), "utf8"), "unrelated\n");
+  assert.equal(await readlink(join(f.repo, "ignored/link")), "same.txt");
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), op.upstreamOid);
+});
+
+test("P5-06 stale consent is rejected when either an identical or a differing local copy changes or disappears", async t => {
+  const f = await fixture(t, "stale-untracked");
+  for (const dir of [f.repo, f.remote]) await writeFile(join(dir, "same"), "same\n");
+  await writeFile(join(f.repo, "draft"), "old\n");
+  await writeFile(join(f.remote, "draft"), "new\n");
+  const op = await collisionOperation(f);
+  const { replaceToken } = (await f.call("checkOperation", op)).blockers[0];
+  assert.ok(replaceToken);
+  await assert.rejects(f.call("runOperation", { ...op, replaceUntracked: replaceToken, discardUntracked: replaceToken }),
+    error => error.code === "INVALID_REQUEST");
+  async function stale() {
+    const before = await snapshotTree(f.repo);
+    for (const choice of ["replaceUntracked", "discardUntracked"]) {
+      const approved = { ...op, [choice]: replaceToken };
+      assert.equal((await f.call("checkOperation", approved)).allowed, false);
+      assert.equal((await f.call("runOperation", approved)).outcome, "rejected");
+    }
+    assert.deepEqual(await snapshotTree(f.repo), before);
+  }
+  await writeFile(join(f.repo, "same"), "changed since review\n");
+  await stale();
+  await writeFile(join(f.repo, "same"), "same\n");
+  await writeFile(join(f.repo, "draft"), "changed again\n");
+  await stale();
+  await rm(join(f.repo, "draft"));
+  await stale();
+  const result = await f.call("runOperation", op);
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(result.untracked, { identicalCount: 1, backedUpCount: 0, backupDir: null });
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), op.upstreamOid);
+});
+
+test("P5-06 mixed tracked edits, unsafe index and path-type conflicts have no backup action", async t => {
+  const f = await fixture(t, "unsafe-untracked");
+  await writeFile(join(f.repo, "local"), "draft");
+  await writeFile(join(f.remote, "local"), "upstream");
+  const op = await collisionOperation(f);
+  async function blocked() {
+    const before = await snapshotTree(f.repo);
+    const check = await f.call("checkOperation", op);
+    assert.equal(check.allowed, false);
+    assert.ok(check.blockers.every(b => !b.replaceToken));
+    assert.equal((await f.call("runOperation", op)).outcome, "rejected");
+    assert.deepEqual(await snapshotTree(f.repo), before);
+  }
+  await writeFile(join(f.repo, "a.txt"), "my edit");
+  await blocked();
+  await writeFile(join(f.repo, "a.txt"), "one\n");
+  await git(f.repo, ["update-index", "--assume-unchanged", "a.txt"]);
+  await blocked();
+  await git(f.repo, ["update-index", "--no-assume-unchanged", "a.txt"]);
+  await rm(join(f.repo, "local"));
+  await mkdir(join(f.repo, "local"));
+  await writeFile(join(f.repo, "local/child"), "child");
+  await blocked();
+});
+
+test("P5-06 binary files in a SHA-256 repository can be backed up without text counts", async t => {
+  const f = await fixture(t, "sha256-binary", true);
+  const original = Buffer.from([0, 255, 2]);
+  const upstream = Buffer.from([0, 9, 8, 7]);
+  await writeFile(join(f.repo, "asset.bin"), original);
+  await writeFile(join(f.remote, "asset.bin"), upstream);
+  const op = await collisionOperation(f);
+  const [dirty] = (await f.call("checkOperation", op)).blockers;
+  assert.deepEqual(dirty.paths[0].replace, { upstreamOnlyLines: null, localOnlyLines: null });
+  const run = await f.call("runOperation", { ...op, replaceUntracked: dirty.replaceToken });
+  assert.equal(run.outcome, "done");
+  assert.deepEqual(await readFile(join(run.untracked.backupDir, "asset.bin")), original);
+  assert.deepEqual(await readFile(join(f.repo, "asset.bin")), upstream);
+});
+
+test("P5-06 target checkout conversions and nested repositories cannot be displaced", async t => {
+  const f = await fixture(t, "unsafe-paths");
+  await writeFile(join(f.remote, ".gitattributes"), "convert.txt text eol=crlf\n");
+  for (const dir of [f.repo, f.remote]) {
+    await writeFile(join(dir, "convert.txt"), "line\n");
+    await mkdir(join(dir, "nested"));
+    await writeFile(join(dir, "nested/doc"), "inner document\n");
+  }
+  await git(join(f.repo, "nested"), ["init", "-q"]);
+  await git(join(f.repo, "nested"), ["add", "doc"]);
+  await git(join(f.repo, "nested"), ["commit", "-qm", "inner commit"], { env: identity });
+  const op = await collisionOperation(f);
+  const check = await f.call("checkOperation", op);
+  assert.equal(check.identicalUntrackedCount, 0);
+  assert.ok(check.blockers.every(b => !b.replaceToken));
+  await rejected(f, op, "dirty");
+});
+
+test("P5-06 a failed Git fast-forward restores local files and executable permissions", async t => {
+  const f = await fixture(t, "restore-untracked");
+  await writeFile(join(f.repo, "draft"), "my version\n", { mode: 0o755 });
+  await writeFile(join(f.remote, "draft"), "remote version\n");
+  for (const dir of [f.repo, f.remote]) await writeFile(join(dir, "same"), "same\n");
+  const op = await collisionOperation(f);
+  const token = (await f.call("checkOperation", op)).blockers[0].replaceToken;
+  assert.ok(token);
+  // A second Git process owns the index lock. Preflight can read; Git cannot start the checkout.
+  await writeFile(join(f.repo, ".git/index.lock"), "independent lock");
+  for (const choice of ["replaceUntracked", "discardUntracked"]) {
+    await assert.rejects(f.call("runOperation", { ...op, [choice]: token }), e => e.code === "GIT_ERROR");
+  }
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), f.first);
+  assert.equal(await readFile(join(f.repo, "draft"), "utf8"), "my version\n");
+  assert.ok((await stat(join(f.repo, "draft"))).mode & 0o100);
+  assert.equal(await readFile(join(f.repo, "same"), "utf8"), "same\n");
+  assert.equal(await readFile(join(f.repo, ".git/index.lock"), "utf8"), "independent lock");
+});
+
+test("P5-06 a new file appearing during checkout survives rollback alongside the original backup", async t => {
+  const gate = process.env.COMMITSCOPE_PAGES_GATE_FILE;
+  const started = process.env.COMMITSCOPE_PAGES_GATE_STARTED;
+  const f = await fixture(t, "concurrent-untracked", false, {
+    PATH: `${process.env.COMMITSCOPE_PAGES_GIT_WRAPPER}:${process.env.PATH}`,
+    COMMITSCOPE_PAGES_GATE_FILE: gate,
+    COMMITSCOPE_PAGES_GATE_STARTED: started,
+  });
+  await writeFile(join(f.repo, "draft"), "original\n");
+  await writeFile(join(f.remote, "draft"), "upstream\n");
+  await writeFile(join(f.repo, ".git/info/exclude"), "draft\n");
+  const op = await collisionOperation(f);
+  const token = (await f.call("checkOperation", op)).blockers[0].replaceToken;
+  await rm(started, { force: true });
+  await writeFile(gate, "merge");
+  const result = f.call("runOperation", { ...op, replaceUntracked: token }).catch(error => error);
+  try {
+    for (let i = 0; i < 400; ++i) {
+      if (await stat(started).then(() => true, () => false)) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    await stat(started);
+    await writeFile(join(f.repo, "draft"), "concurrent edit\n", { flag: "wx" });
+  } finally {
+    await rm(gate, { force: true });
+  }
+  const failure = await result;
+  assert.equal(failure.code, "GIT_ERROR");
+  const backups = join(f.base, "data/backups");
+  const entries = await snapshotTree(backups);
+  const draft = entries.find(entry => entry.type === "file" && entry.path.endsWith("/draft"));
+  assert.ok(draft);
+  assert.ok(failure.message.includes(await realpath(dirname(join(backups, draft.path)))));
+  assert.equal(await readFile(join(backups, draft.path), "utf8"), "original\n");
+  assert.equal(await readFile(join(f.repo, "draft"), "utf8"), "concurrent edit\n");
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), f.first);
+});
+
+test("P5-06 can check and update 200 identical additions within the desktop request budget", async t => {
+  const f = await fixture(t, "boundary-identical");
+  for (const dir of [f.repo, f.remote]) {
+    await mkdir(join(dir, "files"));
+    await Promise.all(Array.from({ length: 200 }, (_, n) => writeFile(join(dir, "files", String(n)), String(n))));
+  }
+  const op = await collisionOperation(f);
+  const check = await f.call("checkOperation", op);
+  assert.equal(check.allowed, true);
+  assert.equal(check.identicalUntrackedCount, 200);
+  const run = await f.call("runOperation", op);
+  assert.equal(run.outcome, "done");
+  assert.deepEqual(run.untracked, { identicalCount: 200, backedUpCount: 0, backupDir: null });
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), op.upstreamOid);
+});
+
+test("P5-06 a local file over the byte limit blocks the whole replacement offer", async t => {
+  const f = await fixture(t, "byte-limit");
+  for (const dir of [f.remote, f.repo]) await writeFile(join(dir, "big"), "upstream");
+  await truncate(join(f.repo, "big"), 64 * 1024 * 1024 + 1);
+  await writeFile(join(f.repo, "draft"), "mine");
+  await writeFile(join(f.remote, "draft"), "theirs");
+  const op = await collisionOperation(f);
+  const check = await f.call("checkOperation", op);
+  assert.equal(check.allowed, false);
+  assert.ok(check.blockers.every(b => !b.replaceToken));
+  await rejected(f, op, "dirty");
+});
+
+test("P5-06 comparison limit inside one ignored directory refuses without a partial offer", async t => {
+  const f = await fixture(t, "limited-ignored");
+  for (const dir of [f.repo, f.remote]) await mkdir(join(dir, "ignored"));
+  await writeFile(join(f.repo, ".git/info/exclude"), "ignored/\n");
+  for (let i = 0; i < 201; i++) {
+    await writeFile(join(f.repo, "ignored", String(i)), "local");
+    await writeFile(join(f.remote, "ignored", String(i)), "upstream");
+  }
+  const op = await collisionOperation(f);
+  const check = await f.call("checkOperation", op);
+  assert.ok(check.blockers.some(b => b.kind === "dirty"));
+  assert.ok(check.blockers.every(b => !b.replaceToken));
+  await rejected(f, op, "dirty");
+});
+
+test("M5 large fast-forward checks thousands of paths within the desktop request budget and preserves local work", async t => {
+  const f = await fixture(t, "large-preflight");
+  const remoteDirectory = "upstream/new-files/with-a-long-component-for-path-comparison";
+  const localDirectory = "local/unfinished-files/with-a-long-component-for-path-comparison";
+  await mkdir(join(f.remote, remoteDirectory), { recursive: true });
+  await mkdir(join(f.repo, localDirectory), { recursive: true });
+  async function files(repo, directory, count) {
+    for (let start = 0; start < count; start += 100) {
+      await Promise.all(Array.from({ length: Math.min(100, count - start) }, (_, index) =>
+        writeFile(join(repo, directory, `file-${start + index}.txt`), "preserve this content\n")));
+    }
+  }
+  await files(f.remote, remoteDirectory, 8500);
+  await git(f.remote, ["add", "."]);
+  await git(f.remote, ["commit", "-qm", "many upstream paths"], { env: identity });
+  const target = await git(f.remote, ["rev-parse", "HEAD"]);
+  await git(f.repo, ["fetch", "-q"]);
+  await files(f.repo, localDirectory, 700);
+  const localBefore = await snapshotTree(join(f.repo, localDirectory));
+  const operation = { kind: "fastForward", refName: "refs/heads/main", expectedOid: f.first, upstreamOid: target };
+  const before = await snapshotTree(f.repo);
+  // The client uses the same 20 s request deadline as the desktop. The previous nested path decoder times out here.
+  const check = await f.call("checkOperation", operation);
+  assert.equal(check.allowed, true);
+  assert.equal(check.preservedDirtyCount, 700);
+  assert.deepEqual(await snapshotTree(f.repo), before, "preflight is read-only");
+  assert.equal((await f.call("runOperation", operation)).outcome, "done");
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), target);
+  assert.equal(await readFile(join(f.repo, remoteDirectory, "file-8499.txt"), "utf8"), "preserve this content\n");
+  assert.equal(await readFile(join(f.repo, localDirectory, "file-699.txt"), "utf8"), "preserve this content\n");
+  assert.deepEqual(await snapshotTree(join(f.repo, localDirectory)), localBefore, "all 700 local files are preserved");
+});
+
+test("M5 fast-forward preflight includes a renamed source and distinguishes sibling path prefixes", async t => {
+  const f = await fixture(t, "rename-path-preflight");
+  await git(f.remote, ["mv", "a.txt", "renamed.txt"]);
+  await git(f.remote, ["commit", "-qm", "rename upstream file"], { env: identity });
+  const target = await git(f.remote, ["rev-parse", "HEAD"]);
+  await git(f.repo, ["fetch", "-q"]);
+  const operation = { kind: "fastForward", refName: "refs/heads/main", expectedOid: f.first, upstreamOid: target };
+  await writeFile(join(f.repo, "a.txt"), "local edits to renamed source\n");
+  await rejected(f, operation, "dirty");
+  await writeFile(join(f.repo, "a.txt"), "one\n");
+  await writeFile(join(f.repo, "renamed.txt.local"), "safe sibling\n");
+  assert.equal((await f.call("checkOperation", operation)).allowed, true);
+  assert.equal((await f.call("runOperation", operation)).outcome, "done");
+  assert.equal(await readFile(join(f.repo, "renamed.txt.local"), "utf8"), "safe sibling\n");
+});
 for (const sha256 of [false, true])
   test(`M5 fast-forward current and other branches, SHA-${sha256 ? 256 : 1}`, async (t) => {
     const f = await fixture(t, `ff-${sha256}`, sha256);
@@ -437,4 +735,274 @@ test("M5 switch preserves staged and unstaged changes to an unchanged tracked pa
     "unstaged\n",
   );
   assert.equal(await git(f.repo, ["show", ":common.txt"]), "staged");
+});
+
+test("M7 pushRepository pushes ahead branch, publishes with setUpstream, and refuses diverged or stale non-ff remote", async (t) => {
+  const base = join(root, "m7-push");
+  const bareRemote = join(base, "origin.git");
+  const repo = join(base, "local");
+  const peer = join(base, "peer");
+  await mkdir(base, { recursive: true });
+  await git(base, ["init", "-q", "--bare", "-b", "main", bareRemote]);
+  await git(base, ["clone", "-q", bareRemote, repo]);
+  await commit(repo, "a.txt", "one\n");
+  await git(repo, ["push", "-q", "-u", "origin", "main"]);
+  await git(base, ["clone", "-q", bareRemote, peer]);
+
+  const aheadTip = await commit(repo, "a.txt", "two\n");
+  const client = new PagesDaemonClient(process.env.COMMITSCOPE_DAEMON_PATH, {
+    cwd: repo,
+    env: createDaemonEnvironment(join(base, "data"), {
+      HOME: process.env.COMMITSCOPE_PAGES_HOME,
+      XDG_CONFIG_HOME: join(process.env.COMMITSCOPE_PAGES_HOME, ".config"),
+    }),
+  });
+  await client.start();
+  client.session = projectSession(await client.open(repo));
+  t.after(() => client.stop());
+
+  const pushed = (await client.call("pushRepository", {
+    refName: "refs/heads/main",
+    expectedOid: aheadTip,
+    remote: null,
+    setUpstream: false,
+  })).chunks[0].data.result;
+  assert.equal(pushed.outcome, "done");
+  assert.equal(pushed.setUpstream, false);
+  assert.equal(await git(bareRemote, ["rev-parse", "refs/heads/main"]), aheadTip);
+
+  // Branch without upstream: setUpstream publishes it and writes tracking config.
+  await git(repo, ["switch", "-qc", "publish-me"]);
+  const pubTip = await commit(repo, "pub.txt", "publish\n");
+  client.session = projectSession(await client.refresh(client.session));
+  const published = (await client.call("pushRepository", {
+    refName: "refs/heads/publish-me",
+    expectedOid: pubTip,
+    remote: "origin",
+    setUpstream: true,
+  })).chunks[0].data.result;
+  assert.equal(published.outcome, "done");
+  assert.equal(published.setUpstream, true);
+  assert.equal(await git(bareRemote, ["rev-parse", "refs/heads/publish-me"]), pubTip);
+  assert.equal(await git(repo, ["config", "--get", "branch.publish-me.remote"]), "origin");
+  assert.equal(await git(repo, ["config", "--get", "branch.publish-me.merge"]), "refs/heads/publish-me");
+  client.session = projectSession(await client.refresh(client.session));
+  const syncAfterPublish = (await client.call("getBranchSync", { refNames: ["refs/heads/publish-me"] })).chunks[0].data.result;
+  assert.equal(syncAfterPublish.branches[0].state, "upToDate");
+
+  // Remote advances in peer while local main moves independently -> rejected safely without --force.
+  await git(peer, ["pull", "-q"]);
+  const peerTip = await commit(peer, "peer.txt", "peer\n");
+  await git(peer, ["push", "-q", "origin", "main"]);
+
+  await git(repo, ["switch", "-q", "main"]);
+  const localDivTip = await commit(repo, "local.txt", "local\n");
+  client.session = projectSession(await client.refresh(client.session));
+  const remoteSnapshot = await snapshotTree(bareRemote);
+  const localSnapshot = await snapshotTree(repo);
+  const rejectedUnfetched = (await client.call("pushRepository", {
+    refName: "refs/heads/main",
+    expectedOid: localDivTip,
+    remote: null,
+    setUpstream: false,
+  })).chunks[0].data.result;
+  assert.equal(rejectedUnfetched.outcome, "rejected");
+  assert.ok(rejectedUnfetched.blockers.some(b => b.kind === "remoteRejected"));
+  assert.deepEqual(await snapshotTree(bareRemote), remoteSnapshot);
+  assert.deepEqual(await snapshotTree(repo), localSnapshot);
+
+  // After fetch, local knows it diverged -> refused locally before touching remote.
+  await git(repo, ["fetch", "-q", "origin"]);
+  client.session = projectSession(await client.refresh(client.session));
+  const rejectedDiverged = (await client.call("pushRepository", {
+    refName: "refs/heads/main",
+    expectedOid: localDivTip,
+    remote: null,
+    setUpstream: false,
+  })).chunks[0].data.result;
+  assert.equal(rejectedDiverged.outcome, "rejected");
+  assert.ok(rejectedDiverged.blockers.some(b => b.kind === "diverged"));
+  assert.equal(await git(bareRemote, ["rev-parse", "refs/heads/main"]), peerTip);
+});
+
+test("M7 fastForwardMerge and deleteBranch respect ancestor merge and worktree safety", async (t) => {
+  const f = await fixture(t, "m7-merge-delete");
+  const mainStart = await git(f.repo, ["rev-parse", "refs/heads/main"]);
+  await git(f.repo, ["switch", "-qc", "feat"]);
+  const featTip = await commit(f.repo, "feat.txt", "feat\n");
+
+  // Fast-forward merge feat -> main without switching checkout first.
+  const mergedNoSwitch = await f.call("runOperation", {
+    kind: "fastForwardMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: mainStart,
+    sourceRef: "refs/heads/feat",
+    expectedSourceOid: featTip,
+    switchToTarget: false,
+  });
+  assert.equal(mergedNoSwitch.outcome, "done");
+  assert.equal(await git(f.repo, ["rev-parse", "refs/heads/main"]), featTip);
+  assert.equal(await git(f.repo, ["symbolic-ref", "HEAD"]), "refs/heads/feat");
+
+  // Advance feat again, merge into main WITH switchToTarget: true, then delete feat.
+  const featTip2 = await commit(f.repo, "feat2.txt", "feat2\n");
+  const mergedWithSwitch = await f.call("runOperation", {
+    kind: "fastForwardMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: featTip,
+    sourceRef: "refs/heads/feat",
+    expectedSourceOid: featTip2,
+    switchToTarget: true,
+  });
+  assert.equal(mergedWithSwitch.outcome, "done");
+  assert.equal(mergedWithSwitch.headReference, "refs/heads/main");
+  assert.equal(await git(f.repo, ["symbolic-ref", "HEAD"]), "refs/heads/main");
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), featTip2);
+
+  await git(f.repo, ["config", "branch.feat.description", "feature branch config"]);
+  const deleted = await f.call("runOperation", {
+    kind: "deleteBranch",
+    refName: "refs/heads/feat",
+    expectedOid: featTip2,
+    baseRefName: "refs/heads/main",
+  });
+  assert.equal(deleted.outcome, "done");
+  await assert.rejects(git(f.repo, ["show-ref", "--verify", "refs/heads/feat"]));
+  await assert.rejects(git(f.repo, ["config", "--get", "branch.feat.description"]));
+
+  // Patch-equivalent (non-ancestor) branch must be refused with notAncestorMerged.
+  await git(f.repo, ["branch", "patch-only", mainStart]);
+  await git(f.repo, ["switch", "-q", "patch-only"]);
+  const patchTip = await commit(f.repo, "equiv.txt", "same\n");
+  await git(f.repo, ["switch", "-q", "main"]);
+  await commit(f.repo, "equiv.txt", "same\n");
+  await rejected(f, {
+    kind: "deleteBranch",
+    refName: "refs/heads/patch-only",
+    expectedOid: patchTip,
+    baseRefName: "refs/heads/main",
+  }, "notAncestorMerged");
+
+  // Checked-out merged branch in a linked worktree is refused with checkedOutElsewhere.
+  const wtDir = join(f.base, "linked-wt");
+  await git(f.repo, ["worktree", "add", "-q", "-b", "checked-wt", wtDir, "main"]);
+  const mainNow = await git(f.repo, ["rev-parse", "refs/heads/main"]);
+  await rejected(f, {
+    kind: "deleteBranch",
+    refName: "refs/heads/checked-wt",
+    expectedOid: mainNow,
+    baseRefName: "refs/heads/main",
+  }, "checkedOutElsewhere");
+});
+
+test("M7 workspaceStage, Unstage (with renames and unborn HEAD), Discard, draftCommitMessage, and Commit (# + hook)", async (t) => {
+  const f = await fixture(t, "m7-workspace");
+  const headOid = await git(f.repo, ["rev-parse", "HEAD"]);
+
+  // Partial stage + discard unstaged keeps staged index content intact; untracked discard removes file.
+  await writeFile(join(f.repo, "a.txt"), "staged version\n");
+  const aHex = Buffer.from("a.txt").toString("hex");
+  const stageRes = await f.call("runOperation", { kind: "workspaceStage", pathsHex: [aHex], all: false });
+  assert.equal(stageRes.outcome, "done");
+  await writeFile(join(f.repo, "a.txt"), "unstaged discard me\n");
+  await writeFile(join(f.repo, "temp.untracked"), "remove me\n");
+  const tempHex = Buffer.from("temp.untracked").toString("hex");
+
+  await rejected(f, {
+    kind: "workspaceDiscard",
+    pathHex: aHex,
+    untracked: false,
+    expectedHeadOid: "0".repeat(40),
+  }, "refChanged");
+
+  const discardWork = await f.call("runOperation", {
+    kind: "workspaceDiscard",
+    pathHex: aHex,
+    untracked: false,
+    expectedHeadOid: headOid,
+  });
+  assert.equal(discardWork.outcome, "done");
+  assert.equal(await readFile(join(f.repo, "a.txt"), "utf8"), "staged version\n");
+  assert.equal(await git(f.repo, ["show", ":a.txt"]), "staged version");
+
+  const discardUntracked = await f.call("runOperation", {
+    kind: "workspaceDiscard",
+    pathHex: tempHex,
+    untracked: true,
+    expectedHeadOid: headOid,
+  });
+  assert.equal(discardUntracked.outcome, "done");
+  await assert.rejects(stat(join(f.repo, "temp.untracked")));
+
+  // Traversal outside repo root must fail validation before touching disk.
+  await assert.rejects(f.call("runOperation", {
+    kind: "workspaceStage",
+    pathsHex: [Buffer.from("../escape.txt").toString("hex")],
+    all: false,
+  }), e => e.code === "INVALID_REQUEST");
+
+  // Rename unstage: both new and old paths unstage cleanly.
+  await git(f.repo, ["mv", "a.txt", "b.txt"]);
+  const unstageRename = await f.call("runOperation", {
+    kind: "workspaceUnstage",
+    pathsHex: [Buffer.from("b.txt").toString("hex"), aHex],
+    all: false,
+  });
+  assert.equal(unstageRename.outcome, "done");
+  assert.equal(await git(f.repo, ["diff", "--cached", "--name-only"]), "");
+
+  // Re-stage all via all: true, verify draftCommitMessage deduplication and commit with '#' line preservation.
+  await rename(join(f.repo, "b.txt"), join(f.repo, "a.txt"));
+  await writeFile(join(f.repo, "a.txt"), "final committed\n");
+  assert.equal((await f.call("runOperation", { kind: "workspaceStage", pathsHex: [], all: true })).outcome, "done");
+
+  await writeFile(join(f.repo, ".git", "COMMIT_EDITMSG"), `${await git(f.repo, ["log", "-1", "--format=%B", "HEAD"])}\n# template\n`);
+  assert.equal((await f.client.workspaceStatus()).draftCommitMessage ?? null, null, "identical COMMIT_EDITMSG is filtered");
+  await writeFile(join(f.repo, ".git", "COMMIT_EDITMSG"), "feat: draft msg\n# Please enter the commit message\n");
+  assert.equal((await f.client.workspaceStatus()).draftCommitMessage, "feat: draft msg");
+
+  // Failing pre-commit hook surfaces GIT_ERROR without losing staged changes.
+  const hookPath = join(f.repo, ".git", "hooks", "pre-commit");
+  await writeFile(hookPath, "#!/bin/sh\necho 'pre-commit lint boom' >&2\nexit 1\n");
+  await chmod(hookPath, 0o755);
+  await assert.rejects(f.call("runOperation", {
+    kind: "workspaceCommit",
+    message: "feat: blocked by hook\n\n#99 preserved body comment",
+    expectedHeadOid: headOid,
+  }), e => e.code === "GIT_ERROR" && /pre-commit lint boom/u.test(e.message));
+  assert.equal(await git(f.repo, ["diff", "--cached", "--name-only"]), "a.txt");
+  await rm(hookPath);
+
+  const committed = await f.call("runOperation", {
+    kind: "workspaceCommit",
+    message: "feat: gate commit\n\n#99 preserved body comment",
+    expectedHeadOid: headOid,
+  });
+  assert.equal(committed.outcome, "done");
+  assert.ok(committed.committedOid);
+  assert.equal(await git(f.repo, ["rev-parse", "HEAD"]), committed.committedOid);
+  assert.equal(await git(f.repo, ["log", "-1", "--format=%B", "HEAD"]), "feat: gate commit\n\n#99 preserved body comment");
+
+  // Unborn HEAD repository supports workspaceStage & workspaceUnstage.
+  const unbornDir = join(root, "m7-unborn", "local");
+  const unbornData = join(root, "m7-unborn", "data");
+  await mkdir(unbornDir, { recursive: true });
+  await mkdir(unbornData, { recursive: true });
+  await git(unbornDir, ["init", "-q", "-b", "main"]);
+  await writeFile(join(unbornDir, "first.txt"), "hello\n");
+  const unbornClient = new PagesDaemonClient(process.env.COMMITSCOPE_DAEMON_PATH, {
+    cwd: unbornDir,
+    env: createDaemonEnvironment(unbornData, {
+      HOME: process.env.COMMITSCOPE_PAGES_HOME,
+      XDG_CONFIG_HOME: join(process.env.COMMITSCOPE_PAGES_HOME, ".config"),
+    }),
+  });
+  await unbornClient.start();
+  unbornClient.session = projectSession(await unbornClient.open(unbornDir));
+  t.after(() => unbornClient.stop());
+  const firstHex = Buffer.from("first.txt").toString("hex");
+  assert.equal((await unbornClient.call("runOperation", { operation: { kind: "workspaceStage", pathsHex: [firstHex], all: false } })).chunks[0].data.result.outcome, "done");
+  assert.equal(await git(unbornDir, ["ls-files", "--stage", "first.txt"]).then(s => s.length > 0), true);
+  assert.equal((await unbornClient.call("runOperation", { operation: { kind: "workspaceUnstage", pathsHex: [firstHex], all: false } })).chunks[0].data.result.outcome, "done");
+  assert.equal(await git(unbornDir, ["ls-files", "--stage", "first.txt"]), "");
 });

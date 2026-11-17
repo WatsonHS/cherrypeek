@@ -350,17 +350,32 @@ impl HistoryState {
         emit: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<T, PreviewError> {
         let mut oid = params.oid.to_ascii_lowercase();
-        if oid.len() < 4 || oid.len() > discovered.oid_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if oid.len() < 4
+            || oid.len() > discovered.oid_length
+            || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
             return Err(invalid_request("提交 hash 至少需要 4 位十六进制字符"));
         }
         if oid.len() < discovered.oid_length {
             let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
-            let output = git.run(
-                Path::new(&discovered.info.path),
-                &[string_arg("rev-parse"), string_arg("--verify"), string_arg("--end-of-options"), string_arg(format!("{oid}^{{commit}}"))],
-                None, 16 * 1024, cancelled, deadline,
-            ).map_err(map_git_failure)?;
-            let resolved = String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase();
+            let output = git
+                .run(
+                    Path::new(&discovered.info.path),
+                    &[
+                        string_arg("rev-parse"),
+                        string_arg("--verify"),
+                        string_arg("--end-of-options"),
+                        string_arg(format!("{oid}^{{commit}}")),
+                    ],
+                    None,
+                    16 * 1024,
+                    cancelled,
+                    deadline,
+                )
+                .map_err(map_git_failure)?;
+            let resolved = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_ascii_lowercase();
             if !output.status.success() || !resolved.starts_with(&oid) {
                 return Err(invalid_request("找不到唯一的提交，请检查或补全 hash"));
             }
@@ -453,8 +468,7 @@ impl HistoryState {
             executable,
             discovered,
             params,
-            cancelled,
-            deadline,
+            (cancelled, deadline),
             |_, _| Ok(()),
             emit,
         )?
@@ -468,11 +482,11 @@ impl HistoryState {
         executable: &Path,
         discovered: &DiscoveredRepository,
         params: &LocateHistoryDateParams,
-        cancelled: &AtomicBool,
-        deadline: Instant,
+        budget: (&AtomicBool, Instant),
         mut emit_location: impl FnMut(&HistoryDateLocation, bool) -> Result<(), PreviewError>,
         emit_page: impl FnOnce(&HistoryPage) -> Result<T, PreviewError>,
     ) -> Result<Option<T>, PreviewError> {
+        let (cancelled, deadline) = budget;
         if !(1..=500).contains(&params.page_size) {
             return Err(invalid_request("pageSize must be between 1 and 500"));
         }
@@ -2076,11 +2090,22 @@ mod tests {
         let first = read_page(&state, &discovered, None, 2).expect("first page");
         let target = run_git(&path, &["rev-parse", "HEAD~8"]);
         let located = locate_page(&state, &discovered, &target, 2).expect("locate commit");
-        let prefix = locate_page(&state, &discovered, &target[..8].to_ascii_uppercase(), 2).expect("locate abbreviated commit without an index");
+        let prefix = locate_page(&state, &discovered, &target[..8].to_ascii_uppercase(), 2)
+            .expect("locate abbreviated commit without an index");
         assert_eq!(prefix.offset, located.offset);
-        assert!(prefix.commits.iter().any(|commit| commit.commit.oid == target));
+        assert!(
+            prefix
+                .commits
+                .iter()
+                .any(|commit| commit.commit.oid == target)
+        );
         for invalid in ["abc", "HEAD~1", "00000000"] {
-            assert_eq!(locate_page(&state, &discovered, invalid, 2).unwrap_err().code, ErrorCode::InvalidRequest);
+            assert_eq!(
+                locate_page(&state, &discovered, invalid, 2)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidRequest
+            );
         }
         assert_eq!(located.offset, 8);
         assert!(
@@ -2160,8 +2185,10 @@ mod tests {
                     page_size: 2,
                     known_cursors: Some(known_cursors),
                 },
-                &AtomicBool::new(false),
-                Instant::now() + std::time::Duration::from_secs(5),
+                (
+                    &AtomicBool::new(false),
+                    Instant::now() + std::time::Duration::from_secs(5),
+                ),
                 |location, reused| {
                     assert!(reused);
                     reused_location = Some(location.clone());
@@ -2190,8 +2217,10 @@ mod tests {
                     page_size: 2,
                     known_cursors: Some(vec!["v1:stale-query:0".into()]),
                 },
-                &AtomicBool::new(false),
-                Instant::now() + std::time::Duration::from_secs(5),
+                (
+                    &AtomicBool::new(false),
+                    Instant::now() + std::time::Duration::from_secs(5),
+                ),
                 |location, reused| {
                     assert!(!reused);
                     missed_location = Some(location.clone());

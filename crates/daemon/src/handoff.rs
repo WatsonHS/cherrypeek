@@ -148,7 +148,7 @@ pub fn get_handoff_facts(
                 overlap_truncated = truncated;
             }
             if let Some((commits, count, truncated)) = read_branch_commits(
-                executable, &git, repo_path, discovered, &base.oid, branch_tip, cancelled, deadline,
+                executable, &git, discovered, &base.oid, branch_tip, cancelled, deadline,
             )? {
                 branch_commits = commits;
                 branch_commits_count = Some(count);
@@ -420,13 +420,13 @@ fn read_changed_paths(
 fn read_branch_commits(
     executable: &Path,
     git: &ReadOnlyGit,
-    repository_path: &Path,
     discovered: &DiscoveredRepository,
     base_oid: &str,
     branch_oid: &str,
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<Option<(Vec<commitscope_core::CommitSummary>, u64, bool)>, DetailError> {
+    let repository_path = Path::new(&discovered.info.path);
     let count_output = match run_git(
         git,
         repository_path,

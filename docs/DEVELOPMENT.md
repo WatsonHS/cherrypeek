@@ -4,6 +4,34 @@
 
 ## 开发进度
 
+2026-11-17 完成 **M7「审阅收口与推送」（`P7-01`–`P7-04`）** 全链路实现与端到端实窗验收（M8 仍待排期）：
+- 协议与后端（`crates/core` / `crates/daemon` / `apps/desktop/src/main`）：新增可取消的 `pushRepository`（严格非强制推送与首次 `--set-upstream`、远端拒绝返回 `RemoteRejected`）、`DeleteBranch`（仅祖先合入且未在任何 worktree 检出）、`FastForwardMerge`、`WorkspaceStage` / `WorkspaceUnstage`（含 rename 双路径与 unborn `HEAD`、越界路径拦截）、`WorkspaceDiscard`、`WorkspaceCommit`（`--cleanup=whitespace` 保留 `#` 正文行）以及 `WorkspaceStatus.draftCommitMessage`（读取 `MERGE_MSG` / `SQUASH_MSG` / 异于 `HEAD` 的 `COMMIT_EDITMSG`）。
+- 桌面端与工作区收口关口：顶栏保留「更新 {分支}」，检出分支领先上游或无上游且有远端时并列「推送 ↑N / 发布分支」与取消控制；范围菜单、仓库弹层与 `⌘K` 同步接入推送、快进合入与直接删除已合入本地分支；工作区页接入「交给 Agent ▾」（只读审阅 / 整理提交）、单文件与全量暂存撤回、二次确认单文件丢弃与草稿自动载入（保留 hook 失败已输入说明并提示不用 `--no-verify`）。
+- 实窗与全套验证（本机源码版）：新增 `pnpm test:smoke:m7`（`tests/smoke/m7-review-gate-smoke.mjs`），连同 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（5 + 114 + 12 项）、`pnpm protocol:check`、`pnpm typecheck`、`pnpm build`、`pnpm test:protocol`（62 项）、`pnpm test:renderer`（226 项）、`pnpm test:pages`（53 项）与全部实窗 smoke（`test:smoke`、`test:smoke:pages`、`test:smoke:update-current`、`test:smoke:operations`、`test:smoke:m7`）全部通过。后续按 [路线图](ROADMAP.md) 待排期 M8（分叉同步与 JetBrains 式左-中-右三栏双边箭头零中间态轻量合并）。
+
+2026-11-17 收尾 M5 / M6 桌面功能缺口、Rust 代码卫生与 macOS 原生体验并补全端到端实窗测试：
+- Rust 与协议稳定：清理 `crates/core` 与 `crates/daemon` 的全部 Clippy 告警和格式差异，把测试子模块移至文件末尾；放宽 `tests/protocol/transport.test.mjs` 的并发握手超时，使协议套件稳定通过（60 项）。
+- 统计页与快捷键（P6-01 / P6-03）：顶栏下拉菜单支持多远端下选择单个远端 Fetch 并保留失败重试参数；`ShortcutGuide` 补充 `⌘4` 统计页说明；统计页时间柱状图（活动频率与增加/删除行）支持鼠标拖动框选区间以在统计页放大查看或带入提交页筛选，并可一键重置缩放。
+- 预检与交接缺陷修复：`OperationsStore` 为只读预检 `checkOperation` 增加瞬态 `BUSY` 短暂退避重试（写入 `runOperation` 仍不重试）；修正 `OperationRefusal` 点击“交给 Agent…”时先关闭拒单导致 `refusalHandoff()` 读空而不打开 `HandoffDialog` 的顺序问题。
+- macOS 原生桌面体验：在保持 `contextIsolation: true`、`sandbox: true` 和严格 CSP 的前提下，新增应用菜单（含 `⌘O` 打开仓库）、`webUtils.getPathForFile` 拖入仓库文件夹打开、`app.on("open-file")` Dock/Finder 打开仓库，以及将窗口位置和最大化状态保存到用户数据目录 `window-state.json`。
+- 实窗测试与验证：新增 [M5 基础操作实窗测试](../tests/smoke/m5-operations-smoke.mjs)（`pnpm test:smoke:operations`）与 [统计页实窗测试](../tests/smoke/stats-page-smoke.mjs)（`pnpm test:smoke:stats`）；连同 `cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm typecheck`、`pnpm test:renderer`（223 项）、`pnpm test:pages`（50 项）、`pnpm test:smoke`（含安全与 preload API 白名单检查）、`pnpm test:smoke:pages`、`pnpm test:smoke:fetch-history` 与 `pnpm test:smoke:update-current` 全部通过，构建产物为本机源码版。
+
+2026-11-15 顶栏只在当前页面提供查找或筛选时显示搜索入口和 ⌘F 提示。统计页在宽、窄窗口都隐藏入口，切回提交页后 ⌘F 恢复聚焦。文件页在显示文本或目录历史时提供相应搜索。通过 `pnpm typecheck`、`pnpm build` 和 `pnpm test:smoke:pages`，实窗使用本机 Rust 核心。
+
+2026-11-15 同名未跟踪文件支持“丢弃并更新…”。确认页列出文件和数量，默认焦点在“返回”。快进回执用一行显示结果，详情显示相同文件数和备份目录。慢 Fetch 在顶栏显示已用时间和取消按钮，远端请求结束后切换到刷新状态。
+
+本机验证通过 `pnpm typecheck`、`pnpm build`、`pnpm protocol:check`、Rust workspace（129 项）、renderer（221 项）、P5-06 定向 Git 测试（10 项）和更新 / Fetch 历史两项 Electron 实窗测试。更新实窗使用临时本地远端，核对确认返回、丢弃后的上游内容、无关文件和既有备份，另用延迟远端验证计时和取消。协议测试并发首轮的 80 ms 握手重试计数断言失败，单独重跑 60 项全过。构建产物为本机源码版。
+
+2026-11-15 完成 P5-06。Rust 核心和桌面协议已接入同名文件比较、备份和失败恢复，忽略目录按文件处理。真实仓库只读预检识别到 18 个相同文件和 1 份不同草稿。实仓场景、边界和执行命令见[代码级计划与验证](implementation/p5-06-untracked-update.md)。手动合并编辑器见[路线图](ROADMAP.md)。
+
+2026-11-13 大仓库更新预检超时修复已通过回归：路径覆盖检查改为排序后的原始字节查找，每条本地路径只解码一次；CPU 检查循环遵守取消与截止时间，保留 20 秒桌面请求超时。真实 `ai-native-workspace` 的只读预检从 38.3 秒降到三次 0.51–0.58 秒，返回相同的两处覆盖风险。大批快进禁用 Git diffstat，避免成功写入期间因输出超限被打断。Rust workspace（121 项）、完整 pages（40 项）、协议（60 项）、schema 一致性、构建及更新入口实窗测试通过；Clippy 因仓库既有告警未通过，详见[更新预检验证](validation/update-current-preflight.md)。
+
+2026-11-13 顶栏更新入口已实现并通过本机定向验证：主按钮显示“更新 {当前工作区分支}”，先 Fetch 再快进；下拉保留 Fetch 和清理失效远端跟踪引用。目标与浏览范围独立；无更新、领先、无上游和 Fetch 后拒绝快进分别说明结果，拒绝提示及 Agent prompt 不再把已完成 Fetch 描述为零写入。Fetch 可取消；取消、刷新失败或 Fetch 期间外部切换分支时不继续快进。保留同期分支同步查询的有界重试，显式更新会等待重试结果，并修订旧的“失败后本代不再请求”测试。
+
+验证：`pnpm typecheck`、`pnpm build`、`pnpm test:renderer`（215 项）、`pnpm test:smoke:update-current`、`pnpm test:smoke:fetch-history` 和 `git diff --check` 通过。新实窗测试使用临时本地远端，独立 Git 对照当前分支 OID、其他本地分支、工作区文件及被拒绝时的 index；覆盖浏览其他分支时更新当前工作区、快进 / 已是最新 / 领先、独立 Fetch / prune、分叉 / 未提交改动 / 无上游、取消 / 远端失败、Fetch 中外部 checkout、detached / 裸仓库、linked worktree，以及 1440 / 900px 布局。截图在 `output/playwright/update-current/`。本轮未测试真实网络凭据和其他平台，未打包安装版；没有新增性能达标声明。
+
+2026-11-13 fetch 后历史滚动修复：在列表顶部刷新时显示新快照的最新提交；原滚动锚点不在刷新后的第一页时回到顶部，锚点仍在页内则保持位置。`pnpm build`、`pnpm typecheck`、`pnpm test:smoke:fetch-history` 和 `pnpm test:smoke:virtual-history` 通过；fetch 测试使用真实 Electron 窗口及本地远端，验证全部分支的 fetch、顶部 / 页内 / 缺失锚点、双向滚动，以及本地 HEAD 不变。回退顶部锚点处理后该实窗测试无法看到新提交。`pnpm test:renderer` 212 / 213 项通过；已有的 `operations-store.ts` 未提交改动改变了失败后重试行为，与现有「每代只请求一次」测试断言不一致，本次未修改该改动。未测真实网络和其他平台；性能测量不适用于此修复。
+
 **当前状态：只读 MVP 功能已齐全，M3 本机小规模主流程通过，UI-01 至 UI-03 已接入。** 可打开本地 Git 仓库、按固定 HEAD、分支、标签或 worktree 快照连续浏览，默认每页 200 条，主列表最多保留 1800 条摘要，另为当前 merge 页预留 200 条；支持双向预取、键盘选择、复制、取消、错误重试和手动刷新，并按 Git 可达性显示上次查看后的新增标记。刷新保留选择及可恢复的滚动锚点。界面沿用 Claude 的 v3 设计，未接入区域明确标注“占位”。10 万提交三轮名义 60Hz 滚动的帧间隔 p95 为 17.3–17.8 ms，DOM 峰值 35 行；全进程树短时空闲 RSS 为 540–541 MiB，超过当时的 500 MiB 目标；现行内存预算已放宽，见下文。详见[P1-03 基线](benchmarks/p1-03-history-scroll.md)，不作为发布性能验收。分支 / worktree 导航与按需“已合入”状态已接入，切换范围不 checkout。可恢复 SQLite 元数据索引已接入，支持真实进度、暂停、继续、取消和重建；索引故障保留历史。元数据搜索已接入：完整消息默认不区分大小写，可组合 Author / Committer、日期、OID 与当前范围；部分结果持续更新并保持选择和滚动锚点。大仓搜索延迟尚未验收，详见[P1-06 验收](validation/p1-06-metadata-search.md)。Rust 图布局与有界检查点已接入：跨页 / 淘汰回读保持连线与颜色，默认显示六列，点击图区 +N 可展开当前范围的全部图线并横向滚动，支持收起；明确标记浅克隆等历史边界。十万提交 / 千条引用宽图三轮帧间隔 p95 均为 18.6 ms，暂停索引时短时空闲整树 RSS 为 580–583 MiB；详见[P2-01 基线](benchmarks/p2-01-history-graph-scroll.md)，未验收索引完成后的内存预算。完整消息 / trailer、父提交文件比较、merge 带入分页与自动加载包含分支已接入，见 [P2-02 验证记录](validation/p2-02-commit-details.md)；完整实窗检查未跑完。P2-03 已接入点击文件展开只读 diff，支持父提交切换、行号、二进制 / LFS / gitlink 提示和截断说明，见[实现及检查记录](implementation/p2-03-readonly-diff.md)。P2-04 已接入搜索结果的历史定位与返回，恢复原查询、选择和滚动锚点，并提供快捷键说明，见[实现记录](implementation/p2-04-history-location.md)。P3-01 已接入文件 / 目录字面路径筛选、当前快照路径补全和 merge 命中父说明，见[实现记录](implementation/p3-01-path-history.md)。P3-02 活动统计、P3-03 外部变化提示与 P3-05 可编辑 Agent 提示词已接入；P3-04 的 8 步实窗流程和当前项目只读数据对照通过，见[M3 记录](validation/m3-mvp.md)。尚未完成 M4 性能、长期稳定性与发行验收。产品名为 CherryPeek（2026-11-10 定名，取 cherry-pick 的谐音，意为挑着看一眼；早期文档与记录里的 CommitScope 是原工作名，代码内部标识仍沿用 `commitscope`）。
 
 P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约 1.3 ms；同口径整树空闲 RSS 从约 603 降至 566 MiB，查询阶段采样峰值从约 690 降至 623 MiB。这些是旧预算下的优化结果，长期稳定性和发布验收仍待完成，详见[查询报告](benchmarks/p4-01-interactive-performance.md)与[内存报告](benchmarks/p4-01-memory.md)。
@@ -32,7 +60,7 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 - Electron 桌面外壳，React + TypeScript 界面（Tailwind CSS 4 + shadcn 风格组件），Rust 承担 Git 读取、查询、缓存和后台任务。
 - 第一版聚焦历史、搜索、分支、近期提交统计和按需查看 diff。
 - 点击分支改变浏览范围，不切换工作区；先实现只读闭环，适配 Agent 同时操作仓库。
-- 2026-11-12 起加入白名单内的基础操作：只做一步完成、不产生冲突、不丢数据的，由用户显式触发；做不到时不执行并提示交给 Agent。见[产品范围](PRODUCT.md)「基础操作」。
+- 2026-11-12 起加入白名单内的基础操作：只做一步完成、不产生冲突、不丢数据的，由用户显式触发；做不到时不执行并提示交给 Agent。见[产品范围](PRODUCT.md)「基础操作」。2026-11-17 确认后续规划（M7 审阅收口与推送、M8 分叉同步与 JetBrains 式三栏双边箭头零中间态轻量合并），待排期，见[路线图](ROADMAP.md)「后续线路：审阅收口与三栏轻量合并」。
 - 当前浏览固定引用快照，外部变化只提示有更新，用户点击刷新后才切换快照。
 - 历史分页稳定后即交付元数据搜索：消息搜索框配合明确字段筛选；部分结果自动合并并保持选择和滚动锚点。
 - 性能通过同仓库、同硬件的测量验收，不用语言或框架名称代替结果。
@@ -95,6 +123,7 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 | [P6-03 / P6-04 计划](implementation/p6-03-04-change-statistics.md) | 改动量、排除列表、观察项与提交回查 |
 | [P6-05 计划](implementation/p6-05-evolution.md) | 按需估计、blame 累计结果、覆盖与缓存 |
 | [M5 / M6 后端验证](validation/m5-m6-backend.md) | 各任务对照证据、完整检查与未验证范围 |
+| [更新预检验证](validation/update-current-preflight.md) | 大仓库路径覆盖检查的超时修复、真实仓库只读对照及回归 |
 | [P6-02 索引测量](benchmarks/p6-02-file-change-index.md) | 十万实际改动提交的 schema 1 / 2 成本 |
 | [统计调度验证](validation/stats-scheduling.md) | 统计抗读取干扰、演化暂停 / 取消、线程优先级与超时口径 |
 | [统计调度测量](benchmarks/stats-scheduling.md) | 大型真实仓库三个范围的统计耗时、历史读取干扰与整树采样 |
@@ -144,7 +173,12 @@ pnpm test:pages
 pnpm test:renderer
 pnpm test:repository
 pnpm test:smoke
+pnpm test:smoke:pages
 pnpm test:smoke:history
+pnpm test:smoke:fetch-history
+pnpm test:smoke:update-current
+pnpm test:smoke:operations
+pnpm test:smoke:stats
 pnpm test:smoke:virtual-history
 pnpm test:smoke:scope-navigation
 pnpm test:smoke:metadata-index
@@ -160,7 +194,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 `pnpm protocol:generate` 从 Rust 类型导出三份 schema 和 TypeScript，`protocol:check` 只校验产物一致性。`test:protocol` 覆盖真实 daemon、受控故障协议和慢 Git 子进程回收。Smoke 会启动并关闭真实 Electron 窗口，覆盖正常启动、失败状态、隔离与进程退出；本地截图写入已忽略的 `output/playwright/`。`test:repository` 自动生成临时真实 Git 仓库，完成独立字段对照、只读快照与 Electron 界面验证。性能实测见首屏基线；发布预算尚未验收。
 
-M5 / M6 daemon 对照已并入 `pnpm test:pages`；可用 `pnpm test:pages --test-name-pattern=M5` 或 `pnpm test:pages --test-name-pattern=P6` 定向运行。修改后端提交前运行 `cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm test:pages`、`pnpm test:protocol`；涉及索引再运行 `pnpm test:indexing`。`tests/benchmarks/` 的测量命令与目标目录规则见上述两份性能报告。
+P5-06 的同名文件验证可运行 `pnpm test:pages --test-name-pattern=P5-06` 和 `pnpm test:smoke:update-current`。M5 / M6 / M7 daemon 对照已并入 `pnpm test:pages`（可用 `--test-name-pattern=M7` 定向运行），M7 审阅收口与推送全链路实窗验收命令为 `pnpm test:smoke:m7`（自动先构建再运行）。修改后端提交前运行 `cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm test:pages`、`pnpm test:protocol`；涉及索引再运行 `pnpm test:indexing`。`tests/benchmarks/` 的测量命令与目标目录规则见上述两份性能报告。
 
 统计调度定向验证可运行 `pnpm test:pages --test-name-pattern='statistics survive|evolution pauses|generation replacement'`，默认构建 debug daemon；其中 SQLite 统计等待点仅存在于 debug 构建，不能用 release daemon 跑这一等待点测试。桌面 transport / 控制器回归已并入 `pnpm test:protocol`，修改 main 时另跑 `pnpm typecheck`。真实仓库性能使用 release 构建，命令和进程树口径见[统计调度测量](benchmarks/stats-scheduling.md)。
 

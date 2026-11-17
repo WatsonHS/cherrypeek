@@ -2,7 +2,7 @@
 
 - 开始实现前阅读 `docs/DEVELOPMENT.md`、`docs/PRODUCT.md`、`docs/ARCHITECTURE.md` 和 `docs/PLAN.md`；按阶段更新状态和验证证据。开发进度、文档索引和测试命令写在 `docs/DEVELOPMENT.md`；`README.md` 与 `README.en.md` 面向使用者，只在功能、安装或使用方式变化时更新（2026-11-10 起）。
 - Electron + React/TypeScript 前端、Rust 核心已确定。独立实现，不 fork 或复制 GitComet，不接入其 crates / AppStore。
-- 浏览保持只读：浏览分支不得触发 checkout，读取路径不写被查看仓库。2026-11-12 起（用户确认）App 可执行白名单内的基础 Git 操作：fetch、快进更新、切换分支、新建分支，清单与规则见 `docs/PRODUCT.md`「基础操作」。操作只由用户显式触发，不自动 fetch；只做一步完成、不产生冲突、不丢数据的操作，做不到时不执行、保持仓库原样，并提示交给 Agent。不加入 stage、commit、merge、rebase、reset、stash、cherry-pick、revert、force push 或冲突解决；扩充白名单需用户确认。
+- 浏览保持只读：浏览分支不得触发 checkout，读取路径不写被查看仓库。2026-11-12 起（用户确认）App 可执行白名单内的基础 Git 操作：fetch、快进更新、切换分支、新建分支，清单与规则见 `docs/PRODUCT.md`「基础操作」。操作只由用户显式触发，不自动 fetch；只做一步完成、不产生冲突、不丢数据的操作，做不到时不执行、保持仓库原样，并提示交给 Agent。2026-11-14 起（用户确认）更新当前分支时可让开与上游新增文件同名的未跟踪文件（含被 Git 忽略的文件）：内容相同的直接放行，内容不同的可备份后采用上游。2026-11-15 起（用户确认），用户也可明确确认丢弃本次清单内的不同副本，快进成功后清除这些临时副本，规则见 `docs/PRODUCT.md`「同名未跟踪文件」。2026-11-17 起（用户确认开放 M7 白名单）M7「审阅收口与推送」纳入可执行白名单：非强制 `push`（含首次推送 `--set-upstream`，严禁 `--force`）、删除祖先已合入且未被任何 worktree 检出的本地分支（`update-ref -d`）、本地分支快进合入目标分支、工作区文件级暂存/取消暂存/二次确认丢弃单文件改动与 Commit，规则与限制见 `docs/PRODUCT.md`「审阅收口与推送（M7）」。M8（分叉同步与 JetBrains 式三栏双边箭头零中间态轻量合并，见 `docs/ROADMAP.md`「后续线路：审阅收口与三栏轻量合并」）仍待 M7 验收后再排期开放。仍不加入 `reset`、`stash`、多步或交互式 `rebase`、`cherry-pick`、`revert`、`force push`、脏工作区按块合并或接手进行中的合并/变基；扩充白名单需用户确认。
 - 仓库事实由 Rust 查询服务提供；renderer 只持有有界页面和视图状态。查询必须可取消，过期结果不得覆盖当前视图。
 - Author 与 Committer 分开保存；OID 不固定为 40 字符；分支是引用与可达性关系。
 - 仓库内容按不可信文本处理；Electron 开启隔离和沙箱，preload 仅暴露明确的业务接口。

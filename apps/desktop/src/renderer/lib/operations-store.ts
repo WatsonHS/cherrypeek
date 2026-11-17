@@ -1,12 +1,13 @@
 import type {
   BranchSync,
   OperationBlocker,
+  OperationCheck,
   OperationRun,
   RepositoryOperation,
   RepositorySessionApi,
   RepositorySessionResult,
 } from "../../../../../packages/protocol/src/repository-session.js";
-import { BRANCH_SYNC_BATCH, INLINE_BLOCKERS, type OperationMeta } from "./operations.js";
+import { BRANCH_SYNC_BATCH, INLINE_BLOCKERS, type OperationMeta, type UpdateNotice } from "./operations.js";
 
 /*
  * State of the basic Git operations (M5): branch sync results for the current session generation, the one
@@ -20,6 +21,8 @@ export interface PendingRefusal {
   id: number;
   meta: OperationMeta;
   blockers: OperationBlocker[];
+  /** The operation that was refused; absent when the refusal did not come from a check or a run. */
+  operation?: RepositoryOperation;
   /** Known only when the refusal came from `checkOperation`. */
   preservedDirtyCount?: number;
   atUnixMs: number;
@@ -45,7 +48,7 @@ export interface OperationsView {
   refusal: PendingRefusal | null;
   failure: PendingFailure | null;
   /** A short remark for the user, e.g. that the branch changed in the meantime. */
-  notice: string | null;
+  notice: string | UpdateNotice | null;
 }
 
 export type ExecuteOutcome =
@@ -72,6 +75,9 @@ async function settle<T>(promise: Promise<RepositorySessionResult<T>>): Promise<
     return { ok: false, error: { code: "PROTOCOL_ERROR", message: error instanceof Error ? error.message : String(error), retryable: false } };
   }
 }
+
+const SYNC_RETRY_DELAYS_MS = [400, 1_200, 3_000, 6_000];
+const CHECK_RETRY_DELAYS_MS = [120, 300, 700];
 
 export class OperationsStore {
   private view = initialView();
@@ -115,7 +121,7 @@ export class OperationsStore {
     this.attempted.clear();
     this.latest.clear();
     this.pending = 0;
-    this.update({ sessionKey, syncs: {}, lastFetchUnixMs: null, syncLoading: false });
+    this.update({ sessionKey, syncs: {}, lastFetchUnixMs: null, syncLoading: false, refusal: null });
   }
 
   /** Whether sync for this branch has been asked for (or answered) in this generation. */
@@ -128,7 +134,7 @@ export class OperationsStore {
    * skipped unless `force` is set (used for the window's HEAD branch after a refresh or fetch). A failed read or an
    * `unavailable` result leaves the branch without any claim.
    */
-  async loadSync(refNames: readonly string[], options: { force?: boolean } = {}): Promise<void> {
+  async loadSync(refNames: readonly string[], options: { force?: boolean; attempt?: number; waitForRetry?: boolean } = {}): Promise<void> {
     if (!this.view.sessionKey) return;
     const names = [...new Set(refNames)].filter(name => options.force || !this.attempted.has(name));
     for (let offset = 0; offset < names.length; offset += BRANCH_SYNC_BATCH) {
@@ -142,7 +148,22 @@ export class OperationsStore {
       if (epoch !== this.epoch) return;
       this.pending -= 1;
       if (!result.ok) {
+        // Not answered is not "asked": the names may be requested again. Right after a refresh the read slots
+        // are often taken (BUSY), so a retryable failure is tried again a few times instead of leaving the
+        // branch without its ahead / behind for the rest of the generation.
+        for (const name of batch) if (this.latest.get(name) === token) this.attempted.delete(name);
         this.update({ syncLoading: this.pending > 0 });
+        const attempt = options.attempt ?? 0;
+        if (result.error.retryable && attempt < SYNC_RETRY_DELAYS_MS.length) {
+          const retry = async () => {
+            if (epoch === this.epoch) await this.loadSync(batch.filter(name => !this.attempted.has(name)), { ...options, attempt: attempt + 1 });
+          };
+          // A user-triggered update needs the answer before it can decide whether to fast-forward.
+          if (options.waitForRetry) {
+            await new Promise(resolve => setTimeout(resolve, SYNC_RETRY_DELAYS_MS[attempt]));
+            await retry();
+          } else setTimeout(() => { void retry(); }, SYNC_RETRY_DELAYS_MS[attempt]);
+        }
         continue;
       }
       const syncs = { ...this.view.syncs };
@@ -166,6 +187,18 @@ export class OperationsStore {
     if (this.view.running) this.update({ running: null });
   }
 
+  private async settleCheck(key: string, operation: RepositoryOperation): Promise<RepositorySessionResult<OperationCheck> | null> {
+    let check = await settle(this.api.checkOperation(operation));
+    for (const delay of CHECK_RETRY_DELAYS_MS) {
+      if (key !== this.view.sessionKey) return null;
+      if (check.ok || !check.error.retryable) break;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      if (key !== this.view.sessionKey) return null;
+      check = await settle(this.api.checkOperation(operation));
+    }
+    return key === this.view.sessionKey ? check : null;
+  }
+
   /**
    * Checks the operation and, when allowed, runs it. Call between `begin` and `end`. Rejections become the pending
    * refusal (unless the caller handles `inline` blockers itself); a failure after the run started becomes the pending
@@ -174,17 +207,18 @@ export class OperationsStore {
   async execute(operation: RepositoryOperation, meta: OperationMeta, options: { inline?: boolean } = {}): Promise<ExecuteOutcome> {
     const key = this.view.sessionKey;
     if (!key) return { kind: "stale" };
-    const check = await settle(this.api.checkOperation(operation));
+    const check = await this.settleCheck(key, operation);
+    if (!check) return { kind: "stale" };
     if (!check.ok) return { kind: "checkFailed", message: check.error.message };
-    if (key !== this.view.sessionKey) return { kind: "stale" };
-    if (!check.value.allowed) return this.reject(check.value.blockers, meta, options.inline === true, check.value.preservedDirtyCount);
+    if (!check.value.allowed) return this.reject(check.value.blockers, meta, options.inline === true, check.value.preservedDirtyCount, operation);
     const run = await settle(this.api.runOperation(operation));
+    if (key !== this.view.sessionKey) return { kind: "stale" };
     if (!run.ok) {
       // The core may have started writing: show Git's text and let the caller re-read the real state.
       this.update({ failure: { id: ++this.ids, meta, message: run.error.message, atUnixMs: this.now() } });
       return { kind: "failed", message: run.error.message };
     }
-    if (run.value.outcome === "rejected") return this.reject(run.value.blockers, meta, options.inline === true, undefined);
+    if (run.value.outcome === "rejected") return this.reject(run.value.blockers, meta, options.inline === true, undefined, operation);
     return { kind: "done", run: run.value };
   }
 
@@ -192,23 +226,32 @@ export class OperationsStore {
   async check(operation: RepositoryOperation): Promise<{ kind: "allowed" } | { kind: "blocked"; blockers: OperationBlocker[] } | { kind: "error"; message: string } | { kind: "stale" }> {
     const key = this.view.sessionKey;
     if (!key) return { kind: "stale" };
-    const check = await settle(this.api.checkOperation(operation));
+    const check = await this.settleCheck(key, operation);
+    if (!check) return { kind: "stale" };
     if (!check.ok) return { kind: "error", message: check.error.message };
-    if (key !== this.view.sessionKey) return { kind: "stale" };
     return check.value.allowed ? { kind: "allowed" } : { kind: "blocked", blockers: check.value.blockers };
   }
 
-  private reject(blockers: OperationBlocker[], meta: OperationMeta, inline: boolean, preservedDirtyCount: number | undefined): ExecuteOutcome {
+  private reject(blockers: OperationBlocker[], meta: OperationMeta, inline: boolean, preservedDirtyCount: number | undefined, operation?: RepositoryOperation): ExecuteOutcome {
     if (blockers.some(blocker => blocker.kind === "refChanged")) {
-      this.update({ notice: `${meta.name} 在此期间已经变化，已刷新到最新状态；请重新查看后再试。` });
+      const pendingReplacement = operation?.kind === "fastForward" && (operation.replaceUntracked || operation.discardUntracked);
+      this.update({ notice: pendingReplacement
+        ? "分支或同名文件已变化，请重新检查更新。"
+        : `${meta.name} 在此期间已经变化，已刷新到最新状态；请重新查看后再试。` });
       return { kind: "refChanged" };
     }
     if (inline && blockers.length > 0 && blockers.every(blocker => INLINE_BLOCKERS.includes(blocker.kind))) return { kind: "rejected", blockers, shown: false };
-    this.update({ refusal: { id: ++this.ids, meta, blockers, preservedDirtyCount, atUnixMs: this.now() } });
+    this.update({ refusal: { id: ++this.ids, meta, blockers, operation, preservedDirtyCount, atUnixMs: this.now() } });
     return { kind: "rejected", blockers, shown: true };
   }
 
-  setNotice(notice: string | null): void { this.update({ notice }); }
+  setNotice(notice: string | UpdateNotice | null): void { this.update({ notice }); }
+  /** Record a failure produced by a specialized transport path (such as pushRepository). */
+  recordFailure(meta: OperationMeta, message: string): void {
+    this.update({ failure: { id: ++this.ids, meta, message, atUnixMs: this.now() } });
+  }
+  /** Surface a blocker already reported by the core's branch-sync query, without inventing an operation target. */
+  refuse(blockers: OperationBlocker[], meta: OperationMeta): ExecuteOutcome { return this.reject(blockers, meta, false, undefined); }
   dismissRefusal(): void { if (this.view.refusal) this.update({ refusal: null }); }
   dismissFailure(): void { if (this.view.failure) this.update({ failure: null }); }
   dismissNotice(): void { if (this.view.notice) this.update({ notice: null }); }

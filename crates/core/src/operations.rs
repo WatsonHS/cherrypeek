@@ -59,6 +59,39 @@ pub enum SwitchTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PushRepositoryParams {
+    pub ref_name: String,
+    pub expected_oid: String,
+    #[serde(deserialize_with = "crate::deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "crate::NullableStringSchema")]
+    pub remote: Option<String>,
+    pub set_upstream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PushResult {
+    Rejected {
+        blockers: Vec<OperationBlocker>,
+    },
+    Done {
+        remote: String,
+        ref_name: String,
+        remote_ref_name: String,
+        new_oid: String,
+        set_upstream: bool,
+        finished_at_unix_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -70,6 +103,10 @@ pub enum RepositoryOperation {
         ref_name: String,
         expected_oid: String,
         upstream_oid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace_untracked: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_untracked: Option<String>,
     },
     Switch {
         target: SwitchTarget,
@@ -81,6 +118,37 @@ pub enum RepositoryOperation {
         start_oid: String,
         switch_after: bool,
         expected_head_oid: String,
+    },
+    DeleteBranch {
+        ref_name: String,
+        expected_oid: String,
+        base_ref_name: String,
+    },
+    FastForwardMerge {
+        target_ref: String,
+        expected_target_oid: String,
+        source_ref: String,
+        expected_source_oid: String,
+        switch_to_target: bool,
+    },
+    WorkspaceStage {
+        paths_hex: Vec<String>,
+        all: bool,
+    },
+    WorkspaceUnstage {
+        paths_hex: Vec<String>,
+        all: bool,
+    },
+    WorkspaceDiscard {
+        path_hex: String,
+        untracked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_head_oid: Option<String>,
+    },
+    WorkspaceCommit {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_head_oid: Option<String>,
     },
 }
 
@@ -104,6 +172,14 @@ pub struct DirtyOperationPath {
     pub staged: bool,
     pub unstaged: bool,
     pub untracked: bool,
+    pub replace: Option<UntrackedDifference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UntrackedDifference {
+    pub upstream_only_lines: Option<u32>,
+    pub local_only_lines: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -127,6 +203,7 @@ pub enum OperationBlocker {
     Dirty {
         paths: Vec<DirtyOperationPath>,
         paths_truncated: bool,
+        replace_token: Option<String>,
     },
     CheckedOutElsewhere {
         worktree_path: String,
@@ -144,6 +221,13 @@ pub enum OperationBlocker {
     UnsafeState {
         message: String,
     },
+    RemoteRejected {
+        remote: String,
+        message: String,
+    },
+    NotAncestorMerged {
+        base_ref_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -152,6 +236,7 @@ pub struct OperationCheck {
     pub allowed: bool,
     pub blockers: Vec<OperationBlocker>,
     pub preserved_dirty_count: u32,
+    pub identical_untracked_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -177,7 +262,24 @@ pub enum OperationRun {
         head_oid: Option<String>,
         head_reference: Option<String>,
         updated_ref: Option<UpdatedRef>,
+        untracked: Option<UntrackedOutcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committed_oid: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UntrackedOutcome {
+    pub identical_count: u32,
+    pub backed_up_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub discarded_count: u32,
+    pub backup_dir: Option<String>,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

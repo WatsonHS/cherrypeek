@@ -1,11 +1,9 @@
 import * as React from "react";
-import { ArrowDownToLine, ArrowLeft, ArrowRight, ChevronDown, Cloud, Code, Copy, CornerUpLeft, Ellipsis, Folder, FolderOpen, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag, Terminal, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, Cloud, Code, Copy, CornerUpLeft, Ellipsis, Folder, FolderOpen, GitBranch, Keyboard, Layers, LoaderCircle, RefreshCw, Search, Tag, Terminal, X } from "lucide-react";
 import type { NavigationView } from "../lib/navigation-history.js";
 import type { RepositoryScope, RefInfo, RepositoryInfo, RepositorySessionInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryNavigation } from "../../../../../packages/protocol/src/repository-session.js";
-import type { SearchView } from "../lib/metadata-search-store.js";
 import type { SearchQuery } from "../../../../../packages/protocol/src/generated/client-message.js";
-import type { SearchTimeField } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositoryView, ViewRecord } from "../lib/repository-session-store.js";
 import type { RepositoryActions } from "../app.js";
 import { momentLabel, repositoryName, shortOid, shortRefName } from "../lib/format.js";
@@ -16,12 +14,13 @@ import { ActivityStatsPopover } from "./activity-stats.js";
 import type { HandoffRequest } from "./handoff-dialog.js";
 import { ActionMenu } from "./action-menu.js";
 import { FetchNotice } from "./operation-banners.js";
+import { RepositoryUpdateControl } from "./repository-update-control.js";
 import { SyncAction, SyncTags } from "./branch-sync.js";
+import type { FastForwardMergeTarget } from "./fast-forward-merge-dialog.js";
 import type { OperationsActions } from "../lib/use-operations.js";
 import { refTip, syncRowModel, webRemote, webUrlLabel } from "../lib/operations.js";
 import type { BranchStart } from "./create-branch-dialog.js";
 import type { ActivityStats, RefSnapshotDiff, RepositoryObservation, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
-import { SearchControls } from "./search-controls.js";
 import { PageSwitch, type AppPage } from "./page-switch.js";
 import type { WorkspaceBadge } from "../lib/workspace-indicator.js";
 import { RecentList, storeStatusText, type RecentState } from "./recent-repositories.js";
@@ -33,8 +32,8 @@ const NAV_CLASS = "flex size-7 items-center justify-center rounded-[7px] text-fg
 const HINT_CLASS = "flex h-7 max-w-[clamp(96px,14vw,200px)] items-center gap-1 rounded-[7px] bg-accent-soft pr-2.5 pl-1.5 text-[12.5px] font-medium whitespace-nowrap text-accent-fg hover:brightness-95";
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
-  searchView, activityQuery, onSearchQueryChange, onSearchComposition, onLoadSearchIdentities, onLoadSearchPaths, observation, refDiff, refDiffLoading, refDiffError,
-  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, onCreateBranch, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
+  activityQuery, onSearchQueryChange, observation, refDiff, refDiffLoading, refDiffError,
+  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, onCreateBranch, onFastForwardMerge, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
   page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch, history }: {
   preview: RepositoryView;
   actions: RepositoryActions;
@@ -45,12 +44,8 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
   onRefresh(): Promise<void>;
-  searchView: SearchView;
   activityQuery: SearchQuery;
   onSearchQueryChange(query: SearchQuery, composing?: boolean): void;
-  onSearchComposition(composing: boolean): void;
-  onLoadSearchIdentities(field: SearchTimeField, text: string): void;
-  onLoadSearchPaths(text: string): void;
   observation: RepositoryObservation | null;
   refDiff: RefSnapshotDiff | null;
   refDiffLoading: boolean;
@@ -60,6 +55,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onObserve(): void;
   onOpenHandoff(request: HandoffRequest): void;
   onCreateBranch(start: BranchStart): void;
+  onFastForwardMerge?(target: FastForwardMergeTarget): void;
   activityStats: ActivityStats | null;
   activityLoading: boolean;
   activityError: string | null;
@@ -70,8 +66,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   workspace: WorkspaceBadge;
   workspaceBranch: string | null;
   filesAvailable: boolean;
-  /** The search box of the files and workspace pages; the commits page uses the metadata search. */
-  pageSearch: React.ReactNode;
+  pageSearch: React.JSX.Element | null;
   /**
    * Back / forward between recorded places (⌘[ / ⌘]). After a jump to another page, `hint` names where it came from:
    * merged into the back button while one step back is that place, otherwise a separate button that returns there.
@@ -109,32 +104,20 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
       behind={ops?.headBehind ? { branch: ops.headBehind.branch, count: ops.headBehind.behind, upstream: ops.headBehind.upstream } : null} />
     <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
-      onOpenHandoff={onOpenHandoff} onCreateBranch={onCreateBranch} ops={ops}
+      onOpenHandoff={onOpenHandoff} onCreateBranch={onCreateBranch} onFastForwardMerge={onFastForwardMerge} ops={ops}
       onLoadMergeStatus={onLoadMergeStatus} onCancelMergeStatus={onCancelMergeStatus} onRefresh={actions.refresh} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="min-w-0 flex-1 basis-0" />
     <ActivityStatsPopover query={activityQuery} stats={activityStats} loading={activityLoading} error={activityError}
       onLoad={onLoadActivity} onQueryChange={onSearchQueryChange} onAddAuthor={onActivityAuthor} />
-    <TopBarSearch label={page === "commits" ? "搜索提交消息" : page === "files" ? "在文件页搜索" : page === "stats" ? "统计页搜索（尚未接入）" : "过滤改动的文件"}>
-      {page === "commits" ? <SearchControls view={searchView} sessionKey={preview.session ? `${preview.session.repoId}:${preview.session.generation}` : "offline"}
-        onQueryChange={onSearchQueryChange} onComposition={onSearchComposition} onLoadIdentities={onLoadSearchIdentities} onLoadPaths={onLoadSearchPaths} /> : pageSearch}
-    </TopBarSearch>
-    <ShortcutGuide />
+    {pageSearch && <TopBarSearch label={page === "commits" ? "搜索提交消息" : page === "files" ? "在文件页搜索" : "过滤改动的文件"}>
+      {pageSearch}
+    </TopBarSearch>}
+    <ShortcutGuide hasPageSearch={pageSearch !== null} />
     <UpdatesPopover observation={observation} diff={refDiff} loading={refDiffLoading} error={refDiffError} onLoad={onLoadRefDiff} onObserve={onObserve}
       onCancel={onCancelRefDiff} onRefresh={() => { void actions.refresh(); }} />
-    {preview.session && actions.fetch?.notice ? <FetchNotice notice={actions.fetch.notice} onDismiss={actions.fetch.dismissNotice}
-      update={ops?.headBehind?.canUpdate ? { branch: ops.headBehind.branch, disabled: ops.busy || busy, running: ops.view.running?.label === `更新 ${ops.headBehind.branch}`,
-        onUpdate: () => { void ops.update(ops.headBehind!.refName); } } : undefined} /> : null}
-    {preview.session && actions.fetch ? <Button variant="outline" size="sm" disabled={!actions.fetch.running && (preview.refreshing || busy || Boolean(ops?.view.running))}
-      data-testid="fetch-button" className="topbar-refresh shrink-0"
-      onClick={event => { if (actions.fetch?.running) actions.fetch.cancel(); else void actions.fetch?.start(event.altKey); }}
-      title={actions.fetch.running ? "正在 fetch，点击取消" : "Fetch：从所有远端获取新提交，不改动工作区和本地分支（按住 ⌥ 点击同时清理远端已删除的分支）"}
-      aria-label={actions.fetch.running ? "取消 fetch" : "Fetch：从所有远端获取新提交"}>
-      {actions.fetch.running
-        ? <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" strokeWidth={1.75} />
-        : <ArrowDownToLine className="size-3.5" strokeWidth={1.75} />}
-      <span className="topbar-action-label" aria-live="polite">{actions.fetch.running ? "取消" : "Fetch"}</span>
-    </Button> : null}
+    {preview.session && actions.fetch?.notice ? <FetchNotice notice={actions.fetch.notice} onDismiss={actions.fetch.dismissNotice} /> : null}
+    {preview.session && actions.fetch ? <RepositoryUpdateControl repository={repository} fetch={actions.fetch} operations={ops} busy={busy} remotes={(preview.navigation?.remotes ?? []).map(item => item.name)} /> : null}
     {preview.session ? <Button variant="outline" size="sm" disabled={preview.refreshing || busy}
       className="topbar-refresh shrink-0" onClick={() => { void actions.refresh(); }} title="刷新仓库历史" aria-label="刷新仓库历史">
       <RefreshCw className={cn("size-3.5", preview.refreshing && "animate-spin motion-reduce:animate-none")} strokeWidth={1.75} />
@@ -227,7 +210,7 @@ function TopBarSearch({ label, children }: { label: string; children: React.Reac
  * One rule per modifier, the same on every page: ⌘ + digit picks the page, ⌥⌘ + digit the first or second view on the
  * right of it, ⌥ + letter toggles a display option, and ⌘[ / ⌘] always go back and forward.
  */
-function ShortcutGuide(): React.JSX.Element {
+function ShortcutGuide({ hasPageSearch }: { hasPageSearch: boolean }): React.JSX.Element {
   const mac = /Mac|iPhone|iPad/u.test(navigator.platform);
   const cmd = mac ? "⌘" : "Ctrl+";
   const alt = mac ? "⌥" : "Alt+";
@@ -235,9 +218,9 @@ function ShortcutGuide(): React.JSX.Element {
   const groups: { title: string; rows: [string, string][] }[] = [
     { title: "全局", rows: [
       ["快速跳转", `${cmd}K`],
-      ["切换页面：提交 / 文件 / 工作区", `${cmd}1 / 2 / 3`],
+      ["切换页面：提交 / 文件 / 工作区 / 统计", `${cmd}1 / 2 / 3 / 4`],
       ["后退 / 前进", `${cmd}[ / ]`],
-      ["聚焦搜索", `${cmd}F`],
+      ...(hasPageSearch ? [["聚焦搜索", `${cmd}F`] as [string, string]] : []),
       ["刷新仓库历史", `${altCmd}R`],
     ] },
     { title: "右侧视图", rows: [
@@ -409,7 +392,7 @@ function sameScope(left: RepositoryScope | undefined, right: RepositoryScope): b
   return false;
 }
 
-function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onCreateBranch, ops, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
+function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onCreateBranch, onFastForwardMerge, ops, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
   preview: RepositoryView;
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -417,6 +400,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   onLoadNavigation(): void;
   onOpenHandoff(request: HandoffRequest): void;
   onCreateBranch(start: BranchStart): void;
+  onFastForwardMerge?(target: FastForwardMergeTarget): void;
   ops: OperationsActions | null;
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
@@ -519,6 +503,17 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
         {GROUPS.map(({ kind, title, Icon }) => {
           const refs = navigation?.refs.filter(ref => ref.kind === kind) ?? [];
           if (!refs.length) return null;
+          const localRefs = navigation?.refs.filter(item => item.kind === "localBranch") ?? [];
+          const defaultBaseName = navigation?.defaultBase?.name ?? "";
+          const defaultBaseLocalRef = defaultBaseName.startsWith("refs/heads/")
+            ? localRefs.find(item => item.name === defaultBaseName) ?? null
+            : defaultBaseName.startsWith("refs/remotes/")
+              ? localRefs.find(item => item.name === `refs/heads/${defaultBaseName.replace(/^refs\/remotes\/[^/]+\//u, "")}`) ?? null
+              : null;
+          const headLocalRef = repository.headReference?.startsWith("refs/heads/")
+            ? localRefs.find(item => item.name === repository.headReference) ?? null
+            : null;
+          const preferredRemote = navigation?.remotes.find(item => item.name === "origin")?.name ?? navigation?.remotes[0]?.name ?? null;
           return <div key={kind} className="flex flex-col gap-px py-1">
             <div className="flex justify-between px-2.5 pt-1.5 pb-1 text-[11.5px] font-semibold text-fg3"><span>{title}{kind === "localBranch" ? navigation?.defaultBase ? ` · 基准 ${shortRefName(navigation.defaultBase.name)}` : " · 无可用默认基准" : ""}</span><span className="font-normal">{refs.length}</span></div>
             {kind === "remoteBranch" ? <p className="m-0 px-2.5 pb-1 text-[10.5px] text-fg3" data-testid="remote-ref-disclaimer">{ops?.view.lastFetchUnixMs ? `本地引用快照 · 上次 fetch ${momentLabel(ops.view.lastFetchUnixMs)}` : "本地引用快照 · fetch 时间未知 · 未 fetch"}</p> : null}
@@ -537,6 +532,26 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
               const checkoutTitle = checkedOut.length
                 ? `检出于：${checkedOut.map(worktree => worktree.path).join("、")}`
                 : "未被 worktree 检出";
+              const mergeTarget = kind === "tag" ? null
+                : defaultBaseLocalRef && defaultBaseLocalRef.name !== ref.name && refTip(defaultBaseLocalRef) !== refTip(ref) ? defaultBaseLocalRef
+                  : headLocalRef && headLocalRef.name !== ref.name && refTip(headLocalRef) !== refTip(ref) ? headLocalRef : null;
+              const mergedIntoDefaultLocal = Boolean(
+                kind === "localBranch" && defaultBaseLocalRef && ref.name !== defaultBaseLocalRef.name && refTip(ref) === refTip(defaultBaseLocalRef),
+              );
+              const directDeleteBaseRef = merged === "merged" && navigation?.defaultBase
+                ? navigation.defaultBase.name
+                : mergedIntoDefaultLocal && defaultBaseLocalRef
+                  ? defaultBaseLocalRef.name
+                  : null;
+              const canDeleteDirect = Boolean(
+                kind === "localBranch" && !isHead && ref.name !== navigation?.defaultBase?.name
+                && ref.name !== defaultBaseLocalRef?.name && checkedOut.length === 0 && ops && directDeleteBaseRef,
+              );
+              const menuDeleteBaseRef = directDeleteBaseRef
+                ?? (defaultBaseLocalRef && defaultBaseLocalRef.name !== ref.name ? defaultBaseLocalRef.name : null)
+                ?? (navigation?.defaultBase && navigation.defaultBase.name !== ref.name ? navigation.defaultBase.name : null)
+                ?? (headLocalRef && headLocalRef.name !== ref.name ? headLocalRef.name : null);
+              const canCleanupHandoff = kind === "localBranch" && (merged === "merged" || merged === "patchEquivalent") && !isHead && ref.name !== navigation?.defaultBase?.name;
               return <div key={ref.name} data-scope-ref-kind={kind} data-ref-name={kind === "localBranch" ? ref.name : undefined} className="group/ref flex items-center gap-1">
                 <div className="min-w-0 flex-1">{option(`ref-${ref.name}`, { ref: ref.name }, <>
                 <Icon className="size-3.5 shrink-0 text-fg3" strokeWidth={1.75} aria-hidden="true" />
@@ -550,32 +565,61 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                 {syncModel && ops ? <SyncTags model={syncModel} lastFetchUnixMs={ops.view.lastFetchUnixMs} /> : null}
                 <code className="shrink-0 font-mono text-xs text-fg3">{shortOid(refTip(ref))}</code>
                 </>, sameScope(scope, { ref: ref.name }))}</div>
-                {syncModel && ops ? <SyncAction model={syncModel} name={shortName} busy={ops.busy} running={ops.view.running?.label === `更新 ${shortName}` || ops.view.running?.label === `检查 ${shortName}`}
+                {syncModel && ops ? <SyncAction model={syncModel} name={shortName} busy={ops.busy}
+                  running={ops.view.running?.label === `更新 ${shortName}` || ops.view.running?.label === `推送 ${shortName}` || ops.view.running?.label === `检查 ${shortName}`}
                   onUpdate={() => { void ops.update(ref.name); }}
+                  onPush={() => { void ops.pushBranch(ref.name); }}
                   onHandoff={() => { onOpenChange(false); void ops.handoffDiverged(ref.name); }} /> : null}
                 {canSwitch && ops ? <Button variant="outline" size="sm" data-testid="branch-switch" disabled={ops.busy}
                   className="h-7 shrink-0 px-2 text-xs opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100"
                   aria-label={kind === "remoteBranch" ? `切换到 ${shortName}（新建本地分支）` : `切换到 ${shortName}`}
                   title={kind === "remoteBranch" ? "新建同名的本地跟踪分支并切换，会更新工作区文件" : "切换本窗口的工作区，会更新工作区文件"}
                   onClick={startSwitch}>{kind === "remoteBranch" ? "切换（新建本地分支）" : "切换"}</Button> : null}
-                {kind === "localBranch" && (merged === "merged" || merged === "patchEquivalent") && !isHead && ref.name !== navigation?.defaultBase?.name
-                  ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
-                    aria-label={`交给 Agent 清理已合入的分支 ${shortRefName(ref.name)}`} title="交给 Agent 核对后删除这个已合入的分支"
-                    onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); }}>清理</Button> : null}
+                {canDeleteDirect && ops && directDeleteBaseRef
+                  ? <Button variant="outline" size="sm" data-testid="branch-delete" disabled={ops.busy} className="h-7 shrink-0 px-2 text-xs"
+                    aria-label={`删除已合入的分支 ${shortName}`} title="安全删除已按提交祖先关系合入的本地分支（不强删、不删远端）"
+                    onClick={() => { onOpenChange(false); void ops.deleteBranch(ref.name, refTip(ref), directDeleteBaseRef); }}>删除</Button>
+                  : canCleanupHandoff
+                    ? <Button variant="ghost" size="sm" data-testid="handoff-cleanup" className="h-7 shrink-0 px-2 text-xs"
+                      aria-label={`交给 Agent 清理已合入的分支 ${shortName}`} title="交给 Agent 核对后删除这个已合入的分支"
+                      onClick={() => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); }}>清理</Button>
+                    : null}
                 {kind !== "tag" ? <button type="button" data-testid="copy-branch-name" className={cn(NAV_CLASS, "shrink-0 opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100")}
-                  aria-label={`复制分支名 ${shortRefName(ref.name)}`} title="复制分支名"
-                  onClick={() => { void window.commitScope.copyText(shortRefName(ref.name)); }}>
+                  aria-label={`复制分支名 ${shortName}`} title="复制分支名"
+                  onClick={() => { void window.commitScope.copyText(shortName); }}>
                   <Copy className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
                 </button> : null}
-                {kind !== "tag" ? <ActionMenu label={`更多操作 ${shortRefName(ref.name)}`} menuLabel="分支操作" testId="branch-more"
+                {kind !== "tag" ? <ActionMenu label={`更多操作 ${shortName}`} menuLabel="分支操作" testId="branch-more"
                   triggerClassName="opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
                   items={[
+                    ...(syncModel?.action === "push" && ops ? [{ key: "push", label: `推送到 ${syncModel.upstream}`, disabled: ops.busy, onSelect: () => { onOpenChange(false); void ops.pushBranch(ref.name); } }] : []),
+                    ...(syncModel?.action === "noUpstream" && preferredRemote && ops ? [{ key: "publish", label: `发布到 ${preferredRemote}（设置上游）`, disabled: ops.busy, onSelect: () => { onOpenChange(false); void ops.pushBranch(ref.name, { remote: preferredRemote, setUpstream: true }); } }] : []),
+                    ...(mergeTarget && onFastForwardMerge && ops ? [{
+                      key: "merge-into",
+                      label: `快进合入 ${shortRefName(mergeTarget.name)}…`,
+                      disabled: ops.busy,
+                      onSelect: () => {
+                        onOpenChange(false);
+                        onFastForwardMerge({
+                          sourceRef: ref.name,
+                          sourceOid: refTip(ref),
+                          targetRef: mergeTarget.name,
+                          targetOid: refTip(mergeTarget),
+                          targetIsHead: mergeTarget.name === repository.headReference,
+                          isBare: repository.isBare,
+                        });
+                      },
+                    }] : []),
                     ...(canSwitch && ops ? [{ key: "switch", label: kind === "remoteBranch" ? "切换（新建本地分支）" : "切换到这个分支", disabled: ops.busy, onSelect: startSwitch }] : []),
-                    ...(ops ? [{ key: "create", label: "从这里新建分支…", disabled: ops.busy, onSelect: () => { onOpenChange(false); onCreateBranch({ kind: "branch", name: shortRefName(ref.name), oid: ref.peeledOid ?? ref.oid }); } }] : []),
-                    { key: "copy", label: "复制分支名", onSelect: () => { void window.commitScope.copyText(shortRefName(ref.name)); } },
+                    ...(ops ? [{ key: "create", label: "从这里新建分支…", disabled: ops.busy, onSelect: () => { onOpenChange(false); onCreateBranch({ kind: "branch", name: shortName, oid: ref.peeledOid ?? ref.oid }); } }] : []),
+                    ...(canDeleteDirect ? [{ key: "cleanup", label: "交给 Agent 清理…", onSelect: () => { onOpenChange(false); onOpenHandoff({ scenario: "cleanup", target: { kind: "branch", ref: ref.name } }); } }] : []),
+                    ...(kind === "localBranch" && !isHead && checkedOut.length === 0 && ops && menuDeleteBaseRef && !canDeleteDirect
+                      ? [{ key: "delete", label: "删除本地分支", disabled: ops.busy, onSelect: () => { onOpenChange(false); void ops.deleteBranch(ref.name, refTip(ref), menuDeleteBaseRef); } }]
+                      : []),
+                    { key: "copy", label: "复制分支名", onSelect: () => { void window.commitScope.copyText(shortName); } },
                     ...(remote && ops ? [{ key: "open-remote", label: "在远端网页打开", onSelect: () => { void ops.openRemote({ branch: ref.name }); } }] : []),
                   ]} /> : null}
-                {merged === "unavailable" ? <button type="button" aria-label={`重新计算 ${shortRefName(ref.name)} 的合入状态`}
+                {merged === "unavailable" ? <button type="button" aria-label={`重新计算 ${shortName} 的合入状态`}
                   className="ml-2 self-start px-2 text-[11px] text-fg3 underline" onClick={() => onLoadMergeStatus([ref.name])}>重试</button> : null}
               </div>;
             })}
@@ -661,6 +705,12 @@ function WorktreeFacts({ repository, navigation, navigationLoading, navigationEr
               aria-label={`更新 ${behind.branch}（快进 ${behind.behind} 个提交）`} title="先 fetch，再快进到上游"
               onClick={() => { void ops.update(behind.refName); }}>
               {updating ? <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" /> : null}更新（快进 {behind.behind} 个提交）
+            </Button> : null}
+            {ops.headPush ? <Button variant="outline" size="sm" data-testid="worktree-push" disabled={ops.busy}
+              aria-label={ops.headPush.setUpstream ? `发布分支 ${ops.headPush.branch} 到 ${ops.headPush.remote}` : `推送 ${ops.headPush.branch}`}
+              title={ops.headPush.setUpstream ? `发布到 ${ops.headPush.remote} 并设置上游` : "非强制推送到上游"}
+              onClick={() => { void ops.pushBranch(ops.headPush!.refName, { remote: ops.headPush!.remote, setUpstream: ops.headPush!.setUpstream }); }}>
+              {ops.headPush.setUpstream ? `发布到 ${ops.headPush.remote}` : `推送（↑${ops.headPush.ahead} 个提交）`}
             </Button> : null}
           </dd></> : null}
         {remote ? <><dt className="text-fg3">远端</dt><dd className="m-0 flex min-w-0 items-center gap-2" data-testid="worktree-remote">

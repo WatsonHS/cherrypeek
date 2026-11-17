@@ -201,8 +201,13 @@ P4-09 工作区状态与改动、P4-10 文件二级页面、P4-11 diff 显示增
 - **取消**：fetch 可取消，终止其进程组。切换和快进不提供取消，避免在更新工作区中途终止；它们设有超时，超时后报告实际状态而不是假定失败。
 - **配置与凭据**：操作加载用户的全局与系统 Git 配置，因为远端地址改写、凭据助手、SSH 设置和 LFS 过滤器通常在那里。保留 `GIT_TERMINAL_PROMPT=0`，不弹出密码输入；只使用已有的凭据助手或 ssh-agent，失败时原样返回 Git 的错误文本（有长度上限，按不可信文本显示）。fetch 传 `--no-recurse-submodules`，不自动补拉子模块；保留 `gc.auto=0` 与 `maintenance.auto=false`，不让操作触发后台维护。
 - **hooks**：切换和快进会触发 `post-checkout` / `post-merge`，仓库里的 hook 是可执行代码。与终端行为一致，照常运行 hook（2026-11-12 用户确认），理由同 2026-11-09 对 clean / smudge 过滤器的决定：用户在自己的仓库里显式点了操作，且 LFS 等依赖 hook 的仓库不运行就会状态不完整。只读路径仍禁用 hook。
-- **操作之后**：成功后复用 `refreshRepository` 的事务切换到新快照，工作区状态重读；失败或拒绝时会话不变。操作结果带观察到的新旧 OID，renderer 按操作号丢弃过期结果。
+- **操作之后**：成功后复用 `refreshRepository` 的事务切换到新快照，工作区状态重读。当前分支更新先 Fetch、刷新，再查询同步状态并快进；同步查询遇到繁忙时等待有界重试结果，不提前结束更新。Fetch 失败、取消、刷新失败或工作区分支改变时不继续快进；本地预检拒绝保留 Fetch 后的快照，中途失败重读实际状态。提示及交接事实区分 Fetch 已完成与本地操作结果，不声称整段流程零写入。操作结果带观察到的新旧 OID，renderer 按操作号丢弃过期结果。
+- **同名未跟踪文件**（P5-06）：`check` 把未跟踪文件与上游同路径的 blob 按内容和类型比较，全程只读，不向对象库写入。相同的不作为 blocker；不同的随 `dirty` 返回，并给出覆盖这组文件当前内容的摘要。renderer 只把这个摘要原样传回 `run`，不传路径列表；`run` 重新比较，摘要不一致就拒绝并返回当时的事实。应用数据目录保存操作期间的可恢复副本。核实分支和快进目标后，按用户确认的方式保留不同副本或清除本次副本。快进未完成时恢复让开的文件。比较设文件数与字节上限，超限按原有方式拒绝。接口见 [接口约定](implementation/m5-m6-backend-contract.md)。
 - **验证**：每种操作用临时真实仓库对照独立 Git 的结果；被拒绝的场景对仓库做前后快照，证明没有任何写入。只读路径原有的“不写仓库”测试继续保留，确保浏览、搜索和状态读取不经过执行器。
+- **M7 审阅收口与推送执行约束**：
+  - `pushRepository`：独立请求方法，与 `fetchRepository` / `runOperation` 共用每个仓库的串行写/网络操作槽与可取消进程组机制，超时上限 600 秒。前置复核目标分支 `expectedOid` 与本地跟踪引用状态，本地已分叉时直接拒绝（`Diverged`）；固定参数模板禁止 `--force` 与 `+` refspec；远端因非快进拒绝时解析 porcelain/stderr 转为结构化 `PushResult::Rejected`（`RemoteRejected`）而不当作协议故障；网络/认证错误返回 `GIT_ERROR`。
+  - `DeleteBranch` / `FastForwardMerge` / `WorkspaceStage` / `WorkspaceUnstage` / `WorkspaceDiscard` / `WorkspaceCommit`：继续通过 `checkOperation` / `runOperation` 两步执行（`check` 只读预检、`run` 再次核验状态后一次执行，开始后不可中途取消，上限 120 秒）。
+  - 工作区路径校验：所有 `pathHex` 解码后必须校验非空、不含 `\0`、首尾无 `/`、无连续 `//`、无 `.`/`..`/`.git` 组件且父路径不经符号链接逃逸工作区根；多路径暂存/取消暂存经 `--pathspec-from-file=- --pathspec-file-nul` 传入 `stdin`，提交消息经 `-F - --cleanup=whitespace` 传入 `stdin`，避免命令行转义或吞掉 `#` 正文行。`WorkspaceDiscard` 实时确认单文件仍处于对应未暂存或未跟踪普通文件状态后才还原或清理；`readWorkspaceStatus` 按 `MERGE_MSG` → `SQUASH_MSG` → 与当前 `HEAD` 提交消息不同的 `COMMIT_EDITMSG` 顺序只读提取待提交草稿。
 
 ## 暂缓的架构工作
 

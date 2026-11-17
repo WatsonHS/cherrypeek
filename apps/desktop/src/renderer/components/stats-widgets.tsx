@@ -93,20 +93,32 @@ export function CountBars({ items, label, height = 150, highlightLast }: {
 }
 
 /** Added lines upward, deleted lines downward, on one shared axis. */
-export function SignedBars({ items, label, upHeight = 100, downHeight = 58 }: {
-  items: { label: string; add: number; del: number }[];
+export function SignedBars({ items, label, upHeight = 100, downHeight = 58, onRangeSelect }: {
+  items: { label: string; add: number; del: number; startUnix?: number; endUnix?: number }[];
   label: string;
   upHeight?: number;
   downHeight?: number;
+  onRangeSelect?: { onZoom(fromUnix: number, toUnix: number): void; onFilter(fromUnix: number, toUnix: number): void };
 }): React.JSX.Element {
   const maxAdd = Math.max(1, ...items.map(item => item.add));
   const maxDel = Math.max(1, ...items.map(item => item.del));
-  return <div role="img" aria-label={label} className="flex gap-[3px]" style={{ height: upHeight + downHeight + 2 }}>
-    {items.map((item, index) => <div key={index} title={`${item.label} · +${item.add} −${item.del}`} className="flex min-w-0 flex-1 flex-col">
-      <div className="flex items-end" style={{ height: upHeight }}><div className="w-full rounded-t bg-chart-add" style={{ height: Math.round(item.add / maxAdd * (upHeight - 4)) }} /></div>
-      <div className="h-0.5 bg-line" />
-      <div style={{ height: downHeight }}><div className="w-full rounded-b bg-chart-del" style={{ height: Math.round(item.del / maxDel * (downHeight - 4)) }} /></div>
-    </div>)}
+  const brush = useChartBrush(items, onRangeSelect?.onZoom, onRangeSelect?.onFilter);
+  const span = brush.selected;
+  return <div className="flex flex-col gap-2">
+    <div ref={brush.containerRef} role="img" aria-label={label} onPointerDown={brush.onPointerDown}
+      className={cn("flex gap-[3px] select-none", brush.enabled && "cursor-crosshair")} style={{ height: upHeight + downHeight + 2 }}>
+      {items.map((item, index) => {
+        const selected = span ? index >= span.start && index <= span.end : false;
+        const dimmed = Boolean(span && !selected);
+        return <div key={index} title={`${item.label} · +${item.add} −${item.del}`}
+          className={cn("flex min-w-0 flex-1 flex-col rounded-xs transition-opacity", selected && "bg-accent-soft", dimmed && "opacity-50")}>
+          <div className="flex items-end" style={{ height: upHeight }}><div className="w-full rounded-t bg-chart-add" style={{ height: Math.round(item.add / maxAdd * (upHeight - 4)) }} /></div>
+          <div className="h-0.5 bg-line" />
+          <div style={{ height: downHeight }}><div className="w-full rounded-b bg-chart-del" style={{ height: Math.round(item.del / maxDel * (downHeight - 4)) }} /></div>
+        </div>;
+      })}
+    </div>
+    {brush.actionsBar}
   </div>;
 }
 
@@ -218,35 +230,150 @@ export function share(value: number, max: number): number {
 }
 
 /** Bar chart of per-bucket values; buckets are buttons when `onPick` is given and there are few enough. */
-export function BucketBars({ items, label, onPick, height = 150, empty }: {
-  items: { key: number; label: string; value: number; title: string }[];
+export function BucketBars({ items, label, onPick, onZoom, onFilterRange, height = 150, empty }: {
+  items: { key: number; label: string; value: number; title: string; startUnix?: number; endUnix?: number }[];
   label: string;
   onPick?(key: number): void;
+  onZoom?(fromUnix: number, toUnix: number): void;
+  onFilterRange?(fromUnix: number, toUnix: number): void;
   height?: number;
   empty: string;
 }): React.JSX.Element {
   const max = Math.max(1, ...items.map(item => item.value));
+  const brush = useChartBrush(items, onZoom, onFilterRange);
   if (items.every(item => item.value === 0)) return <p className="m-0 text-xs text-fg3">{empty}</p>;
   const interactive = Boolean(onPick) && items.length <= 400;
   const axis = items.length <= 1 ? items : [items[0]!, items[Math.floor(items.length / 2)]!, items[items.length - 1]!];
+  const span = brush.selected;
   return <div className="flex flex-col gap-1.5">
-    <div role="group" aria-label={label} className="flex items-end gap-[2px] border-b border-line" style={{ height }}>
-      {items.map(item => {
-        const bar = <span className={cn("block w-full rounded-t bg-bar", interactive && "group-enabled:group-hover:bg-accent")}
+    <div ref={brush.containerRef} role="group" aria-label={label} onPointerDown={brush.onPointerDown}
+      className={cn("flex items-end gap-[2px] border-b border-line select-none", brush.enabled && "cursor-crosshair")} style={{ height }}>
+      {items.map((item, index) => {
+        const selected = span ? index >= span.start && index <= span.end : false;
+        const dimmed = Boolean(span && !selected);
+        const bar = <span className={cn("block w-full rounded-t transition-opacity", selected ? "bg-accent" : "bg-bar",
+          interactive && "group-enabled:group-hover:bg-accent", dimmed && "opacity-50")}
           style={{ height: item.value ? Math.max(3, Math.round(item.value / max * (height - 10))) : 0 }} />;
         return interactive
-          ? <button key={item.key} type="button" disabled={item.value === 0} title={item.title} aria-label={`${item.title}，在提交页筛选`} onClick={() => onPick!(item.key)}
-            className="group flex h-full min-w-0 flex-1 items-end rounded-t focus-visible:outline-2 focus-visible:outline-offset-1 disabled:cursor-default">{bar}</button>
-          : <div key={item.key} title={item.title} className="flex h-full min-w-0 flex-1 items-end">{bar}</div>;
+          ? <button key={item.key} type="button" disabled={item.value === 0 && !selected} title={item.title} aria-label={`${item.title}，在提交页筛选`}
+            onClick={() => { if (!brush.suppressClick() && item.value > 0) { brush.clearSelection(); onPick!(item.key); } }}
+            className={cn("group flex h-full min-w-0 flex-1 items-end rounded-t focus-visible:outline-2 focus-visible:outline-offset-1 disabled:pointer-events-none disabled:cursor-default",
+              selected && "bg-accent-soft")}>{bar}</button>
+          : <div key={item.key} title={item.title} className={cn("flex h-full min-w-0 flex-1 items-end rounded-t", selected && "bg-accent-soft")}>{bar}</div>;
       })}
     </div>
     <div aria-hidden="true" className="flex justify-between text-xs text-fg3 tabular-nums">{axis.map((item, index) => <span key={index}>{item.label}</span>)}</div>
+    {brush.actionsBar}
   </div>;
+}
+
+function formatBrushRange(fromUnix: number, toUnix: number): string {
+  const end = Math.max(fromUnix, toUnix - 1);
+  const startDate = new Date(fromUnix * 1_000);
+  const endDate = new Date(end * 1_000);
+  const sameDay = startDate.getFullYear() === endDate.getFullYear()
+    && startDate.getMonth() === endDate.getMonth()
+    && startDate.getDate() === endDate.getDate();
+  return sameDay ? `${formatDateTime(fromUnix)}–${formatClock(end)}` : `${formatDateTime(fromUnix)}–${formatDateTime(end)}`;
+}
+
+interface BrushableItem { startUnix?: number; endUnix?: number }
+
+function useChartBrush(
+  items: readonly BrushableItem[],
+  onZoom?: (fromUnix: number, toUnix: number) => void,
+  onFilter?: (fromUnix: number, toUnix: number) => void,
+) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const cleanupRef = React.useRef<(() => void) | null>(null);
+  const [selection, setSelection] = React.useState<{ start: number; end: number } | null>(null);
+  const suppressClickUntil = React.useRef(0);
+  const enabled = items.length >= 2
+    && items.every(item => item.startUnix !== undefined && item.endUnix !== undefined)
+    && Boolean(onZoom || onFilter);
+  const rangeKey = items.length ? `${items[0]?.startUnix ?? ""}:${items[items.length - 1]?.endUnix ?? ""}:${items.length}` : "";
+  React.useEffect(() => { setSelection(null); }, [rangeKey]);
+  React.useEffect(() => () => cleanupRef.current?.(), []);
+  React.useEffect(() => {
+    if (!selection) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      if (document.querySelector("[data-slot='popover-content'][data-state='open'], [role='dialog'][data-state='open']")) return;
+      setSelection(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selection]);
+
+  const indexForClientX = (clientX: number): number => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return 0;
+    const ratio = Math.max(0, Math.min(0.999999, (clientX - rect.left) / rect.width));
+    return Math.floor(ratio * items.length);
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!enabled || event.button !== 0) return;
+    cleanupRef.current?.();
+    const anchor = indexForClientX(event.clientX);
+    let dragging = false;
+    const onMove = (moveEvent: PointerEvent) => {
+      const current = indexForClientX(moveEvent.clientX);
+      if (current !== anchor) dragging = true;
+      if (dragging) setSelection({ start: Math.min(anchor, current), end: Math.max(anchor, current) });
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      cleanupRef.current = null;
+    };
+    const finish = (endEvent: PointerEvent) => {
+      cleanup();
+      const current = indexForClientX(endEvent.clientX);
+      if (dragging && current !== anchor) {
+        suppressClickUntil.current = performance.now() + 80;
+        setSelection({ start: Math.min(anchor, current), end: Math.max(anchor, current) });
+      } else if (dragging) {
+        suppressClickUntil.current = performance.now() + 80;
+        setSelection(null);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    cleanupRef.current = cleanup;
+  };
+
+  const selected = selection && selection.start < selection.end ? selection : null;
+  const fromUnix = selected ? items[selected.start]?.startUnix ?? 0 : 0;
+  const toUnix = selected ? items[selected.end]?.endUnix ?? 0 : 0;
+  const actionsBar = selected && toUnix > fromUnix ? <div data-testid="stats-brush-actions"
+    className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-sunken px-2.5 py-1.5 text-xs">
+    <span className="font-medium text-fg tabular-nums">{formatBrushRange(fromUnix, toUnix)}</span>
+    <span className="min-w-0 flex-1" />
+    {onZoom ? <Button type="button" size="sm" data-testid="stats-brush-zoom"
+      onClick={() => { setSelection(null); onZoom(fromUnix, toUnix); }}>放大到这段时间</Button> : null}
+    {onFilter ? <Button type="button" variant="outline" size="sm" data-testid="stats-brush-commits"
+      onClick={() => { setSelection(null); onFilter(fromUnix, toUnix); }}>在提交页查看</Button> : null}
+    <Button type="button" variant="ghost" size="sm" onClick={() => setSelection(null)}>取消</Button>
+  </div> : null;
+
+  return {
+    containerRef,
+    enabled,
+    selected,
+    suppressClick: () => performance.now() < suppressClickUntil.current,
+    clearSelection: () => setSelection(null),
+    onPointerDown,
+    actionsBar,
+  };
 }
 
 /** What a click on a chart element does on the commits page (the page maps these onto the shared search query). */
 export interface StatsActions {
   filterTime(fromUnix: number, toUnix: number): void;
+  zoomTime(fromUnix: number, toUnix: number): void;
   filterAuthor(identity: { name: string; email: string }): void;
   filterPath(kind: "file" | "directory", rawHex: string): void;
   showCommit(oid: string): void;

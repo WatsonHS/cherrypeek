@@ -1611,6 +1611,16 @@
         "path": {
           "$ref": "#/definitions/GitPath"
         },
+        "replace": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UntrackedDifference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "staged": {
           "type": "boolean"
         },
@@ -3267,6 +3277,12 @@
             },
             "pathsTruncated": {
               "type": "boolean"
+            },
+            "replaceToken": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -3405,6 +3421,44 @@
             "message"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "remoteRejected",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "remote": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "remote",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRefName": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "notAncestorMerged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "baseRefName"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -3420,6 +3474,11 @@
           },
           "type": "array"
         },
+        "identicalUntrackedCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "preservedDirtyCount": {
           "format": "uint32",
           "minimum": 0,
@@ -3429,7 +3488,8 @@
       "required": [
         "allowed",
         "blockers",
-        "preservedDirtyCount"
+        "preservedDirtyCount",
+        "identicalUntrackedCount"
       ],
       "type": "object"
     },
@@ -3474,6 +3534,12 @@
         {
           "additionalProperties": false,
           "properties": {
+            "committedOid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "headOid": {
               "type": [
                 "string",
@@ -3490,6 +3556,16 @@
               "const": "done",
               "type": "string"
             },
+            "untracked": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/UntrackedOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "updatedRef": {
               "anyOf": [
                 {
@@ -3503,6 +3579,69 @@
           },
           "required": [
             "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PushResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blockers": {
+              "items": {
+                "$ref": "#/definitions/OperationBlocker"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "const": "rejected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "blockers"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "finishedAtUnixMs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "newOid": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "done",
+              "type": "string"
+            },
+            "refName": {
+              "type": "string"
+            },
+            "remote": {
+              "type": "string"
+            },
+            "remoteRefName": {
+              "type": "string"
+            },
+            "setUpstream": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "outcome",
+            "remote",
+            "refName",
+            "remoteRefName",
+            "newOid",
+            "setUpstream",
+            "finishedAtUnixMs"
           ],
           "type": "object"
         }
@@ -4670,6 +4809,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "result": {
+              "$ref": "#/definitions/PushResult"
+            },
+            "section": {
+              "const": "repositoryPushed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -5465,6 +5621,59 @@
       ],
       "type": "object"
     },
+    "UntrackedDifference": {
+      "additionalProperties": false,
+      "properties": {
+        "localOnlyLines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "upstreamOnlyLines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UntrackedOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "backedUpCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backupDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discardedCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identicalCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identicalCount",
+        "backedUpCount"
+      ],
+      "type": "object"
+    },
     "UpdatedRef": {
       "additionalProperties": false,
       "properties": {
@@ -5790,6 +5999,14 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "draftCommitMessage": {
+          "description": "Draft commit message from MERGE_MSG / SQUASH_MSG / COMMIT_EDITMSG when distinct from HEAD.",
+          "maxLength": 65536,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "entries": {
           "items": {

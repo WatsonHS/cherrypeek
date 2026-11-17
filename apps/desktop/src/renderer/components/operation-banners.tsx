@@ -1,5 +1,5 @@
 import * as React from "react";
-import { LoaderCircle, X } from "lucide-react";
+import { X } from "lucide-react";
 import { Button } from "./ui/button.js";
 import { momentLabel } from "../lib/format.js";
 
@@ -12,11 +12,9 @@ export interface FetchNoticeValue {
 }
 
 /** "已 fetch origin · 今天 14:31": a small status in the top bar after a fetch succeeded. */
-export function FetchNotice({ notice, onDismiss, update }: {
+export function FetchNotice({ notice, onDismiss }: {
   notice: FetchNoticeValue;
   onDismiss(): void;
-  /** The window's branch can now be fast-forwarded: "更新 main". */
-  update?: { branch: string; disabled: boolean; running: boolean; onUpdate(): void };
 }): React.JSX.Element {
   const dismissRef = React.useRef(onDismiss);
   dismissRef.current = onDismiss;
@@ -29,18 +27,12 @@ export function FetchNotice({ notice, onDismiss, update }: {
   return <div role="status" data-testid="fetch-notice"
     className="topbar-fetch-notice flex h-7 min-w-0 shrink items-center gap-1 rounded-full bg-ok-bg pr-1 pl-3 text-[12.5px] text-ok">
     <span className="min-w-0 truncate tabular-nums" title={notice.remotes.join("、")}>{text}</span>
-    {update ? <button type="button" data-testid="fetch-notice-update" disabled={update.disabled} onClick={update.onUpdate}
-      aria-label={`更新 ${update.branch}（快进到上游）`} title="快进到上游，工作区文件随之更新"
-      className="flex h-5 max-w-[140px] shrink-0 items-center gap-1 rounded-full bg-ok px-2 text-[11.5px] font-medium text-panel hover:brightness-95 disabled:opacity-60">
-      {update.running ? <LoaderCircle className="size-3 shrink-0 animate-spin motion-reduce:animate-none" strokeWidth={1.75} aria-hidden="true" /> : null}
-      <span className="truncate">更新 {update.branch}</span>
-    </button> : null}
     <button type="button" aria-label="关闭提示" onClick={onDismiss}
       className="flex size-5 shrink-0 items-center justify-center rounded-full hover:bg-ok/10"><X className="size-3" strokeWidth={1.75} /></button>
   </div>;
 }
 
-/** fetch failed: nothing was changed. Git's own message is shown as plain text. */
+/** Fetch may have updated some remote refs before failing. Git's message is shown as plain text. */
 export function FetchFailureBanner({ message, retrying, canOpenTerminal, onRetry, onHandoff, onClose }: {
   message: string;
   /** A fetch is running right now, so retry waits. */
@@ -60,9 +52,9 @@ export function FetchFailureBanner({ message, retrying, canOpenTerminal, onRetry
   return <div role="alert" data-testid="fetch-failure"
     className="flex items-start gap-4 border-b border-bad-line bg-bad-bg px-4 py-3">
     <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-      <div className="text-[13px] font-semibold text-bad">fetch 没有完成，仓库未被改动</div>
+      <div className="text-[13px] font-semibold text-bad">Fetch 没有完成，未执行本地分支更新</div>
       <pre data-testid="fetch-failure-output" className="m-0 max-h-32 overflow-auto font-mono text-xs leading-[1.5] whitespace-pre-wrap break-words text-fg2">{message}</pre>
-      <div className="text-xs text-fg3">CherryPeek 不会弹出密码输入，只使用已有的凭据助手或 ssh-agent。</div>
+      <div className="text-xs text-fg3">远端引用可能已部分更新。CherryPeek 不会弹出密码输入，只使用已有的凭据助手或 ssh-agent。</div>
       {terminalError ? <div className="text-xs text-bad" data-testid="fetch-failure-terminal-error">{terminalError}</div> : null}
     </div>
     <div className="flex shrink-0 items-center gap-2">

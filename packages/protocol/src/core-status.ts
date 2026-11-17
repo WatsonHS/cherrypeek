@@ -17,8 +17,12 @@ export interface CommitScopeApi extends RepositorySessionApi {
   /** Starts the core again after it ended in an error; does nothing in any other state. */
   restartCore(): Promise<void>;
   chooseRepository(): Promise<string | null>;
-  /** Absolute path given with `--repository=` at launch, or null. */
+  /** Absolute path given with `--repository=` or `open-file` at launch, or null. */
   getLaunchRepository(): Promise<string | null>;
+  /** Resolves a dropped File object to a local absolute path, or null when unavailable or invalid. */
+  getPathForFile(file: File): string | null;
+  /** Fires when main asks the renderer to open a repository (e.g., Finder/Dock open-file or File -> Open menu). */
+  onOpenRepositoryRequested(listener: (path: string) => void): () => void;
   copyText(text: string): Promise<void>;
   /**
    * P5-05: opens the current session's working directory in Finder, a terminal or an editor. The directory comes

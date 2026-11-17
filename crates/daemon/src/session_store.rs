@@ -90,6 +90,15 @@ impl SessionStore {
         Ok(Some(canonical))
     }
 
+    pub fn backup_root(&self, repository: &RepositoryInfo) -> Result<PathBuf, ()> {
+        let data_dir = self.data_dir.as_deref().ok_or(())?;
+        let root = safe_data_dir(data_dir, repository)?.join("backups");
+        if safe_data_dir(&root, repository)? != root {
+            return Err(());
+        }
+        ensure_safe_directory(&root)
+    }
+
     pub fn metadata_cache_root(&self, repository: &RepositoryInfo) -> Result<PathBuf, ()> {
         let data_dir = self.data_dir.as_deref().ok_or(())?;
         let checked = safe_data_dir(data_dir, repository)?;

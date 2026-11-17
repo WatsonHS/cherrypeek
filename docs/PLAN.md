@@ -1,5 +1,11 @@
 # 实施计划
 
+2026-11-15 更新当前工作区分支时支持丢弃已确认的同名未跟踪副本。顶栏 Fetch 显示已用时间，快进回执将详细计数和备份目录收进详情。
+
+2026-11-13 更新预检超时跟进已完成：优化批量路径覆盖判断及其取消检查；保持原超时与未提交改动保护，避免大批快进的 diffstat 触发输出上限。真实仓库只读对照、Rust / pages / 协议 / 实窗回归通过；Clippy 的既有阻塞与验证边界见[验证记录](validation/update-current-preflight.md)。
+
+2026-11-13 顶栏入口调整已完成本机定向验证：按用户确认将当前工作区分支的 Fetch + 快进提升为主按钮，下拉保留独立 Fetch / Fetch 并清理失效引用；不改变浏览范围，不批量更新本地分支。类型检查、构建、215 项 renderer 测试、更新分支及 Fetch 历史实窗测试通过，覆盖分叉、脏工作区、取消、Fetch 中外部切换分支和 linked worktree。验证证据与边界见 [开发说明](DEVELOPMENT.md)，不据此宣称 M5 全部验收完成。
+
 日期：2026-11-08。P0-01 至 P0-04 已通过本机技术验收，M0 完成。P0-04 的[代码级计划](implementation/p0-04-reader-comparison.md)、[验收记录](validation/p0-04-readers.md)、[读取路线决策](decisions/0001-git-reader.md)及[M0 基线](benchmarks/m0-baseline.md)已落盘；P1-01 仓库会话已通过[验收](validation/p1-01-repository-sessions.md)，P1-02 已按[代码级计划](implementation/p1-02-history-pagination.md)完成固定快照分页与手动刷新，见[验收记录](validation/p1-02-history-pagination.md)和[分页基线](benchmarks/p1-02-history-pagination.md)。P1-03 的虚拟历史、新增标记和滚动测量已完成，见[验收记录](validation/p1-03-virtual-history.md)及[滚动基线](benchmarks/p1-03-history-scroll.md)。P1-04 的分支与 worktree 导航已完成[验收](validation/p1-04-scope-navigation.md)，P1-05 可恢复元数据索引也已完成[验收](validation/p1-05-metadata-index.md)，P1-06 元数据搜索已完成[验收](validation/p1-06-metadata-search.md)，M1 主流程通过；P2-01 图布局与跨页检查点也已完成[验收](validation/p2-01-history-graph.md)及[宽图测量](benchmarks/p2-01-history-graph-scroll.md)，P2-02 已完成实现和自动验证，见[验证记录](validation/p2-02-commit-details.md)，完整详情实窗检查未跑完。P2-03 只读 diff、P2-04 历史定位与 P3-01 路径历史已实现并完成定向检查。本轮按[批次代码计划](implementation/p3-02-05-mvp-batch.md)完成 P3-02 活动统计、P3-03 外部变化通知、P3-05 交给 Agent，并通过 P3-04 本机小规模主流程及实际项目只读对照，见[M3 记录](validation/m3-mvp.md)。只读 MVP 功能齐全；下一阶段 M4 处理性能、稳定性与发行，未把本机主流程等同于发布验收。
 
 执行顺序：P0-01 → P0-02 → P0-03 → P0-04 → M1 → M2 → M3 → M4。每项交付应能独立检查；任务记录包含完成条件的证据后再勾选。
@@ -201,63 +207,160 @@
 
 ## M5：基础 Git 操作
 
-2026-11-12 用户确认：App 直接执行白名单内的基础操作，做不到时不执行并提示交给 Agent。产品范围见 [PRODUCT](PRODUCT.md)「基础操作」，执行层约束见 [ARCHITECTURE](ARCHITECTURE.md)「基础操作执行层」。M5 与 M4 剩余的性能、发行验收并行，互不阻塞。各任务开始前写代码级计划；以下均未开始。
+2026-11-12 用户确认：App 直接执行白名单内的基础操作，做不到时不执行并提示交给 Agent。产品范围见 [PRODUCT](PRODUCT.md)「基础操作」，执行层约束见 [ARCHITECTURE](ARCHITECTURE.md)「基础操作执行层」。M5 与 M4 剩余的性能、发行验收并行，互不阻塞。以下 M5 任务已于 2026-11-17 完成核心、界面与实窗接入；剩余跨网络实仓与外部应用吊起限制见各条记录。
 
-- [ ] **P5-01 操作执行层与 Fetch。** 新增 `repositoryOperations` capability、`check` / `run` 两步协议、每仓库串行的执行器和操作结果事件；接入手动 fetch（全部远端或指定远端，可选清理远端已删除的分支）、进度与取消；成功后自动刷新到新快照。界面：顶栏刷新旁的 Fetch 入口、进行中状态、失败提示与“在终端打开”。依赖 P3-03。完成条件：
+- [x] **P5-01 操作执行层与 Fetch。** 新增 `repositoryOperations` capability、`check` / `run` 两步协议、每仓库串行的执行器和操作结果事件；接入手动 fetch（全部远端或指定远端，可选清理远端已删除的分支）、进度与取消；成功后自动刷新到新快照。界面：顶栏刷新旁的 Fetch 入口、进行中状态、失败提示与“在终端打开”。依赖 P3-03。完成条件：
   - fetch 后的远端跟踪引用与独立 `git fetch` 一致，工作区、index、HEAD 和本地分支不变。
   - 认证失败、无网络、无远端分别有明确提示，不弹密码输入，不留残留进程；取消后仓库可继续正常 fetch。
   - 浏览、搜索、状态读取仍不经过执行器，原有只读快照测试通过。
   - 刷新后保留所选提交和滚动锚点；失败时当前快照不变。
-  - 进展（2026-11-12）：执行层和 fetch 已接通，本项未完成（见“尚未做”）。未先写代码级计划，实现要点记在这里。
+  - 进展（2026-11-12）：执行层和 fetch 已接通（当时尚未接完单远端界面与两步预检）。
     - daemon：`git_command.rs` 增加操作模式（读用户配置、可联网、运行 hook，独立进程组；仍不分页、不弹输入、不触发自动维护），只有新增的 `operations.rs` 使用。`fetchRepository { remote, prune }` 执行 `git fetch --quiet --no-recurse-submodules [--prune] (--all | -- <远端>)`；远端名先与只读读取到的远端列表核对，没有远端或名称不在列表里时不启动 fetch。上限 10 分钟。
     - 调度：操作占用独立的一个额度，不计入两条读取额度；已有操作时第二个返回 `BUSY`。main 的 transport 同样分开计数。
     - 界面：顶栏刷新旁的 Fetch 按钮，进行中变为“取消”；按住 ⌥ 点击同时清理远端已删除的分支。⌘K 有对应两条命令。成功后自动刷新；失败时提示“fetch 没有完成，仓库未被改动”并附 Git 的原始输出。核心未声明 `repositoryOperations` 时不显示入口。
-    - 验证：Rust 单元测试 5 项；`pnpm test:pages` 新增 3 项，用真实 daemon 对照独立 `git fetch`（含 `--prune`），核对 HEAD、本地分支、index 和未提交文件不变；非法或不存在的远端、缺参数、无远端被拒绝且仓库快照不变；远端不可达返回 `GIT_ERROR`；fetch 被持住时两条读取照常完成、第二个 fetch 返回 `BUSY`，取消后 Git 子进程 11 ms 内回收，之后再 fetch 成功。`cargo test -p commitscope-daemon`（99 + 12 项）、`pnpm test:protocol`（47 项）、`pnpm test:renderer`（161 项）、`pnpm typecheck`、`pnpm protocol:check`、`pnpm build` 通过。
-    - 尚未做：`check` / `run` 两步协议（fetch 没有需要预检的前提，随 P5-02 加入）；指定单个远端的界面；“在终端打开”的失败入口；认证失败和无网络的实际场景；实窗检查；刷新后保留选择与锚点沿用既有刷新逻辑，未单独验证。
-    - 已知限制：fetch 进行中手动刷新或切换浏览范围会取消它（请求绑定当时的会话）；Git 的错误输出超过 4 KiB 时报资源上限而不是原文。
-    - `cargo clippy -- -D warnings` 在 `core/lib.rs`、`search.rs`、`handoff.rs`、`history.rs`、`updates.rs` 有本项之外的既有报错，`history.rs` 有既有格式差异，均未处理。
-- [ ] **P5-02 快进更新。** 当前分支：fetch 上游后只做快进。其他本地分支：不 checkout 直接快进。界面：范围菜单的分支行与仓库弹层显示领先 / 落后数和上次 fetch 时间，可快进时提供“更新”。依赖 P5-01。完成条件：
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P5-01 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`RepositoryUpdateControl` 下拉菜单在多远端仓库列出各远端单独 Fetch 项，`FetchFailureBanner` 保留失败远端参数供重试且提供“在终端打开”；`tests/smoke/m5-operations-smoke.mjs`（临时本地 `origin` + `upstream` 双远端）、`tests/smoke/fetch-history-smoke.mjs`、`tests/smoke/update-current-smoke.mjs`（含延迟 `upload-pack` 取消与失败场景）及 `pnpm test:pages`。
+    - 验证命令与结果：`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:operations`、`pnpm test:smoke:fetch-history`、`pnpm test:smoke:update-current` 通过；验证多远端下单独 fetch `upstream` 仅更新 `refs/remotes/upstream/*` 且保持 `origin`、HEAD 与工作区不变，失败/取消后不写仓库。
+    - 性能结果或不适用原因：不适用（交互命令，未新增独立大仓基准；进程隔离与子进程回收由上述测试验证）。
+    - 剩余限制：真实外网 HTTPS/SSH 交互凭据与弱网断连依赖环境未在离线自动化中复测，Windows / Intel Mac 未覆盖；fetch 进行中切换浏览范围或刷新会按会话边界取消当前 fetch。
+- [x] **P5-02 快进更新。** 当前分支：fetch 上游后只做快进。其他本地分支：不 checkout 直接快进。界面：范围菜单的分支行与仓库弹层显示领先 / 落后数和上次 fetch 时间，可快进时提供“更新”。依赖 P5-01。完成条件：
   - 快进后的分支 OID、工作区内容与独立 `git merge --ff-only` 一致。
   - 已分叉、没有上游、快进会覆盖未提交改动、目标分支被其他 worktree 检出、有进行中的合并或 rebase 时均不执行，仓库前后快照相同，提示写明原因和两侧计数。
   - `check` 与 `run` 之间引用被外部改动时拒绝执行。
-  - 后端进展（2026-11-12）：按[代码级计划](implementation/p5-02-03-backend.md)加入 `getBranchSync`、`checkOperation`、`runOperation`；快进与 fetch 分阶段。M5 新增 8 项 daemon 对照通过，覆盖 SHA-1 / SHA-256、当前与其他分支、分叉计数、拒绝前后全树快照、跨 daemon 操作锁。字段差异、完整回归和限制见[后端记录](validation/m5-m6-backend.md)；未做桌面接线与实窗验收。
-- [ ] **P5-03 切换分支与新建分支。** 范围菜单的分支行、提交详情和 ⌘K 提供“切换到这个分支”“从这里新建分支”；选远端分支时新建同名跟踪分支。顶栏工作区项随之更新。依赖 P5-01。完成条件：
+  - 后端进展（2026-11-12）：按[代码级计划](implementation/p5-02-03-backend.md)加入 `getBranchSync`、`checkOperation`、`runOperation`；快进与 fetch 分阶段，M5 daemon 对照覆盖 SHA-1 / SHA-256、当前与其他分支、分叉计数、拒绝前后全树快照、跨 daemon 操作锁；协议差异见[接口约定](implementation/m5-m6-backend-contract.md)与[后端记录](validation/m5-m6-backend.md)。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P5-02 · 实现版本：本机源码版。
+    - 验收环境 / fixture：顶栏“更新 {branch}”复合流及 `ScopePicker` 非当前分支快进、分叉/无上游/未提交改动/worktree 冲突拒绝弹层，与 `OperationsStore` 对 `checkOperation` 瞬态 `BUSY` 的只读预检重试；fixture 为 `tests/smoke/update-current-smoke.mjs`、`tests/smoke/m5-operations-smoke.mjs`、`tests/renderer/operations.test.mjs`、`pnpm test:pages`（含 M5 8 项与 P5-06 10 项）。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）、`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:update-current` 与 `pnpm test:smoke:operations` 通过；覆盖非当前分支 `topic` 直接快进且 HEAD 不变、HEAD 分支先 fetch 后快进、同名未跟踪文件处理及各拒绝场景前后的工作区/index 一致性。
+    - 性能结果或不适用原因：不适用（真实 `ai-native-workspace` 预检耗时基线 0.51–0.58 秒见[更新预检验证](validation/update-current-preflight.md)）。
+    - 剩余限制：依赖本地 Git 配置的真实远端鉴权未测；大仓快进仍禁用了 Git diffstat，拒绝明细路径保留协议截断上限。
+- [x] **P5-03 切换分支与新建分支。** 范围菜单的分支行、提交详情和 ⌘K 提供“切换到这个分支”“从这里新建分支”；选远端分支时新建同名跟踪分支。顶栏工作区项随之更新。依赖 P5-01。完成条件：
   - 切换后的 HEAD、工作区与独立 `git switch` 一致；与目标无冲突的未提交改动保留。
   - 会覆盖未提交改动、目标已被其他 worktree 检出、有进行中的操作时不执行，列出涉及的文件，仓库前后快照相同；不强切、不自动 stash。
   - 新建分支的名称按 `git check-ref-format` 校验，已存在时不覆盖。
   - 浏览分支仍不 checkout：只切换浏览范围时 HEAD 不变。
-  - 后端进展（2026-11-12）：切换、本地创建、远端跟踪创建、导航 remotes / upstream / fetch 时间已加入。上述 8 项覆盖无冲突 staged / unstaged / untracked 保留、ignored 覆盖拒绝、全局 hooksPath、名称与引用前提；未验证系统配置、外部 Git 竞态与实窗。接口差异与保守拒绝边界见[接口约定](implementation/m5-m6-backend-contract.md)。
-- [ ] **P5-04 做不到时交给 Agent。** 为“更新遇到分叉”“切换或更新被未提交改动挡住”“操作中途失败”增加交接模板，入口只出现在对应的拒绝提示里。依赖 P5-02、P5-03、P3-05。完成条件：prompt 中的分支、两侧 OID、领先 / 落后数和涉及文件与独立 Git 一致；仓库文本只出现在参考数据段；模板以 [HANDOFF](HANDOFF.md) 为准。
-- [ ] **P5-05 复制与打开。** 复制分支名、提交消息；在终端、编辑器、Finder 中打开工作区；在远端网页打开提交或分支。不依赖执行层，可先做。完成条件：打开外部程序只经 main 的窄接口，路径来自会话而不是 renderer；远端网页地址只由可识别的 https / ssh 远端生成，其余不显示入口，不把仓库里的文本当作命令或任意 URL 打开。
-  - 进展（2026-11-12）：已接入复制与本地打开，未做远端网页，本项未完成。
-    - 仓库弹层「当前工作区」的目录旁有三个按钮：在 Finder 中打开、在终端打开、在编辑器打开。终端默认 Terminal.app；编辑器首次点击时选择应用；按住 ⌥ 点击可更换。选择保存在应用数据目录的 `open-with.json`。目前只支持 macOS。
-    - 范围菜单的本地 / 远端分支行悬停时出现“复制分支名”。
-    - ⌘K 新增：复制当前提交消息、复制当前分支名、在 Finder / 终端 / 编辑器中打开。
-    - main 的窄接口 `openWorkspaceIn` 只接收目标种类，目录取自会话；用参数数组执行 `/usr/bin/open -a <应用> <目录>`。
-    - 远端网页入口需要 daemon 提供远端地址，留到 P5-01 的协议一起做。
-    - 验证：`pnpm typecheck`、`pnpm build`、`pnpm test:renderer`（160 项，含新增的命令面板用例）通过。未做实窗检查，打开外部应用的行为没有自动测试。
+  - 后端进展（2026-11-12）：切换、本地创建、远端跟踪创建、导航 remotes / upstream / fetch 时间已加入（见[后端记录](validation/m5-m6-backend.md)与[接口约定](implementation/m5-m6-backend-contract.md)）。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P5-03 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`ScopePicker` 本地/远端分支切换、分支/提交详情 `CreateBranchDialog`、`CommandPalette` 分支命令及纯只读范围切换；`tests/smoke/m5-operations-smoke.mjs`、`tests/smoke/scope-navigation-smoke.mjs`（via `pnpm test:pages` / renderer tests）。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过，含分支名格式与重名校验）、`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:operations` 通过；验证非法名被前置拦截、新建分支并切换后顶栏与 HEAD 一致、选中 `origin/remote-only` 自动创建跟踪分支并切换、无冲突改动保留而冲突改动拒绝且 index/文件不变。
+    - 性能结果或不适用原因：不适用（交互切换动作）。
+    - 剩余限制：与外部终端并发执行 Git 操作的真实竞态仅在 `test:pages` 与单元测试层构造，Windows / Intel Mac 未覆盖。
+- [x] **P5-04 做不到时交给 Agent。** 为“更新遇到分叉”“切换或更新被未提交改动挡住”“操作中途失败”增加交接模板，入口只出现在对应的拒绝提示里。依赖 P5-02、P5-03、P3-05。完成条件：prompt 中的分支、两侧 OID、领先 / 落后数和涉及文件与独立 Git 一致；仓库文本只出现在参考数据段；模板以 [HANDOFF](HANDOFF.md) 为准。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P5-04 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`OperationRefusal`（修复先关弹层导致 `refusalHandoff()` 读取到空的回调顺序缺陷）、`OperationFailureBanner`、`FetchFailureBanner` 与 `HandoffDialog`；`tests/renderer/operations.test.mjs`、`tests/renderer/handoff-prompt.test.mjs` 及 `tests/smoke/m5-operations-smoke.mjs`。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）与 `pnpm test:smoke:operations` 通过；验证脏工作区阻止切换到 `topic` 时展示 `RefusalDialog`，点击 `交给 Agent…` 打开 `data-scenario="operation-blocked"` 的 `HandoffDialog`，完整 prompt 包含 `topic` 与 `shared.txt` 并可成功复制到剪贴板。
+    - 性能结果或不适用原因：不适用（只复制文本模板，不运行外部程序）。
+    - 剩余限制：未接入系统自动化检测真实现场中的“外部 Agent 执行该 prompt 后的结果”。
+- [x] **P5-05 复制与打开。** 复制分支名、提交消息；在终端、编辑器、Finder 中打开工作区；在远端网页打开提交或分支。不依赖执行层，可先做。完成条件：打开外部程序只经 main 的窄接口，路径来自会话而不是 renderer；远端网页地址只由可识别的 https / ssh 远端生成，其余不显示入口，不把仓库里的文本当作命令或任意 URL 打开。
+  - 进展（2026-11-12）：已完成复制、main 的 `openWorkspaceIn`（仅 macOS，选中编辑器写入 `open-with.json`）及 ⌘K / 分支行入口，并随后接入 `openRemotePage`（仅从导航快照的已清洗 `https` 远端页构建提交/分支链接）。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P5-05 · 实现版本：本机源码版。
+    - 验收环境 / fixture：Mac Apple Silicon + Electron 沙箱与隔离检查；`tests/renderer/operations.test.mjs`、`tests/pages/operations-git.test.mjs`（含 M5 URL 清洗测试）及 `tests/smoke/m5-operations-smoke.mjs`。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）、`pnpm test:pages`（50/50 通过，含 `navigation sanitizes URLs`）、`pnpm test:smoke`（隔离/CSP/preload API 键白名单通过）。
+    - 性能结果或不适用原因：不适用（单次本地调用）。
+    - 剩余限制：`openWorkspaceIn` 当前仅支持 macOS；实际吊起 Finder / 终端 / 编辑器与系统默认浏览器的行为属于桌面系统外部效应，未在 CI 自动化中断言目标外部窗口出现。
 
-第二批候选（删除已合入的本地分支、重命名分支、打标签、非强制 push）在第一批试用后再决定，暂不建任务。
+- [x] **P5-06 更新时让开同名未跟踪文件。** 2026-11-14 用户确认。产品规则见 [PRODUCT](PRODUCT.md)「同名未跟踪文件」，接口见 [接口约定](implementation/m5-m6-backend-contract.md)「P5-06」。分工：Codex 做 Rust 预检、执行与协议生成；Claude 做 renderer。依赖 P5-02。完成条件：
+  - 未跟踪文件与上游内容、类型相同时，更新不需要确认；更新后的 HEAD、工作区内容与独立 `git merge --ff-only`（事先移走这些文件）一致，其余未提交改动和未跟踪文件不变。
+  - 内容不同时默认拒绝，仓库前后快照相同；提示逐个文件给出相对上游的增减行数。采用上游时可选择备份或确认丢弃。选择备份时保留原始字节和可执行位，选择丢弃时快进成功后清除本次临时副本。
+  - 已跟踪文件改动、类型不一致、超过比较上限或同时有其他拒绝原因时，不提供备份或丢弃入口。
+  - 确认与执行之间文件变化时不执行，仓库前后快照相同。
+  - 快进未完成时让开的文件回到原处；预检不向被查看仓库写入任何内容（含对象库）。
+  - 11 月 14 日完成产品约定及 renderer。11 月 15 日接入核心和桌面边界，按用户确认对忽略目录逐文件比较。实现与验证见[代码级计划](implementation/p5-06-untracked-update.md)。
+
+M7 审阅收口与推送与 M8 分叉同步与三栏轻量合并的路线规划见 [路线图](ROADMAP.md)「后续线路：审阅收口与三栏轻量合并」，待排期，当前不建任务。
+
+重命名分支与打标签留作低优先级候选，待后续试用后再决定，暂不建任务。
 
 ## M6：统计页
 
-2026-11-12 用户确认把统计做深，并改为独立页面；AI 协作占比和语义分析暂不做，演化分析按需运行。产品口径见 [PRODUCT](PRODUCT.md)「统计页」，锁文件排除和测试 / 文档识别规则已确认。各任务已有代码级计划；本批完成 Rust 后端与生成协议，界面接线和实窗验收由并行工作继续。共用验证证据见 [M5 / M6 后端记录](validation/m5-m6-backend.md)。
+2026-11-12 用户确认把统计做深，并改为独立页面；AI 协作占比和语义分析暂不做，演化分析按需运行。产品口径见 [PRODUCT](PRODUCT.md)「统计页」，锁文件排除和测试 / 文档识别规则已确认。各任务已有代码级计划；共用验证证据见 [M5 / M6 后端记录](validation/m5-m6-backend.md)。2026-11-17 补齐时间柱状图框选放大、快捷键说明与实窗四区联调验收。
 
-- [ ] **P6-01 统计页与第一层。** 新增「统计」页（⌘4）和页内时间范围，把现有按日、按作者统计移入；增加周期对比、星期 × 小时热力图、提交节奏、提交类型、撤销与修正、分支活跃度。只用现有元数据索引。依赖 P3-02。完成条件：各项与独立 Git 命令的计算一致（跨日界、夏令时、乱序时间、多分支共享提交）；索引未完整时标“部分”；点图表元素回到提交页并加上对应筛选；顶栏小柱仍随筛选更新。
-  - 后端进展（2026-11-12）：`getActivityOverview` 已实现，见[代码级计划](implementation/p6-01-activity-overview.md)。2 项 daemon 对照通过，覆盖纽约夏令时缺失 / 重复小时、乱序日期、共享分支、Author / Committer、部分索引与只读快照。分支返回 `complete`，作者 / 分支 / 时段有截断字段；历史特殊时区和桌面图表回跳未验收。完整检查见[后端记录](validation/m5-m6-backend.md)。
+- [x] **P6-01 统计页与第一层。** 新增「统计」页（⌘4）和页内时间范围，把现有按日、按作者统计移入；增加周期对比、星期 × 小时热力图、提交节奏、提交类型、撤销与修正、分支活跃度。只用现有元数据索引。依赖 P3-02。完成条件：各项与独立 Git 命令的计算一致（跨日界、夏令时、乱序时间、多分支共享提交）；索引未完整时标“部分”；点图表元素回到提交页并加上对应筛选；顶栏小柱仍随筛选更新。
+  - 后端进展（2026-11-12）：`getActivityOverview` 已实现，见[代码级计划](implementation/p6-01-activity-overview.md)。2 项 daemon 对照通过，覆盖纽约夏令时缺失 / 重复小时、乱序日期、共享分支、Author / Committer、部分索引与只读快照。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P6-01 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`StatsPage`、`ActivitySection`、`StatsStore`（新增拖动柱状图框选缩放 `zoomedRange` / `zoomRange` / `clearZoom`）及 `ShortcutGuide` 的 `⌘4` 项；`tests/renderer/stats-store.test.mjs`、`tests/renderer/stats-range.test.mjs`、`tests/smoke/stats-page-smoke.mjs`、`pnpm test:pages`。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）、`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:stats`（真实核心驱动 `⌘4`、索引完整覆盖校验、0 个占位块、作者列表、时间柱状图框选放大与复位、框选后在提交页按时间筛选、只读快照一致）通过。
+    - 性能结果或不适用原因：不适用（本轮补充交互框选与实窗联调，调度实测基线见[统计调度测量](benchmarks/stats-scheduling.md)）。
+    - 剩余限制：十万提交跨多时区极端历史的性能仍未作独立大仓统计延迟封顶。
 - [x] **P6-02 索引记录文件改动。** 元数据索引增加每个提交相对第一父提交的文件改动（路径、增删行、是否二进制、重命名来源），schema 升级并可从旧索引续建。依赖 P1-05。完成条件：与独立 `git diff-tree --numstat -M` 一致，覆盖根提交、merge、重命名、二进制、非 UTF-8 路径；记录索引体积和构建时间相对现状的变化（十万提交 fixture），超出每库配额时按既有规则降级；暂停、取消、强退续建仍然正确。
   - 后端完成（2026-11-12）：按[代码级计划](implementation/p6-02-file-change-index.md)升级 schema 2，事务保留旧元数据并补文件记录；浅边界标记可在补深后重试。3 项新对照覆盖第一父 numstat、根 / merge / rename / binary / 原始路径、v1 迁移、浅克隆补深、文件阶段暂停 / 取消 / 强退恢复；原索引回归 9 项通过。十万实际改动 fixture 的 SQLite 73.33 → 97.73 MiB（+33.3%），构建 57.61 → 156.33 s（+171.4%），整树 RSS 90.53 → 98.55 MiB；见[测量报告](benchmarks/p6-02-file-change-index.md)。单次实测，历史属性与重命名密集仓库未性能验收。
-- [ ] **P6-03 第二层：改动量。** 改动量、热点目录与文件、作者 × 目录、提交粒度、文件类型、净增长；排除列表可按仓库修改。依赖 P6-01、P6-02。完成条件：各项与独立 Git 计算一致；merge 不重复计入；排除的行数单独显示；目录下钻和点击筛选可用。
-  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-03-04-change-statistics.md)加入 `getChangeStats` 与 get / set 排除列表，配置只写应用数据目录。独立 numstat 对照通过，覆盖 merge 排除、二进制、锁文件单列、路径筛选与无仓库写入；最终响应含 extensions / netGrowth / sessions 与截断字段。与 P6-04 共用聚合测试，检查见[后端记录](validation/m5-m6-backend.md)；桌面下钻和筛选未验收。
-- [ ] **P6-04 第三层：值得注意的地方。** 反复修改的文件、常一起改的文件、单人维护的目录、代码与测试。依赖 P6-03。完成条件：每项都能点开对应的提交列表，结果与独立计算一致；大仓库下的计算有上限并可取消，超限时说明而不是给出不完整的排名。
-  - 后端进展（2026-11-12）：`getNotableStats` 与新增 `getStatsCommits` 回查已实现；文件对比例使用 `shareOfAPerMille`。真实历史的反复修改、共同改动、代码 / 测试与分页对照通过；410 提交 × 50 文件的测试验证组合超限明确返回 RESOURCE_LIMIT。统计使用独立辅助额度并可取消；最坏规模延迟和桌面点击未验收，见[后端记录](validation/m5-m6-backend.md)。
-- [ ] **P6-05 第四层：按需演化分析。** 在统计页选定目录或文件和可选时间段后，按需计算代码年龄、当前归属和代码存活；不随索引自动运行。依赖 P4-12（逐行追溯及其缓存）、P6-02（新增行数）、P6-03（排除列表）。完成条件：
+- [x] **P6-03 第二层：改动量。** 改动量、热点目录与文件、作者 × 目录、提交粒度、文件类型、净增长；排除列表可按仓库修改。依赖 P6-01、P6-02。完成条件：各项与独立 Git 计算一致；merge 不重复计入；排除的行数单独显示；目录下钻和点击筛选可用。
+  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-03-04-change-statistics.md)加入 `getChangeStats` 与 get / set 排除列表，配置只写应用数据目录。独立 numstat 对照通过，覆盖 merge 排除、二进制、锁文件单列、路径筛选与无仓库写入。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P6-03 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`ChangesSection`、目录下钻面包屑、按仓库保存的 `ExclusionsEditor` 及增加/删除行柱状图框选；`tests/smoke/stats-page-smoke.mjs`、`tests/renderer/stats-store.test.mjs`、`pnpm test:pages`。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）、`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:stats`（真实核心验证默认排除 `Cargo.lock` 120 行、下钻 `src/` 与返回仓库根、修改并保存排除规则为 `package-lock.json` 后重算为排除 0 行、只读快照不变）通过。
+    - 性能结果或不适用原因：不适用（复用既有一期索引与 `getChangeStats` 查询）。
+    - 剩余限制：超大单仓库下全表文件聚合的最坏延迟未单独作为发行门槛测量。
+- [x] **P6-04 第三层：值得注意的地方。** 反复修改的文件、常一起改的文件、单人维护的目录、代码与测试。依赖 P6-03。完成条件：每项都能点开对应的提交列表，结果与独立计算一致；大仓库下的计算有上限并可取消，超限时说明而不是给出不完整的排名。
+  - 后端进展（2026-11-12）：`getNotableStats` 与新增 `getStatsCommits` 回查已实现；文件对比例使用 `shareOfAPerMille`。真实历史的反复修改、共同改动、代码 / 测试与分页对照通过；410 提交 × 50 文件的测试验证组合超限明确返回 RESOURCE_LIMIT。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P6-04 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`NotableSection` 与 `CommitsPopover` 分页回查；`tests/smoke/stats-page-smoke.mjs` 与 `pnpm test:pages`。
+    - 验证命令与结果：`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:stats`（真实核心验证 `src/core.ts` 反复修改、`src/helper.ts` 文件对、`docs` 单人维护目录，及点击提交数弹出提交列表并跳转回提交页）通过。
+    - 性能结果或不适用原因：不适用（已在[统计调度测量](benchmarks/stats-scheduling.md)评估辅助额度与取消）。
+    - 剩余限制：超大数据量下的最坏计算耗时由上限保护（超过 500,000 对即拒绝并明确说明），大仓实仓延时未另作长稳跑测。
+- [x] **P6-05 第四层：按需演化分析。** 在统计页选定目录或文件和可选时间段后，按需计算代码年龄、当前归属和代码存活；不随索引自动运行。依赖 P4-12（逐行追溯及其缓存）、P6-02（新增行数）、P6-03（排除列表）。完成条件：
   - 年龄和归属与独立 `git blame --porcelain` 逐文件汇总一致；存活数与“时间段内的提交在 blame 结果中的行数”一致，新增行数与 P6-02 一致。
   - 开始前显示文件数与估计规模；进行中显示进度并可取消，取消后 Git 子进程及时回收，已完成的文件结果保留。
   - 文件数上限、单文件上限、二进制和排除文件均被跳过并列出；结果写明覆盖范围。
   - 复用逐行追溯的缓存，第二次分析同一版本不重跑已缓存的文件；不写被查看仓库。
   - 记录一次真实仓库上的耗时和进程树内存（区分目标与实测），据此确定文件数上限。
-  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-05-evolution.md)实现 estimate / analyze，累计推送结果，复用 blame 缓存，单独标注分母 coverage。3 项 daemon 对照通过，含独立 blame、重命名存活、全部跳过原因、缓存 gate、取消 / generation 替换与已完成文件保留；交互暂停与恢复验证见上述调度修复。本仓库 21 文件 / 25505 行实测估计 554 ms、冷分析 2.27 s、热分析 1.94 s，冷分析整树 RSS 18.22 MiB；见[测量报告](benchmarks/p6-05-evolution.md)。采用 200 文件保护上限，最坏规模完整分析与桌面流程未验收。
+  - 后端进展（2026-11-12）：按[代码级计划](implementation/p6-05-evolution.md)实现 estimate / analyze，累计推送结果，复用 blame 缓存，单独标注分母 coverage。3 项 daemon 对照通过，本仓库 21 文件 / 25505 行实测估计 554 ms、冷分析 2.27 s、热分析 1.94 s，冷分析整树 RSS 18.22 MiB，见[测量报告](benchmarks/p6-05-evolution.md)。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P6-05 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`EvolutionSection` 路径输入、估算、流式进度与三图展示；`tests/smoke/stats-page-smoke.mjs`、`tests/renderer/stats-store.test.mjs`、`pnpm test:pages`。
+    - 验证命令与结果：`pnpm test:renderer`（223 项通过）、`pnpm test:pages`（50/50 通过）、`pnpm test:smoke:stats`（真实核心对 `src` 执行估算、分析完成并渲染“代码年龄”“当前归属”“代码存活”，保持仓库只读快照一致）通过。
+    - 性能结果或不适用原因：已满足（本仓库实测结果见[测量报告](benchmarks/p6-05-evolution.md)，上限保护 200 文件 / 单文件 1 MiB）。
+    - 剩余限制：“全部分支”范围下按设计不支持单树版本演化；超过 200 文件的目录需要按子目录分批估算与分析。
+
+## M7：审阅收口与推送
+
+2026-11-17 用户确认开放 M7 白名单并完成实现与验收：非强制 `push`、删除祖先已合入本地分支、本地分支快进合入目标分支、工作区未提交改动交接与轻量暂存/丢弃/提交闭环；入口与行为口径见 [PRODUCT](PRODUCT.md)「审阅收口与推送（M7）」。
+
+- [x] **P7-01 非强制 Push 与删除已合入本地分支。** 在操作执行层新增可取消的 `pushRepository` 方法及 `DeleteBranch` 原子操作，入口同步接入顶栏、范围菜单、仓库弹层与 `⌘K`。依赖 P5-01、P5-02。完成条件：
+  - `pushRepository` 仅执行非强制 `push`（含新分支首次 `--set-upstream`），参数模板固定且禁止 `--force` / `+` 引用规范；本地已分叉前置拒绝、远端非快进拒绝返回 `RemoteRejected` 并保持本地与远端引用不变；网络/鉴权失败支持重试、在终端打开与交给 Agent；慢推送支持取消与进程组回收。
+  - 顶栏保留「更新 {分支}」组合按钮，当本窗口检出分支领先上游（`↑N` 且不落后）或无上游且存在远端时显示「推送 ↑N / 发布分支」按钮，窄屏下保持 52px 单行不溢出。
+  - `DeleteBranch` 仅允许删除已被基准分支祖先合入（`merge-base --is-ancestor`）、非基准、非当前 HEAD 且未被任何 worktree 检出的本地分支，使用带旧 OID 校验的 `update-ref -d` 并尽力清理 `branch.<name>` 配置；`patchEquivalent` 与已检出分支拒绝删除并保留原有交给 Agent 清理入口。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P7-01 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`crates/daemon/src/operations.rs`（`push_repository` / `DeleteBranch`）、`apps/desktop/src/main/{protocol-transport,repository-session-controller}.ts`、`RepositoryUpdateControl`、`ScopePicker`、`WorktreeFacts`、`CommandPalette`；`tests/protocol/m5-m6-wiring.test.mjs`、`tests/pages/operations-git.test.mjs`、`tests/renderer/operations.test.mjs`、`tests/smoke/m7-review-gate-smoke.mjs`。
+    - 验证命令与结果：`cargo test --workspace --locked`、`pnpm test:protocol`（62/62 通过）、`pnpm test:renderer`（226/226 通过）、`pnpm test:pages`（53/53 通过）、`pnpm test:smoke:pages` 与 `pnpm test:smoke:m7`（验证 `推送 ↑1`、裸远端推进、`RemoteRejected` 安全拒绝不强推、直接删除已合入分支及窄屏 52px 单行不溢出）全部通过。
+    - 性能结果或不适用原因：不适用（显式单次操作，复用 600s Git 超时与进程组取消回收）。
+    - 剩余限制：真实网络 GitHub/SSH 凭据交互与远程超时未在公网远端环境实测（依赖用户既有凭据助手 / `ssh-agent`）。
+- [x] **P7-02 本地分支快进合入目标分支。** 新增 `FastForwardMerge` 操作及对应确认弹窗，支持将源分支（如特性分支）快进合入本地目标分支（如 `main`），可选合入后切换到目标分支。依赖 P5-02、P5-03。完成条件：
+  - 合入前核对源/目标两侧 `expectedOid` 并展示带入提交列表与是否切换；目标被其他 worktree 检出时拒绝；两侧分叉时拒绝并返回 `Diverged` 计数、双方独有提交与重叠文件，引导交给 Agent。
+  - 目标为当前工作区检出分支时按 `FastForward` 同等脏文件覆盖保护执行 `merge --ff-only`；未检出目标且不切换时只用原子 `update-ref` 推进目标分支；在源分支上直接快进目标并勾选切换时先推进目标引用再 `switch` 且不丢失无关改动。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P7-02 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`FastForwardMergeDialog`、`ScopePicker` 分支操作菜单、`CommandPalette`、`operation-refusal.ts` 及 `crates/daemon/src/operations.rs`；`tests/pages/operations-git.test.mjs`、`tests/smoke/m7-review-gate-smoke.mjs`。
+    - 验证命令与结果：`pnpm test:pages`（覆盖从特性分支快进合入 `main` 不切换/切换两种模式与分叉拒绝快照零修改，53/53 通过）、`pnpm test:smoke:m7`（在实窗中勾选合入后切换到 `main` 并核对 `HEAD` 与 OID 一致）通过。
+    - 性能结果或不适用原因：不适用（复用 `FastForward` 预检/写锁路径）。
+    - 剩余限制：分叉、需要创建 merge 提交或解决冲突的场景按白名单拒绝并交回 Agent。
+- [x] **P7-03 工作区未提交改动的交给 Agent 交接。** 为「工作区」页补充审阅交接入口，包括全局未提交改动审阅/整理提交菜单与单文件头部「交给 Agent…」入口，在 [HANDOFF](HANDOFF.md) 规范下生成安全可复制 prompt。依赖 P3-05、P4-09。完成条件：
+  - 新增 `workspace-review` 与 `workspace-commit` 交接模板，工作区文件清单与聚焦路径均 JSON 序列化放进随机分隔标记数据段，正文不拼接未转义仓库路径。
+  - 支持含特殊字符、换行、伪指令与分隔标记路径的防注入回归测试，不依赖额外写入或外部 Agent 调用。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P7-03 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`handoff-prompt.ts`（`workspaceReviewRequest`、`workspaceCommitRequest`、`pushFailedRequest` 与 `F3` 参考数据）、`HandoffDialog`、`WorkspacePage`；`tests/renderer/handoff-prompt.test.mjs`、`tests/smoke/m7-review-gate-smoke.mjs`。
+    - 验证命令与结果：`pnpm test:renderer`（含反引号/换行/伪指令/`CS-DATA-` 注入路径、`draftCommitMessage` 与 hook 失败不用 `--no-verify` 校验，226/226 通过）、`pnpm test:smoke:m7`（工作区审阅模板生成与剪贴板校验）通过。
+    - 性能结果或不适用原因：不适用（仅内存读取已加载工作区快照与复制剪贴板）。
+    - 剩余限制：未提交 diff 内容本身由 Agent 在终端运行 `git diff` 核对，prompt 数据块严格有界在 64 KiB 内。
+- [x] **P7-04 工作区文件级暂存、丢弃与 Commit 审阅提交。** 为「工作区」页补全文件级暂存 / 取消暂存（单文件与全量）、二次确认丢弃单文件改动、读取草稿消息（`MERGE_MSG` / `SQUASH_MSG` / 异于 `HEAD` 的 `COMMIT_EDITMSG`）与审阅提交闭环。依赖 P4-09、P5-02、P7-03。完成条件：
+  - `WorkspaceStage` / `WorkspaceUnstage` 覆盖普通仓库、暂存重命名（同时处理新旧路径）及初始空仓（unborn `HEAD`），路径解码后严格校验拒绝绝对/越界/含 `.git` 组件路径，有未解决冲突时拒绝执行。
+  - `WorkspaceDiscard` 仅在二次确认对话框（默认焦点在“取消”）后执行，仅还原指定未暂存修改到 index（保留部分暂存文件的暂存部分）或删除确认的普通未跟踪文件；实时复核状态不一致时拒绝为 `RefChanged`。
+  - `WorkspaceCommit` 支持编辑草稿消息并用 `--cleanup=whitespace -F -` 提交（保留 `#` 开头正文行）；`pre-commit` / `commit-msg` hook 失败时返回完整合并输出、保留暂存区与输入框已写消息，并提供「交给 Agent…」修复。
+  - 完成记录（2026-11-17）：
+    - 任务 ID：P7-04 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`crates/daemon/src/{workspace,operations}.rs`、`WorkspacePage` 提交区/文件行与 `workspace-discard-dialog`；`tests/pages/operations-git.test.mjs`、`tests/smoke/m7-review-gate-smoke.mjs`。
+    - 验证命令与结果：`cargo test --workspace --locked`（`draft_commit_message_filters_stale_head_and_reads_pending_drafts` 等 131 项全Workspace 测试通过）、`pnpm test:pages`（部分暂存丢弃、`refChanged`、rename 撤回、unborn `HEAD`、`..` 路径越界拒绝、`#` 正文保留与 `pre-commit` hook 失败保留暂存均通过）、`pnpm test:smoke:m7`（实窗草稿载入、二次确认删除未跟踪文件、全量暂存并创建保留 `#` 行提交）通过。
+    - 性能结果或不适用原因：不适用（仅在工作区页操作触发局部状态刷新）。
+    - 剩余限制：暂不支持按 hunk/按行部分暂存与就地冲突编辑（冲突轻量合并预留 M8 排期）。
 
 ## 完成一项任务的记录格式
 

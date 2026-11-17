@@ -12,8 +12,9 @@ import { ActivitySection } from "./stats-activity.js";
 import { ChangesSection } from "./stats-changes.js";
 import { EvolutionSection } from "./stats-evolution.js";
 import { NotableSection } from "./stats-notable.js";
-import { Segmented } from "./stats-widgets.js";
+import { formatDateTime, Segmented } from "./stats-widgets.js";
 import type { StatsActions } from "./stats-widgets.js";
+import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
 const SECTIONS: readonly { id: StatsSection; label: string }[] = [
@@ -101,6 +102,9 @@ export function StatsPage({ api, sessionKey, query, capabilities, active, indexK
       onQueryChange({ ...query, fromTimestamp: fromUnix, toTimestamp: toUnix });
       onShowCommits();
     },
+    zoomTime(fromUnix, toUnix) {
+      store.zoomRange({ startUnix: fromUnix, endUnix: toUnix });
+    },
     filterAuthor(identity) {
       onAuthor({ name: identity.name, email: identity.email });
       onShowCommits();
@@ -141,6 +145,12 @@ export function StatsPage({ api, sessionKey, query, capabilities, active, indexK
         </span> : null}
         <BucketMenu range={view.range} choice={view.bucketChoice} resolved={view.bucket} onChange={next => store.setBucket(next)} />
         <span className="flex h-7 items-center rounded-lg border border-line2 bg-panel px-2.5 text-[12.5px] text-fg2" title="时间字段随提交页的筛选">{TIME_FIELDS[query.timeField]}</span>
+        {view.zoomedRange ? <span className="flex items-center gap-1.5">
+          <span data-testid="stats-zoom-badge" className="inline-flex h-7 items-center rounded-lg bg-accent-soft px-2.5 text-xs font-medium text-accent-fg tabular-nums">
+            框选 {formatDateTime(view.zoomedRange.startUnix)}–{formatDateTime(view.zoomedRange.endUnix - 1)}
+          </span>
+          <Button variant="outline" size="sm" data-testid="stats-zoom-reset" onClick={() => store.clearZoom()}>恢复原范围</Button>
+        </span> : null}
         {view.range === null ? <span role="alert" className="text-xs text-bad">日期范围无效：开始日期不能晚于结束日期，最长 3660 天。</span> : null}
       </>}
       <span className="min-w-0 flex-1" />

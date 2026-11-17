@@ -21,7 +21,9 @@ where
     }
 }
 
-fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -29,7 +31,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-struct NullableStringSchema;
+pub(crate) struct NullableStringSchema;
 
 impl JsonSchema for NullableStringSchema {
     fn inline_schema() -> bool {
@@ -449,6 +451,7 @@ pub enum RequestParams {
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
     FetchRepository(FetchRepositoryParams),
+    PushRepository(PushRepositoryParams),
     GetBranchSync(GetBranchSyncParams),
     CheckOperation(OperationParams),
     RunOperation(OperationParams),
@@ -1303,6 +1306,10 @@ pub struct WorkspaceStatus {
     pub complete: bool,
     pub total_paths: u32,
     pub conflict_count: u32,
+    /// Draft commit message from MERGE_MSG / SQUASH_MSG / COMMIT_EDITMSG when distinct from HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 65536))]
+    pub draft_commit_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1924,7 +1931,7 @@ pub enum ResponseData {
     },
     #[serde(rename = "handoffFacts")]
     HandoffFacts {
-        facts: HandoffFacts,
+        facts: Box<HandoffFacts>,
     },
     #[serde(rename = "commitDetails")]
     CommitDetails {
@@ -1977,6 +1984,10 @@ pub enum ResponseData {
     #[serde(rename = "repositoryFetched")]
     RepositoryFetched {
         result: FetchResult,
+    },
+    #[serde(rename = "repositoryPushed")]
+    RepositoryPushed {
+        result: PushResult,
     },
     #[serde(rename = "git")]
     Git {

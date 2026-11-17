@@ -3,7 +3,7 @@ import type {
   ActivityOverview, ChangeStats, EvolutionChunk, EvolutionEstimate, GitPath, NotableStats, StatsCommitPage, StatsExclusions,
 } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositorySessionApi, RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
-import { evolutionRange, pathToHex, presetRange, resolveBucket } from "./stats-range.js";
+import { evolutionRange, MAX_RANGE_DAYS, pathToHex, presetRange, rangeDays, resolveBucket } from "./stats-range.js";
 import type { BucketChoice, CustomDays, EvolutionRangeChoice, RangePreset, UnixRange } from "./stats-range.js";
 
 /*
@@ -66,6 +66,8 @@ export interface StatsView {
   preset: RangePreset;
   custom: CustomDays;
   bucketChoice: BucketChoice;
+  /** Non-null after brushing a sub-interval on a time chart; overrides preset/custom until cleared or preset changes. */
+  zoomedRange: UnixRange | null;
   /** Null while a custom range is invalid. */
   range: UnixRange | null;
   bucket: StatsBucket | null;
@@ -138,7 +140,7 @@ export class StatsStore {
     const custom = { from: today(this.now()), to: today(this.now()) };
     this.view = {
       sessionKey: null, active: false, capabilities: { activity: false, changes: false, notable: false, evolution: false },
-      section: "activity", preset: "30d", custom, bucketChoice: "auto", range: null, bucket: null,
+      section: "activity", preset: "30d", custom, bucketChoice: "auto", zoomedRange: null, range: null, bucket: null,
       activity: emptySlot(), changes: emptySlot(), notable: emptySlot(), prefix: [],
       exclusions: { value: null, loading: false, saving: false, error: null }, evolution: initialEvolution(),
     };
@@ -161,11 +163,12 @@ export class StatsStore {
     if (sessionChanged) {
       this.abortAll();
       this.exclusionsToken += 1;
-      this.view = { ...this.view, sessionKey: binding.sessionKey, activity: emptySlot(), changes: emptySlot(), notable: emptySlot(), prefix: [],
+      this.view = { ...this.view, sessionKey: binding.sessionKey, zoomedRange: null, activity: emptySlot(), changes: emptySlot(), notable: emptySlot(), prefix: [],
         exclusions: { value: null, loading: false, saving: false, error: null }, evolution: { ...initialEvolution(), pathText: "", rangeChoice: this.view.evolution.rangeChoice } };
       this.exclusionsVersion = 0;
       for (const kind of LOAD_KINDS) this.attempted[kind] = null;
       this.resetEvolutionTarget(binding.evolutionCommit);
+      this.applyRange();
     } else if (binding.evolutionCommit !== this.evolutionCommit) {
       this.resetEvolutionTarget(binding.evolutionCommit);
     }
@@ -204,14 +207,14 @@ export class StatsStore {
   }
 
   setPreset(preset: RangePreset): void {
-    this.view = { ...this.view, preset };
+    this.view = { ...this.view, preset, zoomedRange: null };
     this.applyRange();
     this.emit();
     this.requestEnsure(true);
   }
 
   setCustom(custom: CustomDays): void {
-    this.view = { ...this.view, custom };
+    this.view = { ...this.view, custom, zoomedRange: null };
     this.applyRange();
     this.emit();
     this.requestEnsure(true);
@@ -222,6 +225,24 @@ export class StatsStore {
     this.applyRange();
     this.emit();
     this.requestEnsure(true);
+  }
+
+  /** Zooms into a brushed sub-interval on a time chart; cleared when switching preset, custom range or repository. */
+  zoomRange(range: UnixRange): void {
+    if (!Number.isFinite(range.startUnix) || !Number.isFinite(range.endUnix) || range.endUnix <= range.startUnix) return;
+    if (rangeDays(range) > MAX_RANGE_DAYS) return;
+    this.view = { ...this.view, zoomedRange: { startUnix: range.startUnix, endUnix: range.endUnix } };
+    this.applyRange();
+    this.emit();
+    this.requestEnsure(false);
+  }
+
+  clearZoom(): void {
+    if (!this.view.zoomedRange) return;
+    this.view = { ...this.view, zoomedRange: null };
+    this.applyRange();
+    this.emit();
+    this.requestEnsure(false);
   }
 
   /** Reads the visible section again (the card's 重试). */
@@ -370,7 +391,7 @@ export class StatsStore {
   }
 
   private applyRange(): void {
-    const range = presetRange(this.view.preset, this.now(), this.view.custom);
+    const range = this.view.zoomedRange ?? presetRange(this.view.preset, this.now(), this.view.custom);
     const bucket = range ? resolveBucket(this.view.bucketChoice, range) : null;
     const same = range && this.view.range && range.startUnix === this.view.range.startUnix && range.endUnix === this.view.range.endUnix;
     this.view = { ...this.view, range: same ? this.view.range : range, bucket,

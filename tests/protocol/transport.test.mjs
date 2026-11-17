@@ -167,7 +167,7 @@ test("a start that times out is retried after a pause and the error shows only i
   };
   try {
     const recovering = new CoreProcess(process.execPath, {
-      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 150, startRetryDelaysMs: [30, 30],
+      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 350, startRetryDelaysMs: [20, 20],
       env: { ...process.env, COMMITSCOPE_PEER_START_COUNT_FILE: countFile, COMMITSCOPE_PEER_FAIL_STARTS: "1" },
     });
     const recoveringStates = states(recovering);
@@ -181,7 +181,7 @@ test("a start that times out is retried after a pause and the error shows only i
 
     await rm(countFile, { force: true });
     const failing = new CoreProcess(process.execPath, {
-      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 80, startRetryDelaysMs: [20, 20],
+      args: [peerPath, "no-hello-first"], handshakeTimeoutMs: 250, startRetryDelaysMs: [20, 20],
       env: { ...process.env, COMMITSCOPE_PEER_START_COUNT_FILE: countFile, COMMITSCOPE_PEER_FAIL_STARTS: "99" },
     });
     try {

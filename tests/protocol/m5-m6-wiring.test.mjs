@@ -79,10 +79,16 @@ test("parameter validation rejects malformed getBranchSync, runOperation and get
 
   const fastForward = { kind: "fastForward", refName: "refs/heads/main", expectedOid: OID, upstreamOid: OID2 };
   assert.equal(validOperationParams({ operation: fastForward }), true);
+  for (const choice of ["replaceUntracked", "discardUntracked"]) {
+    assert.equal(validOperationParams({ operation: { ...fastForward, [choice]: "a".repeat(64) } }), true);
+  }
   assert.equal(validOperationParams({ operation: { kind: "switch", target: { remoteRefName: "refs/remotes/origin/x" }, expectedHeadOid: OID, expectedOid: OID2 } }), true);
   assert.equal(validOperationParams({ operation: { kind: "createBranch", name: "topic", startOid: OID, switchAfter: false, expectedHeadOid: OID } }), true);
   for (const bad of [
     { ...fastForward, expectedOid: "zz" }, { ...fastForward, extra: true }, { kind: "reset", refName: "refs/heads/main" },
+    { ...fastForward, replaceUntracked: ["local.txt"] }, { ...fastForward, replaceUntracked: "" },
+    { ...fastForward, replaceUntracked: "a".repeat(257) }, { ...fastForward, discardUntracked: "" },
+    { ...fastForward, replaceUntracked: "token", discardUntracked: "token" },
     { kind: "switch", target: { refName: "a", remoteRefName: "b" }, expectedHeadOid: OID, expectedOid: OID },
     { kind: "createBranch", name: "--force", startOid: OID, switchAfter: false, expectedHeadOid: OID },
     { kind: "createBranch", name: "topic", startOid: OID, switchAfter: "no", expectedHeadOid: OID },
@@ -302,4 +308,101 @@ test("buildRemotePageUrl is strict about the address it opens", () => {
     assert.equal(normalizeWebUrl(bad), null, String(bad));
   }
   assert.equal(normalizeWebUrl("https://h.test:8443/o/r.git"), "https://h.test:8443/o/r.git");
+});
+
+test("M7 parameter validation checks pushRepository and all six new RepositoryOperation kinds", async () => {
+  const { validPushRepositoryParams, validOperationParams } = transportModule;
+  const OID3 = "c".repeat(40);
+  const HEX_FILE = Buffer.from("src/app.ts").toString("hex");
+  const HEX_OLD = Buffer.from("src/old.ts").toString("hex");
+
+  assert.equal(validPushRepositoryParams({ refName: "refs/heads/main", expectedOid: OID, remote: null, setUpstream: false }), true);
+  assert.equal(validPushRepositoryParams({ refName: "refs/heads/feat/x", expectedOid: OID, remote: "origin", setUpstream: true }), true);
+  for (const bad of [
+    null,
+    {},
+    { refName: "main", expectedOid: OID, remote: null, setUpstream: false },
+    { refName: "refs/remotes/origin/main", expectedOid: OID, remote: null, setUpstream: false },
+    { refName: "refs/heads/main", expectedOid: "xyz", remote: null, setUpstream: false },
+    { refName: "refs/heads/main", expectedOid: OID, remote: "-origin", setUpstream: true },
+    { refName: "refs/heads/main", expectedOid: OID, remote: "origin", setUpstream: "yes" },
+    { refName: "refs/heads/main", expectedOid: OID, remote: null, setUpstream: false, extra: 1 },
+  ]) {
+    assert.equal(validPushRepositoryParams(bad), false, JSON.stringify(bad));
+  }
+
+  for (const good of [
+    { kind: "deleteBranch", refName: "refs/heads/feat", expectedOid: OID, baseRefName: "refs/heads/main" },
+    { kind: "deleteBranch", refName: "refs/heads/feat", expectedOid: OID, baseRefName: "refs/remotes/origin/main" },
+    { kind: "fastForwardMerge", targetRef: "refs/heads/main", expectedTargetOid: OID, sourceRef: "refs/heads/feat", expectedSourceOid: OID2, switchToTarget: true },
+    { kind: "fastForwardMerge", targetRef: "refs/heads/main", expectedTargetOid: OID, sourceRef: "refs/remotes/origin/feat", expectedSourceOid: OID3, switchToTarget: false },
+    { kind: "workspaceStage", pathsHex: [HEX_FILE], all: false },
+    { kind: "workspaceStage", pathsHex: [], all: true },
+    { kind: "workspaceUnstage", pathsHex: [HEX_FILE, HEX_OLD], all: false },
+    { kind: "workspaceUnstage", pathsHex: [], all: true },
+    { kind: "workspaceDiscard", pathHex: HEX_FILE, untracked: false, expectedHeadOid: OID },
+    { kind: "workspaceDiscard", pathHex: HEX_FILE, untracked: true, expectedHeadOid: null },
+    { kind: "workspaceCommit", message: "feat: gate", expectedHeadOid: OID },
+    { kind: "workspaceCommit", message: "init", expectedHeadOid: null },
+  ]) {
+    assert.equal(validOperationParams({ operation: good }), true, JSON.stringify(good));
+  }
+
+  for (const bad of [
+    { kind: "deleteBranch", refName: "feat", expectedOid: OID, baseRefName: "refs/heads/main" },
+    { kind: "deleteBranch", refName: "refs/heads/feat", expectedOid: "bad", baseRefName: "refs/heads/main" },
+    { kind: "fastForwardMerge", targetRef: "refs/remotes/origin/main", expectedTargetOid: OID, sourceRef: "refs/heads/feat", expectedSourceOid: OID2, switchToTarget: false },
+    { kind: "fastForwardMerge", targetRef: "refs/heads/main", expectedTargetOid: OID, sourceRef: "feat", expectedSourceOid: OID2, switchToTarget: false },
+    { kind: "workspaceStage", pathsHex: [], all: false },
+    { kind: "workspaceStage", pathsHex: ["abc"], all: false },
+    { kind: "workspaceUnstage", pathsHex: [], all: false },
+    { kind: "workspaceUnstage", pathsHex: [""], all: false },
+    { kind: "workspaceDiscard", pathHex: "", untracked: true, expectedHeadOid: null },
+    { kind: "workspaceDiscard", pathHex: "ab", untracked: "yes", expectedHeadOid: null },
+    { kind: "workspaceCommit", message: "", expectedHeadOid: OID },
+    { kind: "workspaceCommit", message: "x".repeat(65537), expectedHeadOid: OID },
+    { kind: "workspaceCommit", message: "ok", expectedHeadOid: "bad" },
+  ]) {
+    assert.equal(validOperationParams({ operation: bad }), false, JSON.stringify(bad));
+  }
+
+  const core = makeCore();
+  const controller = await openController(core);
+  await assert.rejects(controller.pushRepository({ refName: "main", expectedOid: OID, remote: null, setUpstream: false }), error => error.code === "INVALID_REQUEST");
+  assert.equal(core.requests.length, 0);
+  controller.dispose();
+});
+
+test("pushRepository shares the operation slot and supports cancelRepositoryOperation with drainAfterAbort", async () => {
+  const core = makeCore();
+  const controller = await openController(core);
+  const pushing = controller.pushRepository({ refName: "refs/heads/main", expectedOid: OID, remote: "origin", setUpstream: false });
+  const pushReq = await waitFor(() => core.requests[0]);
+  assert.equal(pushReq.method, "pushRepository");
+  assert.equal(pushReq.options.timeoutMs, 615_000);
+  assert.equal(pushReq.options.drainAfterAbort, true);
+
+  await assert.rejects(controller.fetchRepository({ remote: null, prune: false }), error => error.code === "BUSY");
+  await assert.rejects(controller.runOperation({ kind: "workspaceStage", pathsHex: [], all: true }), error => error.code === "BUSY");
+
+  const pushDone = {
+    outcome: "done",
+    refName: "refs/heads/main",
+    remote: "origin",
+    remoteRefName: "refs/remotes/origin/main",
+    newOid: OID,
+    setUpstream: false,
+    finishedAtUnixMs: 123,
+  };
+  chunk(pushReq, { section: "repositoryPushed", result: pushDone });
+  finish(pushReq);
+  assert.deepEqual(await pushing, pushDone);
+
+  const pushing2 = controller.pushRepository({ refName: "refs/heads/feat", expectedOid: OID2, remote: "origin", setUpstream: true });
+  pushing2.catch(() => {});
+  const pushReq2 = await waitFor(() => core.requests[1]);
+  assert.deepEqual(await controller.cancelRepositoryOperation(), { cancelled: true });
+  assert.equal(pushReq2.options.signal.aborted, true);
+  await assert.rejects(pushing2, error => error.code === "CANCELLED");
+  controller.dispose();
 });

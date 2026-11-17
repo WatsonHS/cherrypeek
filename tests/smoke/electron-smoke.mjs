@@ -76,11 +76,11 @@ try {
   assert.equal(diagnostics.windowRequire, "undefined");
   assert.equal(diagnostics.ipcRenderer, "undefined");
   assert.deepEqual(diagnostics.apiKeys, [
-    "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelFiles", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelSearch", "cancelWorkspace", "chooseRepository",
-    "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "getActivityStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository", "getMetadataIndexStatus", "getRefMergeStatus", "getRepositoryNavigation",
-    "getRepositorySession", "listChangedFiles", "listPathChanges", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onRepositoryObservationChanged",
-    "onWorkspaceChanged", "openRepositorySession", "readBlame", "readCommitInfo", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
-    "readWorkspaceStatus", "recordRepositoryView", "refreshRepositorySession", "restartCore", "searchCommits", "selectRepositoryScope",
+    "analyzeEvolution", "branchesContaining", "cancelActivityStats", "cancelCommitDetails", "cancelEvolution", "cancelFiles", "cancelHandoffFacts", "cancelHistoryRead", "cancelRefMergeStatus", "cancelRefSnapshotDiff", "cancelRepositoryObservation", "cancelRepositoryOperation", "cancelSearch", "cancelStats", "cancelWorkspace", "checkOperation", "chooseRepository",
+    "closeRepositorySession", "controlMetadataIndex", "copyText", "diffRefSnapshots", "estimateEvolution", "fetchRepository", "getActivityOverview", "getActivityStats", "getBranchSync", "getChangeStats", "getCommit", "getCoreStatus", "getHandoffFacts", "getLaunchRepository", "getMetadataIndexStatus", "getNotableStats", "getPathForFile", "getRefMergeStatus", "getRepositoryNavigation",
+    "getRepositorySession", "getStatsCommits", "getStatsExclusions", "listChangedFiles", "listPathChanges", "listRecentRepositories", "listSearchIdentities", "listSearchPaths", "listTree", "locateCommit", "locateHistoryDate", "observeRepository", "onBlameChunk", "onCoreStatusChanged", "onEvolutionChunk", "onOpenRepositoryRequested", "onRepositoryObservationChanged",
+    "onWorkspaceChanged", "openRemotePage", "openRepositorySession", "openWorkspaceIn", "pushRepository", "readBlame", "readCommitInfo", "readDiff", "readFileChange", "readFileContent", "readFileHistory", "readHistoryPage", "readMergeCommits", "readSessionPreview", "readWorkspaceDiff", "readWorkspaceFile",
+    "readWorkspaceStatus", "recordRepositoryView", "refreshRepositorySession", "restartCore", "runOperation", "searchCommits", "selectRepositoryScope", "setStatsExclusions",
   ]);
   assert.equal(diagnostics.inlineScriptRan, false, "CSP must block inline scripts");
   assert.equal(diagnostics.childFrameApiAvailable, false, "preload API must not be exposed to child frames");

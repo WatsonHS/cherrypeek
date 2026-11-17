@@ -53,6 +53,7 @@ export type RequestParams =
   | ListPathChangesParams
   | ReadBlameParams
   | FetchRepositoryParams
+  | PushRepositoryParams
   | GetBranchSyncParams
   | OperationParams;
 export type RepositoryScope =
@@ -87,9 +88,11 @@ export type StatsSelection =
 export type WorkspaceSide = "staged" | "unstaged";
 export type RepositoryOperation =
   | {
+      discardUntracked?: string | null;
       expectedOid: string;
       kind: "fastForward";
       refName: string;
+      replaceUntracked?: string | null;
       upstreamOid: string;
     }
   | {
@@ -104,6 +107,41 @@ export type RepositoryOperation =
       name: string;
       startOid: string;
       switchAfter: boolean;
+    }
+  | {
+      baseRefName: string;
+      expectedOid: string;
+      kind: "deleteBranch";
+      refName: string;
+    }
+  | {
+      expectedSourceOid: string;
+      expectedTargetOid: string;
+      kind: "fastForwardMerge";
+      sourceRef: string;
+      switchToTarget: boolean;
+      targetRef: string;
+    }
+  | {
+      all: boolean;
+      kind: "workspaceStage";
+      pathsHex: string[];
+    }
+  | {
+      all: boolean;
+      kind: "workspaceUnstage";
+      pathsHex: string[];
+    }
+  | {
+      expectedHeadOid?: string | null;
+      kind: "workspaceDiscard";
+      pathHex: string;
+      untracked: boolean;
+    }
+  | {
+      expectedHeadOid?: string | null;
+      kind: "workspaceCommit";
+      message: string;
     };
 export type SwitchTarget =
   | {
@@ -371,6 +409,12 @@ export interface FetchRepositoryParams {
    * The name of a configured remote, or null for every remote.
    */
   remote: string | null;
+}
+export interface PushRepositoryParams {
+  expectedOid: string;
+  refName: string;
+  remote: string | null;
+  setUpstream: boolean;
 }
 export interface GetBranchSyncParams {
   refNames: string[];

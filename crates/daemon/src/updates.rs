@@ -409,7 +409,7 @@ fn rev_list_count(
         string_arg("rev-list"),
         string_arg("--count"),
     ];
-    git_args.extend(args.iter().map(|arg| string_arg(arg)));
+    git_args.extend(args.iter().map(string_arg));
     let output = run_git(executable, discovered, &git_args, cancelled, deadline, 128)?;
     let count = std::str::from_utf8(&output.stdout)
         .map_err(|_| update_error(ErrorCode::GitError, "Git returned an invalid count", false))?
@@ -431,7 +431,7 @@ fn rev_list_oids(
         string_arg("core.commitGraph=false"),
         string_arg("rev-list"),
     ];
-    git_args.extend(args.iter().map(|arg| string_arg(arg)));
+    git_args.extend(args.iter().map(string_arg));
     let output = run_git(
         executable,
         discovered,

@@ -28,8 +28,8 @@ import type {
 import type { MetadataIndexAction, ListSearchPathsParams, SearchCommitsParams, SearchIdentitiesParams, SearchQuery, GetActivityStatsParams, GetHandoffFactsParams,
   GetCommitParams, ListChangedFilesParams, ReadMergeCommitsParams, BranchesContainingParams, ReadDiffParams,
   ReadWorkspaceStatusParams, ReadWorkspaceDiffParams, ReadWorkspaceFileParams,
-  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams, FetchRepositoryParams } from "../../../../packages/protocol/src/generated/client-message.js";
-import type { FetchResult } from "../../../../packages/protocol/src/generated/server-message.js";
+  ListTreeParams, ReadFileContentParams, ReadFileHistoryParams, ReadFileChangeParams, ListPathChangesParams, ReadBlameParams, FetchRepositoryParams, PushRepositoryParams } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { FetchResult, PushResult } from "../../../../packages/protocol/src/generated/server-message.js";
 import type {
   HistoryPage,
   HistoryDateLocation,
@@ -49,7 +49,7 @@ import { CoreProcess } from "./core-process.js";
 import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "../../../../packages/protocol/src/generated/client-message.js";
 import type { BranchSyncResult, OperationCheck, OperationRun, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
   EvolutionEstimate, EvolutionChunk, EvolutionResult } from "../../../../packages/protocol/src/generated/server-message.js";
-import { ProtocolClientError, validBranchSyncParams, validOperationParams, validStatsQueryParams, validChangeStatsParams, validStatsCommitsParams,
+import { ProtocolClientError, validBranchSyncParams, validOperationParams, validPushRepositoryParams, validStatsQueryParams, validChangeStatsParams, validStatsCommitsParams,
   validStatsExclusionsParams, validEvolutionParams } from "./protocol-transport.js";
 import { buildRemotePageUrl, type RemotePageTarget, type RemoteWebInfo } from "./remote-page-url.js";
 
@@ -999,6 +999,38 @@ export class RepositorySessionController {
     try {
       const completion = await done;
       if (result === undefined || !completion.coverage.complete) throw invalidSessionResponse("fetch 响应不完整");
+      return result;
+    } finally {
+      if (this.activeOperation === active) this.activeOperation = undefined;
+    }
+  }
+
+  /**
+   * P7-01. Non-force push (or initial `--set-upstream`). Takes the shared cancellable operation slot.
+   */
+  async pushRepository(input: unknown): Promise<PushResult> {
+    if (!validPushRepositoryParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "push 参数无效");
+    const params = input as PushRepositoryParams;
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    if (this.activeOpen || this.activeRefresh) throw new ProtocolClientError("BUSY", "仓库正在更新，暂不能推送", true);
+    if (this.activeOperation) throw new ProtocolClientError("BUSY", "已有一个操作正在进行", true);
+    const abort = new AbortController();
+    let result: PushResult | undefined;
+    const done = this.core.request("pushRepository", params, contextOf(session), {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      signal: abort.signal,
+      drainAfterAbort: true,
+      onChunk: chunk => {
+        if (result !== undefined || chunk.data.section !== "repositoryPushed" || !chunk.done) throw invalidSessionResponse("push 响应无效");
+        result = chunk.data.result;
+      },
+    });
+    const active: ActiveChannelRequest = { abort, done };
+    this.activeOperation = active;
+    try {
+      const completion = await done;
+      if (result === undefined || !completion.coverage.complete) throw invalidSessionResponse("push 响应不完整");
       return result;
     } finally {
       if (this.activeOperation === active) this.activeOperation = undefined;

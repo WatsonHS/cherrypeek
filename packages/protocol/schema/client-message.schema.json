@@ -475,6 +475,33 @@
       ],
       "type": "object"
     },
+    "PushRepositoryParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedOid": {
+          "type": "string"
+        },
+        "refName": {
+          "type": "string"
+        },
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setUpstream": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "refName",
+        "expectedOid",
+        "remote",
+        "setUpstream"
+      ],
+      "type": "object"
+    },
     "ReadBlameParams": {
       "additionalProperties": false,
       "description": "P4-12: blame of a file at a commit, streamed in chunks.",
@@ -853,6 +880,12 @@
         {
           "additionalProperties": false,
           "properties": {
+            "discardUntracked": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "expectedOid": {
               "type": "string"
             },
@@ -862,6 +895,12 @@
             },
             "refName": {
               "type": "string"
+            },
+            "replaceUntracked": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "upstreamOid": {
               "type": "string"
@@ -926,6 +965,162 @@
             "startOid",
             "switchAfter",
             "expectedHeadOid"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseRefName": {
+              "type": "string"
+            },
+            "expectedOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "deleteBranch",
+              "type": "string"
+            },
+            "refName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "refName",
+            "expectedOid",
+            "baseRefName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedSourceOid": {
+              "type": "string"
+            },
+            "expectedTargetOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "fastForwardMerge",
+              "type": "string"
+            },
+            "sourceRef": {
+              "type": "string"
+            },
+            "switchToTarget": {
+              "type": "boolean"
+            },
+            "targetRef": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "targetRef",
+            "expectedTargetOid",
+            "sourceRef",
+            "expectedSourceOid",
+            "switchToTarget"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "all": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "workspaceStage",
+              "type": "string"
+            },
+            "pathsHex": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "pathsHex",
+            "all"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "all": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "workspaceUnstage",
+              "type": "string"
+            },
+            "pathsHex": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "pathsHex",
+            "all"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedHeadOid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "workspaceDiscard",
+              "type": "string"
+            },
+            "pathHex": {
+              "type": "string"
+            },
+            "untracked": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "pathHex",
+            "untracked"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedHeadOid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "workspaceCommit",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
           ],
           "type": "object"
         }
@@ -1112,6 +1307,9 @@
         },
         {
           "$ref": "#/definitions/FetchRepositoryParams"
+        },
+        {
+          "$ref": "#/definitions/PushRepositoryParams"
         },
         {
           "$ref": "#/definitions/GetBranchSyncParams"

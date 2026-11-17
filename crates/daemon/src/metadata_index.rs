@@ -1963,6 +1963,201 @@ fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+#[allow(clippy::too_many_arguments)]
+fn backfill_changes(
+    index: &IndexStore,
+    session: &session::RepositorySession,
+    key: &str,
+    executable: &Path,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+    idle_gate: &impl Fn(),
+    progress: &impl Fn(MetadataIndexStatus),
+) -> Result<(), IndexError> {
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let attributes = crate::change_index::has_attributes(
+        &git,
+        Path::new(&session.discovered.info.path),
+        &session.discovered.scope_tips,
+        cancelled,
+        deadline,
+    )?;
+    let shallow_path = Path::new(&session.discovered.info.common_dir).join("shallow");
+    let shallow: std::collections::HashSet<String> = match fs::read_to_string(shallow_path) {
+        Ok(s) => s.lines().map(str::to_owned).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(_) => return Err(unavailable("无法读取 shallow 边界")),
+    };
+    let mut after_ordinal = -1i64;
+    loop {
+        idle_gate();
+        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+            return Err(IndexError {
+                code: ErrorCode::Cancelled,
+                message: "文件改动索引已暂停或取消".into(),
+            });
+        }
+        let pending: Vec<(i64, String)> = {
+            let db = index.connection()?;
+            // A former shallow boundary becomes eligible after the repository is deepened.
+            let mut statement=db.prepare("SELECT s.ordinal,c.oid FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal>?2 AND c.changes_complete<>1 ORDER BY s.ordinal LIMIT 64").map_err(map_sql_error)?;
+            statement
+                .query_map(params![key, after_ordinal], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(map_sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sql_error)?
+        };
+        if let Some((ordinal, _)) = pending.last() {
+            after_ordinal = *ordinal;
+        }
+        let oids: Vec<String> = pending.into_iter().map(|(_, oid)| oid).collect();
+        if oids.is_empty() {
+            return Ok(());
+        }
+        let commits = repository::read_commit_metadata(
+            executable,
+            &session.discovered,
+            &oids,
+            cancelled,
+            deadline,
+        )
+        .map_err(map_repository_error)?;
+        let eligible: Vec<_> = commits
+            .iter()
+            .filter(|c| !shallow.contains(&c.summary.oid) || c.summary.parents.is_empty())
+            .cloned()
+            .collect();
+        let read = if eligible.is_empty() {
+            Vec::new()
+        } else {
+            crate::change_index::read_batch(
+                &git,
+                Path::new(&session.discovered.info.path),
+                &eligible,
+                session.discovered.oid_length,
+                attributes,
+                cancelled,
+                deadline,
+            )?
+        };
+        let mut by_oid: std::collections::HashMap<_, _> = eligible
+            .iter()
+            .zip(read)
+            .map(|(c, files)| (c.summary.oid.clone(), files))
+            .collect();
+        let changes: Vec<_> = commits
+            .iter()
+            .map(|c| by_oid.remove(&c.summary.oid).unwrap_or_default())
+            .collect();
+        if commits.len() != oids.len() || changes.len() != oids.len() {
+            return Err(corrupt("文件索引批次长度不一致"));
+        }
+        let mut path_changes =
+            std::collections::HashMap::<String, std::collections::BTreeSet<Vec<u8>>>::new();
+        for (commit, files) in commits.iter().zip(&changes) {
+            let paths = path_changes.entry(commit.summary.oid.clone()).or_default();
+            for file in files {
+                for path in file.old_path.iter().chain(file.new_path.iter()) {
+                    paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
+                }
+            }
+            for parent in commit
+                .summary
+                .parents
+                .iter()
+                .skip(1)
+                .filter(|_| !shallow.contains(&commit.summary.oid))
+            {
+                let mut summary = commit.summary.clone();
+                summary.parents = vec![parent.clone()];
+                let alternate = repository::ParsedCommitMetadata {
+                    summary,
+                    message: commit.message.clone(),
+                };
+                let additional = crate::change_index::read_batch(
+                    &git,
+                    Path::new(&session.discovered.info.path),
+                    &[alternate],
+                    session.discovered.oid_length,
+                    attributes,
+                    cancelled,
+                    deadline,
+                )?;
+                for file in additional.into_iter().flatten() {
+                    for path in file.old_path.iter().chain(file.new_path.iter()) {
+                        paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
+                    }
+                }
+            }
+        }
+        retry_while_busy(cancelled, || {
+            let mut db = index.connection()?;
+            let tx = db.transaction().map_err(map_sql_error)?;
+            for (commit, files) in commits.iter().zip(&changes) {
+                tx.execute(
+                    "DELETE FROM commit_changes WHERE oid=?1",
+                    [&commit.summary.oid],
+                )
+                .map_err(map_sql_error)?;
+                for (ordinal, file) in files.iter().enumerate() {
+                    let path = file
+                        .new_path
+                        .as_ref()
+                        .or(file.old_path.as_ref())
+                        .ok_or_else(|| corrupt("改动缺少路径"))?;
+                    let path = crate::change_index::decode_hex(&path.raw_hex)?;
+                    let old_path = file
+                        .old_path
+                        .as_ref()
+                        .filter(|_| file.status == commitscope_core::ChangedFileStatus::Renamed)
+                        .map(|p| crate::change_index::decode_hex(&p.raw_hex))
+                        .transpose()?;
+                    let status = match file.status {
+                        commitscope_core::ChangedFileStatus::Added => "A",
+                        commitscope_core::ChangedFileStatus::Deleted => "D",
+                        commitscope_core::ChangedFileStatus::Renamed => "R",
+                        commitscope_core::ChangedFileStatus::Copied => "C",
+                        commitscope_core::ChangedFileStatus::TypeChanged => "T",
+                        _ => "M",
+                    };
+                    tx.execute("INSERT INTO commit_changes(oid,ordinal,path,old_path,status,additions,deletions,binary) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![commit.summary.oid,ordinal as i64,path,old_path,status,file.additions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.deletions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.binary]).map_err(map_sql_error)?;
+                }
+                for path in &path_changes[&commit.summary.oid] {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO commit_path_changes(oid,path) VALUES(?1,?2)",
+                        params![commit.summary.oid, path],
+                    )
+                    .map_err(map_sql_error)?;
+                }
+                tx.execute(
+                    "UPDATE commits SET changes_complete=?2 WHERE oid=?1",
+                    params![
+                        commit.summary.oid,
+                        if shallow.contains(&commit.summary.oid)
+                            && !commit.summary.parents.is_empty()
+                        {
+                            -1
+                        } else {
+                            1
+                        }
+                    ],
+                )
+                .map_err(map_sql_error)?;
+            }
+            if disk_bytes(&index.path)? > index.quota {
+                return Err(IndexError {
+                    code: ErrorCode::ResourceLimit,
+                    message: "文件索引超过仓库 quota".into(),
+                });
+            }
+            index.verify_identity()?;
+            tx.commit().map_err(map_sql_error)
+        })?;
+        progress(index.status(session));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2254,200 +2449,5 @@ mod tests {
         };
         assert_eq!(status.coverage.processed, 0);
         assert!(status.coverage.complete);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn backfill_changes(
-    index: &IndexStore,
-    session: &session::RepositorySession,
-    key: &str,
-    executable: &Path,
-    cancelled: &AtomicBool,
-    paused: &AtomicBool,
-    idle_gate: &impl Fn(),
-    progress: &impl Fn(MetadataIndexStatus),
-) -> Result<(), IndexError> {
-    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
-    let deadline = Instant::now() + Duration::from_secs(3600);
-    let attributes = crate::change_index::has_attributes(
-        &git,
-        Path::new(&session.discovered.info.path),
-        &session.discovered.scope_tips,
-        cancelled,
-        deadline,
-    )?;
-    let shallow_path = Path::new(&session.discovered.info.common_dir).join("shallow");
-    let shallow: std::collections::HashSet<String> = match fs::read_to_string(shallow_path) {
-        Ok(s) => s.lines().map(str::to_owned).collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(_) => return Err(unavailable("无法读取 shallow 边界")),
-    };
-    let mut after_ordinal = -1i64;
-    loop {
-        idle_gate();
-        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
-            return Err(IndexError {
-                code: ErrorCode::Cancelled,
-                message: "文件改动索引已暂停或取消".into(),
-            });
-        }
-        let pending: Vec<(i64, String)> = {
-            let db = index.connection()?;
-            // A former shallow boundary becomes eligible after the repository is deepened.
-            let mut statement=db.prepare("SELECT s.ordinal,c.oid FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal>?2 AND c.changes_complete<>1 ORDER BY s.ordinal LIMIT 64").map_err(map_sql_error)?;
-            statement
-                .query_map(params![key, after_ordinal], |r| Ok((r.get(0)?, r.get(1)?)))
-                .map_err(map_sql_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(map_sql_error)?
-        };
-        if let Some((ordinal, _)) = pending.last() {
-            after_ordinal = *ordinal;
-        }
-        let oids: Vec<String> = pending.into_iter().map(|(_, oid)| oid).collect();
-        if oids.is_empty() {
-            return Ok(());
-        }
-        let commits = repository::read_commit_metadata(
-            executable,
-            &session.discovered,
-            &oids,
-            cancelled,
-            deadline,
-        )
-        .map_err(map_repository_error)?;
-        let eligible: Vec<_> = commits
-            .iter()
-            .filter(|c| !shallow.contains(&c.summary.oid) || c.summary.parents.is_empty())
-            .cloned()
-            .collect();
-        let read = if eligible.is_empty() {
-            Vec::new()
-        } else {
-            crate::change_index::read_batch(
-                &git,
-                Path::new(&session.discovered.info.path),
-                &eligible,
-                session.discovered.oid_length,
-                attributes,
-                cancelled,
-                deadline,
-            )?
-        };
-        let mut by_oid: std::collections::HashMap<_, _> = eligible
-            .iter()
-            .zip(read)
-            .map(|(c, files)| (c.summary.oid.clone(), files))
-            .collect();
-        let changes: Vec<_> = commits
-            .iter()
-            .map(|c| by_oid.remove(&c.summary.oid).unwrap_or_default())
-            .collect();
-        if commits.len() != oids.len() || changes.len() != oids.len() {
-            return Err(corrupt("文件索引批次长度不一致"));
-        }
-        let mut path_changes =
-            std::collections::HashMap::<String, std::collections::BTreeSet<Vec<u8>>>::new();
-        for (commit, files) in commits.iter().zip(&changes) {
-            let paths = path_changes.entry(commit.summary.oid.clone()).or_default();
-            for file in files {
-                for path in file.old_path.iter().chain(file.new_path.iter()) {
-                    paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
-                }
-            }
-            for parent in commit
-                .summary
-                .parents
-                .iter()
-                .skip(1)
-                .filter(|_| !shallow.contains(&commit.summary.oid))
-            {
-                let mut summary = commit.summary.clone();
-                summary.parents = vec![parent.clone()];
-                let alternate = repository::ParsedCommitMetadata {
-                    summary,
-                    message: commit.message.clone(),
-                };
-                let additional = crate::change_index::read_batch(
-                    &git,
-                    Path::new(&session.discovered.info.path),
-                    &[alternate],
-                    session.discovered.oid_length,
-                    attributes,
-                    cancelled,
-                    deadline,
-                )?;
-                for file in additional.into_iter().flatten() {
-                    for path in file.old_path.iter().chain(file.new_path.iter()) {
-                        paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
-                    }
-                }
-            }
-        }
-        retry_while_busy(cancelled, || {
-            let mut db = index.connection()?;
-            let tx = db.transaction().map_err(map_sql_error)?;
-            for (commit, files) in commits.iter().zip(&changes) {
-                tx.execute(
-                    "DELETE FROM commit_changes WHERE oid=?1",
-                    [&commit.summary.oid],
-                )
-                .map_err(map_sql_error)?;
-                for (ordinal, file) in files.iter().enumerate() {
-                    let path = file
-                        .new_path
-                        .as_ref()
-                        .or(file.old_path.as_ref())
-                        .ok_or_else(|| corrupt("改动缺少路径"))?;
-                    let path = crate::change_index::decode_hex(&path.raw_hex)?;
-                    let old_path = file
-                        .old_path
-                        .as_ref()
-                        .filter(|_| file.status == commitscope_core::ChangedFileStatus::Renamed)
-                        .map(|p| crate::change_index::decode_hex(&p.raw_hex))
-                        .transpose()?;
-                    let status = match file.status {
-                        commitscope_core::ChangedFileStatus::Added => "A",
-                        commitscope_core::ChangedFileStatus::Deleted => "D",
-                        commitscope_core::ChangedFileStatus::Renamed => "R",
-                        commitscope_core::ChangedFileStatus::Copied => "C",
-                        commitscope_core::ChangedFileStatus::TypeChanged => "T",
-                        _ => "M",
-                    };
-                    tx.execute("INSERT INTO commit_changes(oid,ordinal,path,old_path,status,additions,deletions,binary) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![commit.summary.oid,ordinal as i64,path,old_path,status,file.additions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.deletions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.binary]).map_err(map_sql_error)?;
-                }
-                for path in &path_changes[&commit.summary.oid] {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO commit_path_changes(oid,path) VALUES(?1,?2)",
-                        params![commit.summary.oid, path],
-                    )
-                    .map_err(map_sql_error)?;
-                }
-                tx.execute(
-                    "UPDATE commits SET changes_complete=?2 WHERE oid=?1",
-                    params![
-                        commit.summary.oid,
-                        if shallow.contains(&commit.summary.oid)
-                            && !commit.summary.parents.is_empty()
-                        {
-                            -1
-                        } else {
-                            1
-                        }
-                    ],
-                )
-                .map_err(map_sql_error)?;
-            }
-            if disk_bytes(&index.path)? > index.quota {
-                return Err(IndexError {
-                    code: ErrorCode::ResourceLimit,
-                    message: "文件索引超过仓库 quota".into(),
-                });
-            }
-            index.verify_identity()?;
-            tx.commit().map_err(map_sql_error)
-        })?;
-        progress(index.status(session));
     }
 }

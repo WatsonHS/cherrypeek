@@ -135,7 +135,7 @@ test("every other blocker has a plain explanation; bare has no terminal and no h
   const bare = refusal.refusalModel([{ kind: "bare" }], meta);
   assert.equal(bare.terminalAllowed, false);
   assert.equal(bare.handoff, null);
-  assert.equal(refusal.refusalModel([{ kind: "noUpstream" }], meta).handoff, null);
+  assert.equal(refusal.refusalModel([{ kind: "noUpstream" }], meta).handoff, "blocked");
 });
 
 test("the first blocker explained is the most fundamental one", () => {
@@ -197,7 +197,14 @@ test("template 8: dirty paths and the in-progress variant", () => {
   const text = handoff.buildHandoffPrompt(null, progress);
   assert.match(bodyOf(text), /未完成的操作.*是继续还是中止/su);
   assert.equal(dataOf(text).inProgress.operation, "rebase");
-  assert.equal(refusal.refusalHandoffRequest([{ kind: "noUpstream" }], meta, repository(), 4), null);
+  const missing = refusal.refusalHandoffRequest([{ kind: "noUpstream" }], { ...meta, upstream: null, fetched: true }, repository(), 4);
+  const missingPrompt = handoff.buildHandoffPrompt(null, missing);
+  assert.match(bodyOf(missingPrompt), /没有上游分支/u);
+  assert.match(bodyOf(missingPrompt), /Fetch 已完成；本地分支和工作区未更新/u);
+  assert.match(bodyOf(missingPrompt), /不要凭分支名猜测目标/u);
+  assert.doesNotMatch(bodyOf(missingPrompt), /U1|dirtyPaths|仓库未被改动/u);
+  assert.equal(dataOf(missingPrompt).noUpstream, true);
+  assert.equal(dataOf(missingPrompt).operation.fetched, true);
 });
 
 test("template 9: a mid-operation failure keeps Git's text in the data block and stays valid for a bare repository", () => {
@@ -256,8 +263,11 @@ test("a late branch-sync answer for an older generation is dropped", async () =>
   assert.equal(ok.getView().lastFetchUnixMs, 9);
 });
 
-test("sync is read in batches of 50, asked once per generation, and a failed read claims nothing", async () => {
-  const api = fakeApi({ getBranchSync: () => Promise.resolve({ ok: false, error: { code: "BUSY", message: "busy", retryable: true } }) });
+test("successful sync is read once per generation in batches of 50; failures remain explicitly retryable", async () => {
+  let fail = false;
+  const api = fakeApi({ getBranchSync: () => Promise.resolve(fail
+    ? { ok: false, error: { code: "GIT_ERROR", message: "failed", retryable: false } }
+    : { ok: true, value: { branches: [], lastFetchUnixMs: null } }) });
   const store = new OperationsStore(api);
   store.bind("repo:1");
   const names = Array.from({ length: 120 }, (_, index) => `refs/heads/b${index}`);
@@ -268,6 +278,50 @@ test("sync is read in batches of 50, asked once per generation, and a failed rea
   assert.equal(api.calls.getBranchSync.length, 3, "already asked in this generation");
   await store.loadSync(["refs/heads/b0"], { force: true });
   assert.equal(api.calls.getBranchSync.length, 4);
+  fail = true;
+  store.bind("repo:2");
+  await store.loadSync(["refs/heads/b0"]);
+  assert.deepEqual(store.getView().syncs, {});
+  assert.equal(store.isKnownOrAsked("refs/heads/b0"), false);
+  await store.loadSync(["refs/heads/b0"]);
+  assert.equal(api.calls.getBranchSync.length, 6, "a failed lookup does not poison this generation");
+});
+
+test("an explicit update waits for a busy sync read to recover, and stops retrying after a session change", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let busy = true;
+  const api = fakeApi({ getBranchSync: () => Promise.resolve(busy
+    ? { ok: false, error: { code: "BUSY", message: "busy", retryable: true } }
+    : { ok: true, value: { branches: [sync()], lastFetchUnixMs: 10 } }) });
+  const store = new OperationsStore(api);
+  store.bind("repo:1");
+  let settled = false;
+  const read = store.loadSync(["refs/heads/main"], { force: true, waitForRetry: true }).then(() => { settled = true; });
+  await flush();
+  assert.equal(settled, false);
+  busy = false;
+  t.mock.timers.tick(400);
+  await read;
+  assert.equal(store.getView().syncs["refs/heads/main"].behind, 3);
+  assert.equal(api.calls.getBranchSync.length, 2);
+
+  busy = true;
+  const stale = store.loadSync(["refs/heads/main"], { force: true, waitForRetry: true });
+  await flush();
+  store.bind("repo:2");
+  t.mock.timers.tick(400);
+  await stale;
+  assert.equal(api.calls.getBranchSync.length, 3);
+  assert.deepEqual(store.getView().syncs, {});
+});
+
+test("a refused update carries the completed fetch into the handoff", () => {
+  const request = refusal.refusalHandoffRequest([diverged], { ...updateMeta, fetched: true }, repository(), 1);
+  const prompt = handoff.buildHandoffPrompt(null, request);
+  assert.match(bodyOf(prompt), /Fetch 已完成；本地分支和工作区未更新/u);
+  assert.doesNotMatch(bodyOf(prompt), /仓库未被改动/u);
+  assert.equal(dataOf(prompt).operation.fetched, true);
 });
 
 test("only one operation at a time; a done run reports the new HEAD", async () => {
@@ -362,4 +416,175 @@ test("a check answered after the generation changed does not run the operation",
   slow.resolve({ ok: true, value: { allowed: true, blockers: [], preservedDirtyCount: 0 } });
   assert.equal((await pending).kind, "stale");
   assert.equal(api.calls.runOperation.length, 0);
+});
+
+// --- P5-06: untracked files with the same path as files the upstream adds -------------------------------------------
+
+const replaceable = (display, upstreamOnlyLines, localOnlyLines) => ({
+  path: path(display), staged: false, unstaged: false, untracked: true, replace: { upstreamOnlyLines, localOnlyLines },
+});
+
+test("differing untracked files offer backup-and-update next to the hand-off, with line counts per file", () => {
+  const meta = { ...ops.fastForwardMeta(sync()), fetched: true };
+  const dirty = { kind: "dirty", pathsTruncated: false, replaceToken: "t1", paths: [replaceable("plans/speed.md", 40, 1), replaceable("logo.png", null, null), replaceable("same-length.txt", 0, 0)] };
+  const model = refusal.refusalModel([dirty], meta, 3);
+  assert.deepEqual(model.replace, { token: "t1", count: 3 });
+  assert.equal(model.handoff, "blocked");
+  assert.match(model.explanation, /3 个文件.*未跟踪文件同名/u);
+  assert.equal(model.lists[0].heading, "与上游不同的未跟踪文件");
+  assert.deepEqual(model.lists[0].items.map(item => item.tag), ["上游多 40 行 · 本地多 1 行", "内容不同", "文件有差异"]);
+  assert.equal(model.footnote, "另有 3 个文件的改动不冲突，会保留。");
+});
+
+test("a backup choice expires when the repository session changes", async () => {
+  const dirty = { kind: "dirty", pathsTruncated: false, replaceToken: "token", paths: [replaceable("draft", 1, 1)] };
+  const api = fakeApi({ checkOperation: async () => ({ ok: true, value: { allowed: false, blockers: [dirty], preservedDirtyCount: 0 } }) });
+  const store = new OperationsStore(api);
+  store.bind("repo:1");
+  await store.execute(ops.fastForwardOperation(sync()), updateMeta);
+  assert.ok(store.getView().refusal);
+  store.bind("other:1");
+  assert.equal(store.getView().refusal, null);
+});
+
+test("backup-and-update is not offered unless these files are the only thing in the way", () => {
+  const meta = ops.fastForwardMeta(sync());
+  const entry = replaceable("a.md", 2, 0);
+  const tracked = { path: path("b.ts"), staged: false, unstaged: true, untracked: false, replace: null };
+  const plan = (blockers, m = meta) => refusal.refusalModel(blockers, m).replace;
+  // A core that does not know the task sends neither field.
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: false, paths: [{ path: path("a.md"), staged: false, unstaged: false, untracked: true }] }]), null);
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: false, replaceToken: null, paths: [entry] }]), null);
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: true, replaceToken: "t", paths: [entry] }]), null);
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: false, replaceToken: "t", paths: [entry, tracked] }]), null);
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: false, replaceToken: "t", paths: [entry] }, { kind: "inProgress", operation: "merge" }]), null);
+  // Only for an update: switching keeps refusing.
+  assert.equal(plan([{ kind: "dirty", pathsTruncated: false, replaceToken: "t", paths: [entry] }], ops.switchMeta({ refName: "refs/heads/dev" }, oid("c"))), null);
+  // A mixed refusal still says which untracked files differ from the upstream.
+  const mixed = refusal.refusalModel([{ kind: "dirty", pathsTruncated: false, replaceToken: null, paths: [entry, tracked] }], meta);
+  assert.deepEqual(mixed.lists[0].items.map(item => item.tag), ["未跟踪 · 与上游不同", "未暂存"]);
+});
+
+test("the token goes back on the same fast-forward and nowhere else", () => {
+  const operation = ops.fastForwardOperation(sync());
+  assert.deepEqual(ops.withUntrackedReplace(operation, "t1", "backup"), { ...operation, replaceUntracked: "t1" });
+  assert.deepEqual(ops.withUntrackedReplace({ ...operation, replaceUntracked: "old" }, "new", "discard"), { ...operation, discardUntracked: "new" });
+  assert.equal(ops.withUntrackedReplace(ops.switchOperation({ refName: "refs/heads/dev" }, oid("c"), oid("a")), "t1", "discard"), null);
+});
+
+test("the refusal keeps the refused operation, and the retry with the token is checked again before it runs", async () => {
+  const dirty = { kind: "dirty", pathsTruncated: false, replaceToken: "t1", paths: [replaceable("a.md", 2, 0)] };
+  const done = { outcome: "done", headOid: oid("b"), headReference: "refs/heads/main", updatedRef: null, untracked: { identicalCount: 18, backedUpCount: 1, backupDir: "/data/backups/r/1" } };
+  const api = fakeApi({
+    checkOperation: operation => Promise.resolve({ ok: true, value: operation.replaceUntracked === "t1"
+      ? { allowed: true, blockers: [], preservedDirtyCount: 0 } : { allowed: false, blockers: [dirty], preservedDirtyCount: 0 } }),
+    runOperation: () => Promise.resolve({ ok: true, value: done }),
+  });
+  const store = new OperationsStore(api);
+  store.bind("repo:1");
+  const operation = ops.fastForwardOperation(sync());
+  assert.equal((await store.execute(operation, updateMeta)).kind, "rejected");
+  const pending = store.getView().refusal;
+  assert.deepEqual(pending.operation, operation);
+  assert.equal(api.calls.runOperation.length, 0);
+  const retry = ops.withUntrackedReplace(pending.operation, ops.untrackedReplacePlan(pending.blockers, pending.meta).token, "backup");
+  const outcome = await store.execute(retry, pending.meta);
+  assert.equal(outcome.kind, "done");
+  assert.equal(api.calls.checkOperation.at(-1).replaceUntracked, "t1");
+  assert.deepEqual(api.calls.runOperation, [retry]);
+  assert.deepEqual(ops.updateDoneNotice("main", outcome.run), {
+    summary: "main 已快进到上游 · 已备份 1 个文件", untracked: done.untracked,
+  });
+});
+
+test("the update notice says nothing about untracked files when the core reports none", () => {
+  const base = { outcome: "done", headOid: oid("b"), headReference: "refs/heads/main", updatedRef: null };
+  assert.equal(ops.updateDoneNotice("main", base).summary, "main 已快进到上游");
+  assert.equal(ops.updateDoneNotice("main", { ...base, untracked: null }).summary, "main 已快进到上游");
+  assert.equal(ops.updateDoneNotice("main", { ...base, untracked: { identicalCount: 0, backedUpCount: 0, discardedCount: 2, backupDir: null } }).summary, "main 已快进到上游 · 已丢弃 2 个本地副本");
+});
+
+test("transient retryable BUSY on read-only checkOperation retries before surfacing refusal without running write", async () => {
+  let attempts = 0;
+  const dirty = { kind: "dirty", pathsTruncated: false, paths: [{ path: path("shared.txt"), staged: false, unstaged: true, untracked: false }] };
+  const api = fakeApi({
+    checkOperation: () => {
+      attempts += 1;
+      if (attempts === 1) return Promise.resolve({ ok: false, error: { code: "BUSY", message: "读取暂时繁忙，请稍后重试", retryable: true } });
+      return Promise.resolve({ ok: true, value: { allowed: false, blockers: [dirty], preservedDirtyCount: 0 } });
+    },
+  });
+  const store = new OperationsStore(api, () => 9);
+  store.bind("repo:1");
+  const outcome = await store.execute(ops.switchOperation({ refName: "refs/heads/topic" }, oid("b"), oid("a")), ops.switchMeta({ refName: "refs/heads/topic" }, oid("b")));
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(api.calls.checkOperation.length, 2);
+  assert.equal(api.calls.runOperation.length, 0);
+  assert.equal(store.getView().refusal?.blockers[0]?.kind, "dirty");
+});
+
+test("M7 push, branch management, and workspace builders produce exact operations and notices", () => {
+  assert.equal(ops.canPush(sync({ state: "ahead", ahead: 3, behind: 0 })), true);
+  assert.equal(ops.canPush(sync({ state: "behind", ahead: 1, behind: 2 })), false);
+  assert.equal(ops.canPush(sync({ state: "noUpstream", upstream: null, ahead: null, behind: null })), false);
+  assert.equal(ops.syncRowModel(sync({ state: "ahead", ahead: 2, behind: 0 }), true).action, "push");
+
+  assert.deepEqual(ops.deleteBranchOperation("refs/heads/feat", oid("a"), "refs/heads/main"),
+    { kind: "deleteBranch", refName: "refs/heads/feat", expectedOid: oid("a"), baseRefName: "refs/heads/main" });
+  assert.deepEqual(ops.fastForwardMergeOperation("refs/heads/main", oid("a"), "refs/heads/feat", oid("b"), true),
+    { kind: "fastForwardMerge", targetRef: "refs/heads/main", expectedTargetOid: oid("a"), sourceRef: "refs/heads/feat", expectedSourceOid: oid("b"), switchToTarget: true });
+  assert.deepEqual(ops.workspaceStageOperation(["61"], false), { kind: "workspaceStage", all: false, pathsHex: ["61"] });
+  assert.deepEqual(ops.workspaceUnstageOperation([], true), { kind: "workspaceUnstage", all: true, pathsHex: [] });
+  assert.deepEqual(ops.workspaceDiscardOperation("61", true, null), { kind: "workspaceDiscard", pathHex: "61", untracked: true, expectedHeadOid: null });
+  assert.deepEqual(ops.workspaceCommitOperation("msg", oid("a")), { kind: "workspaceCommit", message: "msg", expectedHeadOid: oid("a") });
+
+  assert.equal(ops.pushDoneNotice({
+    outcome: "done", refName: "refs/heads/main", remote: "origin", remoteRefName: "refs/remotes/origin/main",
+    newOid: oid("b"), setUpstream: false, finishedAtUnixMs: 1,
+  }), "已推送 main → origin/main");
+  assert.equal(ops.pushDoneNotice({
+    outcome: "done", refName: "refs/heads/feat", remote: "origin", remoteRefName: "refs/remotes/origin/feat",
+    newOid: oid("b"), setUpstream: true, finishedAtUnixMs: 1,
+  }), "已发布 feat → origin/feat（已设置上游）");
+  assert.equal(ops.deleteBranchDoneNotice("refs/heads/feat"), "已删除本地分支 feat");
+  assert.equal(ops.mergeDoneNotice("refs/heads/feat", "refs/heads/main", true), "已把 feat 快进合入 main，并切换到 main");
+  assert.equal(ops.workspaceCommitDoneNotice(oid("c")), `已创建提交 ${oid("c").slice(0, 8)}`);
+});
+
+test("M7 refusal models map remoteRejected, notAncestorMerged, and mergeInto diverged safely", () => {
+  const pushMeta = ops.pushMeta("refs/heads/main", oid("a"), { refName: "refs/remotes/origin/main", oid: oid("b") }, "origin", ["/tmp/repo"]);
+  const rejected = [{ kind: "remoteRejected", remote: "origin", message: "non-fast-forward updates were rejected" }];
+  const pushModel = refusal.refusalModel(rejected, pushMeta);
+  assert.equal(pushModel.handoff, "pushRejected");
+  assert.equal(pushModel.fetchBeforeRetry, true);
+  assert.match(pushModel.explanation, /--force/u);
+  assert.equal(pushModel.lists[0].heading, "远端返回");
+
+  const pushReq = refusal.refusalHandoffRequest(rejected, pushMeta, repository(), 123);
+  assert.equal(pushReq.scenario, "push-failed");
+  assert.equal(pushReq.target.rejected, true);
+  const pushPrompt = handoff.buildHandoffPrompt(null, pushReq);
+  assert.doesNotMatch(pushPrompt.text.slice(0, pushPrompt.text.indexOf(`<<<${pushPrompt.marker}`)), /non-fast-forward updates were rejected/u);
+
+  const deleteMeta = ops.deleteBranchMeta("refs/heads/feat", oid("b"), "refs/heads/main");
+  const notAnc = [{ kind: "notAncestorMerged", baseRefName: "refs/heads/main" }];
+  const deleteModel = refusal.refusalModel(notAnc, deleteMeta);
+  assert.equal(deleteModel.handoff, "cleanup");
+  assert.deepEqual(refusal.refusalHandoffRequest(notAnc, deleteMeta, repository(), 456), { scenario: "cleanup", target: { kind: "branch", ref: "refs/heads/feat" } });
+
+  const mergeMeta = ops.fastForwardMergeMeta("refs/heads/feat", oid("b"), "refs/heads/main", oid("a"));
+  const mergeDiv = refusal.refusalModel([{ ...diverged }], mergeMeta);
+  assert.equal(mergeDiv.title, "无法把 feat 快进合入 main");
+  assert.equal(mergeDiv.handoff, "diverged");
+  const mergeReq = refusal.refusalHandoffRequest([{ ...diverged }], mergeMeta, repository(), 789);
+  const mergePrompt = handoff.buildHandoffPrompt(null, mergeReq);
+  const mergeData = JSON.parse(mergePrompt.referenceData);
+  assert.equal(mergeData.D1.ref, "refs/heads/main");
+  assert.ok(Array.isArray(mergeData.targetCommits.commits));
+
+  const store = new OperationsStore(fakeApi(), () => 42);
+  store.bind("repo:1");
+  store.recordFailure(pushMeta, "fatal: authentication failed");
+  assert.equal(store.getView().failure?.message, "fatal: authentication failed");
+  assert.equal(store.getView().failure?.atUnixMs, 42);
 });

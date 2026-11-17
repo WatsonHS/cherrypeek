@@ -37,6 +37,9 @@ const NOTE_PLACEHOLDER: Record<HandoffRequest["scenario"], string> = {
   "update-diverged": "可选：项目习惯用 rebase 还是 merge，或需要注意什么……",
   "operation-blocked": "可选：这些改动是什么、你打算怎么处理……",
   "operation-failed": "可选：失败前你做过什么，比如磁盘空间、权限、其他程序在用仓库……",
+  "workspace-review": "可选：想让它重点审阅什么，比如某个文件、边界条件或兼容问题……",
+  "workspace-commit": "可选：希望怎么修改改动、是否拆分提交，或想使用的提交说明方向……",
+  "push-failed": "可选：希望用 rebase 还是 merge 同步，或远端分支规则……",
 };
 
 /**
@@ -121,7 +124,11 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
   const blocker = blockingReason(request, facts);
   const composingNow = composing || composingRef.current;
   const needsFacts = handoffNeedsFacts(request);
-  const rows = request.target.kind === "operation" ? operationRows(request.target) : facts ? subjectRows(request.target, facts, request.scenario) : null;
+  const rows = request.target.kind === "operation"
+    ? operationRows(request.target)
+    : request.target.kind === "workspace"
+      ? workspaceRows(request.target)
+      : facts ? subjectRows(request.target, facts, request.scenario) : null;
   const copyDisabled = loading || (needsFacts && !facts) || Boolean(blocker) || composingNow || tooLong || !prompt || Boolean(built && "error" in built);
   const title = HANDOFF_SCENARIO_TITLES[request.scenario];
   const count = request.target.kind === "commits" ? request.target.commits.length : null;
@@ -211,18 +218,38 @@ function blockingReason(request: HandoffRequest, facts: HandoffPromptFacts | nul
 function operationRows(target: Extract<HandoffTarget, { kind: "operation" }>): [string, string][] {
   const { repository } = target;
   const shortRef = (name: string) => name.replace(/^refs\/(?:heads|remotes)\//u, "");
+  const STEP_LABELS: Record<Extract<HandoffTarget, { kind: "operation"; operation: "failed" }>["subject"]["step"], string> = {
+    update: "更新（快进）",
+    switch: "切换分支",
+    createBranch: "新建分支",
+    push: "推送分支",
+    deleteBranch: "删除分支",
+    mergeInto: "快进合入",
+    workspaceStage: "暂存改动",
+    workspaceUnstage: "取消暂存",
+    workspaceDiscard: "丢弃改动",
+    workspaceCommit: "提交改动",
+  };
   const rows: [string, string][] = [];
-  if (target.operation === "fetch") rows.push(["操作", "fetch（没有成功，仓库未被改动）"]);
-  else {
+  if (target.operation === "fetch") rows.push(["操作", "fetch（没有成功，远端引用可能已部分更新）"]);
+  else if (target.operation === "pushFailed") {
     const { subject } = target;
-    const stepName = subject.step === "update" ? "更新（快进）" : subject.step === "switch" ? "切换分支" : "新建分支";
-    rows.push(["操作", `${stepName}${target.operation === "failed" ? "（中途失败，仓库可能已被部分改动）" : "（被拒绝，仓库未被改动）"}`]);
+    rows.push(["操作", target.rejected ? "推送（远端拒绝非快进或规则检查，未使用 --force）" : "推送（中途失败，本地分支未改写）"]);
     if (subject.branch) rows.push(["分支", `${shortRef(subject.branch.refName)} · ${shortOid(subject.branch.oid)}`]);
+    if (subject.upstream) rows.push(["上游", `${shortRef(subject.upstream.refName)} · ${shortOid(subject.upstream.oid)}`]);
+    else if (target.remote) rows.push(["远端", target.remote]);
+  } else {
+    const { subject } = target;
+    const stepName = STEP_LABELS[subject.step];
+    rows.push(["操作", `${stepName}${target.operation === "failed" ? "（未完成，仓库或工作区状态待检查）" : subject.fetched ? "（Fetch 已完成，本地分支和工作区未更新）" : "（被拒绝，仓库未被改动）"}`]);
+    if (subject.branch) rows.push(["分支", `${shortRef(subject.branch.refName)} · ${shortOid(subject.branch.oid)}`]);
+    if (subject.target) rows.push(["目标", `${shortRef(subject.target.refName)} · ${shortOid(subject.target.oid)}`]);
     if (subject.upstream) rows.push(["上游", `${shortRef(subject.upstream.refName)} · ${shortOid(subject.upstream.oid)}`]);
     if (target.operation === "diverged") rows.push(["分叉", `领先 ${target.blocker.ahead} · 落后 ${target.blocker.behind}`]);
     if (target.operation === "blocked") {
       if (target.dirty) rows.push(["未提交改动", `${target.dirty.paths.length}${target.dirty.pathsTruncated ? "+" : ""} 个文件`]);
       if (target.inProgress) rows.push(["进行中的操作", target.inProgress]);
+      if (target.noUpstream) rows.push(["阻止原因", "没有上游分支"]);
     }
   }
   if (!repository.isBare && repository.worktreePath) {
@@ -230,7 +257,29 @@ function operationRows(target: Extract<HandoffTarget, { kind: "operation" }>): [
   } else {
     rows.push(["仓库", repository.path]);
   }
-  rows.push([target.operation === "diverged" || target.operation === "blocked" ? "拒绝时间" : "失败时间", new Date(target.failedAtUnixMs).toLocaleString("zh-CN")]);
+  rows.push([target.operation === "diverged" || target.operation === "blocked" ? "拒绝时间" : "时间", new Date(target.failedAtUnixMs).toLocaleString("zh-CN")]);
+  return rows;
+}
+
+function workspaceRows(target: Extract<HandoffTarget, { kind: "workspace" }>): [string, string][] {
+  const { repository, status, focusPath, observedAtUnixMs } = target;
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  for (const entry of status.entries) {
+    if (entry.staged) staged += 1;
+    if (entry.unstaged) unstaged += 1;
+    if (entry.untracked) untracked += 1;
+  }
+  const rows: [string, string][] = [
+    ["范围", `${status.totalPaths}${status.complete ? "" : "+"} 个文件（已暂存 ${staged} · 未暂存 ${unstaged} · 未跟踪 ${untracked}）`],
+  ];
+  if (focusPath) rows.push(["关注文件", focusPath.display]);
+  if (status.draftCommitMessage) rows.push(["提交草稿", "已有未提交草稿"]);
+  if (repository.worktreePath) {
+    rows.push(["工作区", `${repository.worktreePath}${repository.headReference ? ` · ${repository.headReference.replace(/^refs\/heads\//u, "")}` : repository.headOid ? " · detached" : ""}`]);
+  }
+  rows.push(["观察时间", new Date(observedAtUnixMs).toLocaleString("zh-CN")]);
   return rows;
 }
 

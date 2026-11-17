@@ -369,13 +369,13 @@ fn operation(git_dir: &Path) -> WorkspaceOperation {
 }
 
 #[cfg(unix)]
-fn native_path(bytes: &[u8]) -> PathBuf {
+pub(crate) fn native_path(bytes: &[u8]) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
 }
 
 #[cfg(windows)]
-fn native_path(bytes: &[u8]) -> PathBuf {
+pub(crate) fn native_path(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
@@ -459,6 +459,13 @@ fn read_status_at(
         entries.push(entry);
     }
     let complete = entries.len() == listed;
+    let draft_commit_message = read_draft_commit_message(
+        executable,
+        tree,
+        status.head_oid.as_deref(),
+        cancelled,
+        deadline,
+    );
     Ok(WorkspaceStatus {
         observed_at_unix_ms: now_unix_ms(),
         head_reference: status
@@ -470,7 +477,73 @@ fn read_status_at(
         complete,
         total_paths,
         conflict_count,
+        draft_commit_message,
     })
+}
+
+fn clean_draft_message(raw: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let cleaned = text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty() && trimmed.len() <= 65_536).then(|| trimmed.to_owned())
+}
+
+fn read_draft_commit_message(
+    executable: &Path,
+    tree: &Worktree,
+    head_oid: Option<&str>,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Option<String> {
+    for name in ["MERGE_MSG", "SQUASH_MSG", "COMMIT_EDITMSG"] {
+        let path = tree.git_dir.join(name);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(cleaned) = clean_draft_message(&bytes) else {
+            continue;
+        };
+        if name == "COMMIT_EDITMSG"
+            && let Some(oid) = head_oid
+        {
+            let Ok(ro_git) = ReadOnlyGit::new(executable.to_path_buf()) else {
+                continue;
+            };
+            let Ok(output) = ro_git.run(
+                &tree.root,
+                &[
+                    string_arg("log"),
+                    string_arg("-1"),
+                    string_arg("--format=%B"),
+                    string_arg(oid),
+                ],
+                None,
+                128 * 1024,
+                cancelled,
+                deadline,
+            ) else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            if String::from_utf8_lossy(&output.stdout).trim() == cleaned {
+                continue;
+            }
+        }
+        return Some(cleaned);
+    }
+    None
 }
 
 fn decode_path(hex: &str) -> WorkspaceResult<Vec<u8>> {
@@ -1307,5 +1380,35 @@ mod tests {
                 ErrorCode::InvalidRequest
             );
         }
+    }
+
+    #[test]
+    fn draft_commit_message_filters_stale_head_and_reads_pending_drafts() {
+        let (tree, _cleanup) = fixture("draft-msg");
+        // No draft initially (fixture committed with -m root).
+        assert_eq!(status(&tree, 2000).draft_commit_message, None);
+        // COMMIT_EDITMSG equal to HEAD commit message is ignored as stale.
+        std::fs::write(tree.git_dir.join("COMMIT_EDITMSG"), "root\n# comment\n").unwrap();
+        assert_eq!(status(&tree, 2000).draft_commit_message, None);
+        // Distinct COMMIT_EDITMSG becomes available with comments stripped.
+        std::fs::write(
+            tree.git_dir.join("COMMIT_EDITMSG"),
+            "feat: pending draft\n\nbody line\n# Please enter the commit message\n",
+        )
+        .unwrap();
+        assert_eq!(
+            status(&tree, 2000).draft_commit_message.as_deref(),
+            Some("feat: pending draft\n\nbody line")
+        );
+        // MERGE_MSG takes precedence over COMMIT_EDITMSG.
+        std::fs::write(
+            tree.git_dir.join("MERGE_MSG"),
+            "Merge branch 'topic'\n# Conflicts:\n#\ta.txt\n",
+        )
+        .unwrap();
+        assert_eq!(
+            status(&tree, 2000).draft_commit_message.as_deref(),
+            Some("Merge branch 'topic'")
+        );
     }
 }

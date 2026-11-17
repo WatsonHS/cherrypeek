@@ -55,62 +55,6 @@ impl AnalysisControl<'_> {
     }
 }
 
-#[cfg(test)]
-mod scheduling_tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-
-    #[test]
-    fn pauses_preserve_work_budget_but_do_not_revive_expired_work() {
-        let cancelled = AtomicBool::new(false);
-        let start = Instant::now();
-        let busy = || start.elapsed() < Duration::from_millis(100);
-        let deadline = start + Duration::from_millis(40);
-        let mut control = AnalysisControl {
-            cancelled: &cancelled,
-            deadline,
-            interactive_active: &busy,
-        };
-        control.file_boundary().unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(100));
-        assert!(control.deadline >= deadline + Duration::from_millis(90));
-        check(&cancelled, control.deadline).unwrap();
-        control.deadline = Instant::now() - Duration::from_millis(1);
-        control.interactive_active = &|| true;
-        assert_eq!(
-            control.file_boundary().unwrap_err().code,
-            ErrorCode::Timeout
-        );
-    }
-
-    #[test]
-    fn cancellation_ends_an_indefinite_pause() {
-        let cancelled = AtomicBool::new(false);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let busy = || {
-            let _ = tx.send(());
-            true
-        };
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                AnalysisControl {
-                    cancelled: &cancelled,
-                    deadline: Instant::now() + TIMEOUT,
-                    interactive_active: &busy,
-                }
-                .file_boundary()
-            });
-            rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            let start = Instant::now();
-            cancelled.store(true, Ordering::Release);
-            assert_eq!(
-                worker.join().unwrap().unwrap_err().code,
-                ErrorCode::Cancelled
-            );
-            assert!(start.elapsed() < Duration::from_secs(1));
-        });
-    }
-}
 fn path_under(path: &[u8], prefix: &[u8]) -> bool {
     prefix.is_empty()
         || path == prefix
@@ -568,4 +512,61 @@ pub fn analyze(
         return Err(detail_error(ErrorCode::Cancelled, "演化分析已取消", false));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn pauses_preserve_work_budget_but_do_not_revive_expired_work() {
+        let cancelled = AtomicBool::new(false);
+        let start = Instant::now();
+        let busy = || start.elapsed() < Duration::from_millis(100);
+        let deadline = start + Duration::from_millis(40);
+        let mut control = AnalysisControl {
+            cancelled: &cancelled,
+            deadline,
+            interactive_active: &busy,
+        };
+        control.file_boundary().unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(100));
+        assert!(control.deadline >= deadline + Duration::from_millis(90));
+        check(&cancelled, control.deadline).unwrap();
+        control.deadline = Instant::now() - Duration::from_millis(1);
+        control.interactive_active = &|| true;
+        assert_eq!(
+            control.file_boundary().unwrap_err().code,
+            ErrorCode::Timeout
+        );
+    }
+
+    #[test]
+    fn cancellation_ends_an_indefinite_pause() {
+        let cancelled = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let busy = || {
+            let _ = tx.send(());
+            true
+        };
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                AnalysisControl {
+                    cancelled: &cancelled,
+                    deadline: Instant::now() + TIMEOUT,
+                    interactive_active: &busy,
+                }
+                .file_boundary()
+            });
+            rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let start = Instant::now();
+            cancelled.store(true, Ordering::Release);
+            assert_eq!(
+                worker.join().unwrap().unwrap_err().code,
+                ErrorCode::Cancelled
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+        });
+    }
 }

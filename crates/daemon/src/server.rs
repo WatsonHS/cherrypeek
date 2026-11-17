@@ -91,6 +91,7 @@ enum RequestOperation {
     ListPathChanges(ListPathChangesParams),
     ReadBlame(ReadBlameParams),
     FetchRepository(commitscope_core::FetchRepositoryParams),
+    PushRepository(commitscope_core::PushRepositoryParams),
     GetBranchSync(commitscope_core::GetBranchSyncParams),
     CheckOperation(commitscope_core::OperationParams),
     RunOperation(commitscope_core::OperationParams),
@@ -404,6 +405,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let is_operation = matches!(
                             operation,
                             RequestOperation::FetchRepository(_)
+                                | RequestOperation::PushRepository(_)
                                 | RequestOperation::RunOperation(_)
                         );
                         let is_auxiliary = matches!(
@@ -600,6 +602,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::ListPathChanges(_)
             | RequestOperation::ReadBlame(_)
             | RequestOperation::FetchRepository(_)
+            | RequestOperation::PushRepository(_)
             | RequestOperation::GetBranchSync(_)
             | RequestOperation::CheckOperation(_)
             | RequestOperation::RunOperation(_)
@@ -1468,7 +1471,12 @@ fn dispatch_request(
                     let facts = crate::handoff::get_handoff_facts(
                         git, session, &params, cancelled, deadline,
                     )?;
-                    Ok((ResponseData::HandoffFacts { facts }, 1))
+                    Ok((
+                        ResponseData::HandoffFacts {
+                            facts: Box::new(facts),
+                        },
+                        1,
+                    ))
                 },
             );
         }
@@ -1844,6 +1852,31 @@ fn dispatch_request(
                     )?;
                     let processed = u32::try_from(result.remotes.len()).unwrap_or(u32::MAX);
                     Ok((ResponseData::RepositoryFetched { result }, processed))
+                },
+            );
+        }
+        RequestOperation::PushRepository(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, _read_deadline| {
+                    let result = crate::operations::push_repository(
+                        git,
+                        session,
+                        &params,
+                        cancelled,
+                        std::time::Instant::now() + crate::operations::PUSH_TIMEOUT,
+                    )?;
+                    Ok((ResponseData::RepositoryPushed { result }, 1))
                 },
             );
         }
@@ -2717,6 +2750,7 @@ fn validate_request(
         | "listPathChanges"
         | "readBlame"
         | "fetchRepository"
+        | "pushRepository"
         | "getBranchSync"
         | "checkOperation"
         | "runOperation"
@@ -3113,6 +3147,16 @@ fn validate_request(
                         "fetchRepository params 无效".into(),
                     )
                 }),
+                "pushRepository" => {
+                    serde_json::from_value::<commitscope_core::PushRepositoryParams>(params.clone())
+                        .map(RequestOperation::PushRepository)
+                        .map_err(|_| {
+                            (
+                                ErrorCode::InvalidRequest,
+                                "pushRepository params 无效".into(),
+                            )
+                        })
+                }
                 _ => serde_json::from_value::<EmptyParams>(params.clone())
                     .map(|_| match method {
                         "getRepositorySession" => RequestOperation::GetRepositorySession,
@@ -3173,6 +3217,7 @@ fn validate_request(
         | "listPathChanges"
         | "readBlame"
         | "fetchRepository"
+        | "pushRepository"
         | "getBranchSync"
         | "checkOperation"
         | "runOperation"
@@ -3807,8 +3852,7 @@ fn execute_history_request(
                     page_size,
                     known_cursors: date_known_cursors.clone(),
                 },
-                &cancelled,
-                deadline,
+                (&cancelled, deadline),
                 |location, reused| {
                     let message = ServerMessage::Response {
                         request_id: request_id.to_owned(),

@@ -16,9 +16,13 @@ export interface RefusalDialogProps {
   /** A closing remark under the lists, e.g. files that do not conflict. */
   footnote?: string;
   onClose(): void;
+  closeLabel?: string;
+  focusClose?: boolean;
   /** A link under the lists: "在工作区页查看这些改动". */
   onOpenWorkspace?(): void;
   onOpenTerminal?(): void;
+  discard?: { label: string; onSelect(): void };
+  alternative?: { label: string; onSelect(): void };
   onHandoff?(): void;
 }
 
@@ -27,7 +31,7 @@ export interface RefusalDialogProps {
  * reason as facts, says the repository is untouched, and offers the terminal or a hand-off to an agent.
  * Fully driven by props; every string comes from the caller and is rendered as plain text.
  */
-export function RefusalDialog({ title, explanation, safeLine = "没有执行任何操作，仓库未被改动", lists = [], footnote, onClose, onOpenWorkspace, onOpenTerminal, onHandoff }: RefusalDialogProps): React.JSX.Element {
+export function RefusalDialog({ title, explanation, safeLine = "没有执行任何操作，仓库未被改动", lists = [], footnote, onClose, closeLabel = "关闭", focusClose = false, onOpenWorkspace, onOpenTerminal, alternative, discard, onHandoff }: RefusalDialogProps): React.JSX.Element {
   const composingRef = React.useRef(false);
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -62,9 +66,11 @@ export function RefusalDialog({ title, explanation, safeLine = "没有执行任�
       {onOpenWorkspace ? <button type="button" onClick={onOpenWorkspace} data-testid="refusal-workspace"
         className="self-start text-[12.5px] text-accent-fg underline-offset-2 hover:underline">在工作区页查看这些改动</button> : null}
       {footnote ? <p className="m-0 text-xs text-fg3">{footnote}</p> : null}
-      <div className="flex justify-end gap-2">
-        <Button variant="outline" onClick={onClose} data-testid="refusal-close">关闭</Button>
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="outline" autoFocus={focusClose} onClick={onClose} data-testid="refusal-close">{closeLabel}</Button>
         {onOpenTerminal ? <Button variant="outline" onClick={onOpenTerminal} data-testid="refusal-terminal">在终端打开</Button> : null}
+        {discard ? <Button variant="outline" className="text-bad hover:text-bad" onClick={discard.onSelect} data-testid="refusal-discard">{discard.label}</Button> : null}
+        {alternative ? <Button variant="outline" onClick={alternative.onSelect} data-testid="refusal-alternative">{alternative.label}</Button> : null}
         {onHandoff ? <Button onClick={onHandoff} data-testid="refusal-handoff">交给 Agent…</Button> : null}
       </div>
     </section>

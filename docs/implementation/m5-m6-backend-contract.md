@@ -30,14 +30,14 @@
 
 | `operation.kind` | 字段 | 行为 |
 | --- | --- | --- |
-| `fastForward` | `refName`、`expectedOid`、`upstreamOid` | 把本地分支快进到上游。是当前分支时更新工作区；不是时只移动引用，不 checkout |
+| `fastForward` | `refName`、`expectedOid`、`upstreamOid`、互斥可选的 `replaceUntracked` / `discardUntracked` | 把本地分支快进到上游。是当前分支时更新工作区；不是时只移动引用，不 checkout |
 | `switch` | `target: { refName }`（本地分支）或 `{ remoteRefName }`（新建同名跟踪分支后切换）、`expectedHeadOid`、`expectedOid`（目标引用） | 切换本窗口工作区 |
 | `createBranch` | `name`、`startOid`、`switchAfter: boolean`、`expectedHeadOid` | 新建本地分支，可选随即切换 |
 
 - **2026-11-12 修订**：移除 `fetchFirst`。main 对当前分支先显式调用 `fetchRepository`，再刷新引用并用新的 OID 调用 check / run；快进拒绝的零写入保证从快进阶段开始。`switch` 增加目标 `expectedOid`，`createBranch` 增加 `expectedHeadOid`。本地写入开始后不取消。
 - 结果 section 分别为 `branchSync` / `operationCheck` / `operationRun`，结果字段为 `result`。
-- `checkOperation` 结果：`{ allowed: boolean, blockers: Blocker[], preservedDirtyCount: number }`。`preservedDirtyCount` 是与目标不冲突、会保留的未提交改动文件数；ignored 条目仅参与防覆盖检查，不计入该数字，重命名计一项。
-- `runOperation` 在 Rust 内重新检查。被拒绝时返回 `{ outcome: "rejected", blockers }`，不作为协议错误；执行成功返回 `{ outcome: "done", headOid, headReference, updatedRef: { refName, oldOid, newOid } | null }`。
+- `checkOperation` 结果：`{ allowed: boolean, blockers: Blocker[], preservedDirtyCount: number, identicalUntrackedCount: number }`。`preservedDirtyCount` 是与目标不冲突、会保留的未提交改动文件数；ignored 条目仅参与防覆盖检查，不计入该数字，重命名计一项。
+- `runOperation` 在 Rust 内重新检查。被拒绝时返回 `{ outcome: "rejected", blockers }`，不作为协议错误；执行成功返回 `{ outcome: "done", headOid, headReference, updatedRef: { refName, oldOid, newOid } | null, untracked: UntrackedOutcome | null }`。
 - 执行中途 Git 失败：返回协议错误 `GIT_ERROR`，`message` 是 Git 的原始输出（有长度上限）。界面随后重读会话和工作区状态来显示实际状态。
 - `expectedOid` / `expectedHeadOid` 与当前不符时，blocker 为 `refChanged`，不按旧事实执行。
 
@@ -46,11 +46,34 @@
 | `kind` | 附带字段 |
 | --- | --- |
 | `diverged` | `ahead`、`behind`、`localCommits`、`upstreamCommits`（各最多 10 条 `{ oid, summary }`，另给 `localCommitsTruncated` / `upstreamCommitsTruncated`）、`overlapPaths`（最多 20 条）和 `overlapPathsTruncated`|
-| `dirty` | `paths`：最多 50 条 `{ path: GitPath, staged: boolean, unstaged: boolean, untracked: boolean }`，另给 `pathsTruncated` |
+| `dirty` | `paths`：最多 50 条 `{ path: GitPath, staged: boolean, unstaged: boolean, untracked: boolean, replace: UntrackedDifference | null }`，另给 `pathsTruncated` 和 `replaceToken` |
 | `checkedOutElsewhere` | `worktreePath` |
 | `inProgress` | `operation`：`merge` / `rebase` / `cherryPick` / `revert` / `bisect` / `sequencer` |
 | `unsafeState` | `message`；未解决 index 冲突、skip-worktree / assume-unchanged 等无法证明安全的状态 |
 | `noUpstream`、`notFastForward`、`refChanged`、`nameInvalid`、`nameExists`、`bare` | 无 |
+
+### P5-06：更新时让开同名未跟踪文件
+
+产品规则见 [PRODUCT](../PRODUCT.md)「同名未跟踪文件」。只影响 `fastForward` 且目标是本窗口当前分支的情况；`switch` 和不 checkout 的快进不变。预检、执行和拒绝弹窗通过以下字段传递比较结果和确认。
+
+预检（`checkOperation`，只读）：
+
+- 未跟踪条目与上游新增路径同名时，逐个文件比较。被 Git 忽略的文件同样参与比较，忽略目录展开为“上游会写入、本地已存在”的文件，目录里其他文件不参与。
+- **相同**：本地内容的 blob OID 与上游一致，且类型一致（普通文件的可执行位相同；符号链接比较链接目标）。不进入 `dirty.paths`，计入 `OperationCheck.identicalUntrackedCount: number`。只有这类同名文件时 `allowed: true`。
+- **不同且可替换**：本地是普通文件、上游是普通文件。进入 `dirty.paths`，`untracked: true`，并带 `replace: { upstreamOnlyLines: number | null, localOnlyLines: number | null }`（上游有而本地没有、本地有而上游没有的行数；二进制或超过行数统计上限时为 null）。
+- **不可替换**：已跟踪文件的改动、目标不同的符号链接、嵌套仓库、文件与目录类型不一致，以及已配置签出内容转换的路径。`replace: null`，行为与现在相同。
+- `dirty` 增加 `replaceToken: string | null`。仅当 `dirty.paths` 未截断且每一项都可替换时非 null：对（原始路径、本地内容摘要、类型、上游 blob OID）的有序集合以及全部“相同”文件的同类信息取摘要。renderer 把它当不透明字符串。
+- 比较上限为 200 个同名文件、合计 64 MiB；超限时不比较，全部按不可替换处理。计算响应取消和截止时间。比较不得向被查看仓库写入（`git hash-object` 不带 `-w`）。
+
+执行（`runOperation`）：
+
+- `fastForward` 接受互斥的可选字段 `replaceUntracked`（保留备份）和 `discardUntracked`（成功后丢弃），值均为预检给出的 `replaceToken`。两者都未提供时，内容不同的同名文件照旧拒绝。
+- Rust 重新比较。任一选项携带的摘要与当前算出的不同（文件被改、增加或消失）时返回 `rejected` 和当时的 blockers，不执行。
+- 顺序：内容不同的文件复制到 `<应用数据目录>/backups/<repositoryKey>/<UTC 时间>-<序号>/<相对路径>`，校验后从工作区移走；内容相同的文件让开（快进失败时可从暂存副本恢复）；然后执行 `git merge --ff-only`。丢弃选项在确认 HEAD 和分支匹配目标后清除本次临时副本。
+- 快进未完成：把让开和备份的文件放回原处，再返回 `GIT_ERROR`。放不回去时保留备份，`message` 里写明备份目录。
+- `done` 增加 `untracked: { identicalCount: number, backedUpCount: number, discardedCount?: number, backupDir: string | null } | null`；没有同名未跟踪文件时为 null，没有备份时 `backupDir` 为 null，未丢弃文件时省略 `discardedCount`。
+
+界面：`replaceToken` 非 null 且 `dirty` 是唯一的 blocker 时，拒绝提示保留“交给 Agent”主按钮，提供备份和丢弃两种选择。丢弃需再次确认清单，再携带对应摘要重新 check / run。完成提示显示简短摘要，完整计数和备份路径放在详情中。
 
 ### 远端地址
 
@@ -135,6 +158,6 @@ selection 为 `{kind: "file", pathHex}` / `{kind: "directory", pathHex}` / `{kin
 - M6 增加明确的 capability、section、截断字段与分支 complete；新增扩展名、累计净增长与提交回查；directoryPrefix / directory 都保留原始路径信息。
 - shareOfA 改为 shareOfAPerMille；排除规则语法与持久化接口定稿；演化增加准确估计范围、asOfUnix、单独的 survival.coverage 以及累积结果结构。
 
-M5 限制：重叠脏路径保守拒绝（即使某些相同内容 Git 可以接受）；当前分支快进有暂存改动时保守拒绝。执行后的 hook / I/O 失败是 GIT_ERROR，不能声称未写入。预检后任意外部 Git 进程仍可能竞态；其他分支 update-ref 使用旧 OID CAS，工作区操作依赖 Git 的最终锁与检查。
+M5 限制：重叠脏路径按上文 P5-06 比较同名未跟踪文件，其余冲突继续拒绝；当前分支快进有暂存改动时保守拒绝。执行后的 hook / I/O 失败是 GIT_ERROR，不能声称未写入。预检后任意外部 Git 进程仍可能竞态；其他分支 update-ref 使用旧 OID CAS，工作区操作依赖 Git 的最终锁与检查。
 
 M5 写入通过应用数据目录内的 OS 文件锁跨 daemon / linked worktree 串行，崩溃自动释放；目前 Unix/macOS 支持，其他平台拒绝写入。系统配置读取沿用操作运行器，但没有改动本机系统配置做验证。

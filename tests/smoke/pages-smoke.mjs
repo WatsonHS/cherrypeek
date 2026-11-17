@@ -93,7 +93,11 @@ try {
   assert.equal(await scope(), "改动的文件");
   await page.keyboard.press("Meta+2");
   assert.equal(await current(), "page-files");
-  assert.equal(await scope(), "文件页");
+  assert.equal(await page.locator(".topbar-search").count(), 0, "no file selected to search");
+  await page.keyboard.press("Meta+4");
+  assert.equal(await current(), "page-stats");
+  await page.keyboard.press("Meta+f");
+  assert.equal(await page.locator(".topbar-search").count(), 0, "stats has no search box or toggle");
   await page.getByTestId("page-commits").click();
   assert.equal(await current(), "page-commits");
   await page.getByTestId("commit-row").first().waitFor();
@@ -491,6 +495,13 @@ try {
   assert.equal(bars[1000].pageLabels, false, "1000px keeps only the page icons");
   assert.equal(bars[1000].searchBody, false, "1000px folds search into a button");
   assert.equal(bars[1000].searchToggle, true);
+  await page.getByTestId("page-stats").click();
+  await page.keyboard.press("Meta+f");
+  assert.equal(await page.locator(".topbar-search").count(), 0, "⌘F on narrow stats cannot open an empty search");
+  await page.getByTestId("page-commits").click();
+  await page.keyboard.press("Meta+f");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "search-input");
+  await page.keyboard.press("Escape");
   await toolbarAt(1440);
 
   if (!standIn) {

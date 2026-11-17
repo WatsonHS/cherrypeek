@@ -674,6 +674,7 @@ function validRequestParams(method: string, params: unknown): boolean {
   if (method === "fetchRepository" && isRecord(params) && hasExactKeys(params, ["prune", "remote"]) && typeof params.prune === "boolean" &&
     (params.remote === null || typeof params.remote === "string" && params.remote.length > 0 && !params.remote.startsWith("-") &&
       Buffer.byteLength(params.remote, "utf8") <= 256)) return true;
+  if (method === "pushRepository") return validPushRepositoryParams(params);
   if (method === "getBranchSync") return validBranchSyncParams(params);
   if (method === "checkOperation" || method === "runOperation") return validOperationParams(params);
   if (method === "getActivityOverview" || method === "getNotableStats") return validStatsQueryParams(params);
@@ -693,8 +694,24 @@ function boundedText(value: unknown, maxBytes: number): value is string {
 }
 
 /** A full ref name as the core reports it: bounded, no NUL, never an option-looking string. */
-function validRefName(value: unknown): boolean {
+function validRefName(value: unknown): value is string {
   return boundedText(value, 16 * 1024) && !value.startsWith("-");
+}
+
+function validLocalBranchRef(value: unknown): value is string {
+  return validRefName(value) && value.startsWith("refs/heads/") && value.length > "refs/heads/".length;
+}
+
+function validBranchRef(value: unknown): value is string {
+  return validRefName(value) && ((value.startsWith("refs/heads/") && value.length > "refs/heads/".length)
+    || (value.startsWith("refs/remotes/") && value.length > "refs/remotes/".length));
+}
+
+export function validPushRepositoryParams(params: unknown): boolean {
+  return isRecord(params) && hasExactKeys(params, ["expectedOid", "refName", "remote", "setUpstream"]) &&
+    validOid(params.expectedOid) && validLocalBranchRef(params.refName) &&
+    (params.remote === null || (boundedText(params.remote, 256) && !params.remote.startsWith("-"))) &&
+    typeof params.setUpstream === "boolean";
 }
 
 export function validBranchSyncParams(params: unknown): boolean {
@@ -709,8 +726,11 @@ export function validOperationParams(params: unknown): boolean {
 
 export function validRepositoryOperation(operation: Record<string, unknown>): boolean {
   if (operation.kind === "fastForward") {
-    return hasExactKeys(operation, ["expectedOid", "kind", "refName", "upstreamOid"]) && validRefName(operation.refName) &&
-      validOid(operation.expectedOid) && validOid(operation.upstreamOid);
+    return hasKeysWithOptional(operation, ["expectedOid", "kind", "refName", "upstreamOid"], ["replaceUntracked", "discardUntracked"]) &&
+      validRefName(operation.refName) && validOid(operation.expectedOid) && validOid(operation.upstreamOid) &&
+      (operation.replaceUntracked === undefined || boundedText(operation.replaceUntracked, 256)) &&
+      (operation.discardUntracked === undefined || boundedText(operation.discardUntracked, 256)) &&
+      !(operation.replaceUntracked !== undefined && operation.discardUntracked !== undefined);
   }
   if (operation.kind === "switch") {
     if (!hasExactKeys(operation, ["expectedHeadOid", "expectedOid", "kind", "target"]) || !validOid(operation.expectedHeadOid) ||
@@ -722,6 +742,31 @@ export function validRepositoryOperation(operation: Record<string, unknown>): bo
   if (operation.kind === "createBranch") {
     return hasExactKeys(operation, ["expectedHeadOid", "kind", "name", "startOid", "switchAfter"]) && validOid(operation.expectedHeadOid) &&
       validOid(operation.startOid) && typeof operation.switchAfter === "boolean" && boundedText(operation.name, 1024) && !operation.name.startsWith("-");
+  }
+  if (operation.kind === "deleteBranch") {
+    return hasExactKeys(operation, ["baseRefName", "expectedOid", "kind", "refName"]) &&
+      validLocalBranchRef(operation.refName) && validBranchRef(operation.baseRefName) && validOid(operation.expectedOid);
+  }
+  if (operation.kind === "fastForwardMerge") {
+    return hasExactKeys(operation, ["expectedSourceOid", "expectedTargetOid", "kind", "sourceRef", "switchToTarget", "targetRef"]) &&
+      validLocalBranchRef(operation.targetRef) && validBranchRef(operation.sourceRef) &&
+      validOid(operation.expectedTargetOid) && validOid(operation.expectedSourceOid) && typeof operation.switchToTarget === "boolean";
+  }
+  if (operation.kind === "workspaceStage" || operation.kind === "workspaceUnstage") {
+    return hasExactKeys(operation, ["all", "kind", "pathsHex"]) && typeof operation.all === "boolean" &&
+      Array.isArray(operation.pathsHex) && operation.pathsHex.length <= 2000 && operation.pathsHex.every(validPathHex) &&
+      (operation.all ? operation.pathsHex.length === 0 : operation.pathsHex.length > 0);
+  }
+  if (operation.kind === "workspaceDiscard") {
+    return hasKeysWithOptional(operation, ["kind", "pathHex", "untracked"], ["expectedHeadOid"]) &&
+      validPathHex(operation.pathHex) && typeof operation.untracked === "boolean" &&
+      (operation.expectedHeadOid === undefined || operation.expectedHeadOid === null || validOid(operation.expectedHeadOid));
+  }
+  if (operation.kind === "workspaceCommit") {
+    return hasKeysWithOptional(operation, ["kind", "message"], ["expectedHeadOid"]) &&
+      typeof operation.message === "string" && operation.message.trim().length > 0 &&
+      Buffer.byteLength(operation.message, "utf8") <= 65536 && !operation.message.includes("\0") &&
+      (operation.expectedHeadOid === undefined || operation.expectedHeadOid === null || validOid(operation.expectedHeadOid));
   }
   return false;
 }
@@ -780,8 +825,8 @@ export function validEvolutionParams(params: unknown): boolean {
     validOptionalPathHex(params.pathHex) && (params.range === undefined || params.range === null || validStatsRange(params.range));
 }
 
-/** P5-01: user-triggered operations that write to the repository or use the network; one at a time. */
-const OPERATION_METHODS = ["fetchRepository", "runOperation"];
+/** P5-01 / P7-01: user-triggered operations that write to the repository or use the network; one at a time. */
+const OPERATION_METHODS = ["fetchRepository", "pushRepository", "runOperation"];
 
 // Keep these lanes aligned with daemon admission. getActivityStats is the old
 // top-bar read and deliberately remains interactive, with its existing preemption.

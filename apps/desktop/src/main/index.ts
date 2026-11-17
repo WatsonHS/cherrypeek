@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, session, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session, shell, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from "electron";
 import { execFile } from "node:child_process";
 import { watch, readdirSync, readFileSync, statSync, writeFileSync, type FSWatcher } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -11,6 +11,7 @@ import type { CoreStatus } from "../../../../packages/protocol/src/core-status.j
 import type { ErrorCode } from "../../../../packages/protocol/src/generated/server-message.js";
 import type { RepositorySessionResult } from "../../../../packages/protocol/src/repository-session.js";
 import { RepositorySessionController } from "./repository-session-controller.js";
+import { readWindowState, trackWindowState } from "./window-state.js";
 
 const APP_ROOT = resolve(__dirname, "..");
 const RENDERER_ENTRY = resolve(APP_ROOT, "renderer/index.html");
@@ -24,6 +25,7 @@ const IPC_STATUS_CHANGED = "commitscope:core:status-changed";
 const IPC_RESTART_CORE = "commitscope:core:restart";
 const IPC_CHOOSE_REPOSITORY = "commitscope:repository:choose";
 const IPC_LAUNCH_REPOSITORY = "commitscope:repository:launch";
+const IPC_OPEN_REPOSITORY_REQUESTED = "commitscope:repository:open-requested";
 const IPC_SESSION_OPEN = "commitscope:session:open";
 const IPC_SESSION_GET = "commitscope:session:get";
 const IPC_SESSION_PREVIEW = "commitscope:session:preview";
@@ -75,6 +77,7 @@ const IPC_FILES_BLAME = "commitscope:files:blame";
 const IPC_FILES_BLAME_CHUNK = "commitscope:files:blame-chunk";
 const IPC_FILES_CANCEL = "commitscope:files:cancel";
 const IPC_OPERATION_FETCH = "commitscope:operations:fetch";
+const IPC_OPERATION_PUSH = "commitscope:operations:push";
 const IPC_OPERATION_CANCEL = "commitscope:operations:cancel";
 const IPC_BRANCH_SYNC = "commitscope:operations:branch-sync";
 const IPC_OPERATION_CHECK = "commitscope:operations:check";
@@ -99,6 +102,8 @@ let window: BrowserWindow | undefined;
 let core: CoreProcess | undefined;
 let repositorySessions: RepositorySessionController | undefined;
 let quitting = false;
+let pendingOpenFilePath: string | null = null;
+let rendererLaunchChecked = false;
 let repositoryWatchers: FSWatcher[] = [];
 let observationTimer: ReturnType<typeof setTimeout> | undefined;
 let observationFallback: ReturnType<typeof setInterval> | undefined;
@@ -219,11 +224,32 @@ async function openWorkspaceIn(target: "finder" | "terminal" | "editor", reselec
   return true;
 }
 
-/** The repository passed with `--repository=` at launch; the renderer opens it like any other path. */
+function isValidRepositoryPath(path: unknown): path is string {
+  return typeof path === "string" && isAbsolute(path) && !path.includes("\0") && Buffer.byteLength(path, "utf8") <= MAX_PATH_BYTES;
+}
+
+function requestOpenRepository(path: string): void {
+  if (!isValidRepositoryPath(path)) return;
+  if (rendererLaunchChecked && window && !window.isDestroyed()) {
+    if (window.isMinimized()) window.restore();
+    window.focus();
+    window.webContents.send(IPC_OPEN_REPOSITORY_REQUESTED, path);
+    return;
+  }
+  pendingOpenFilePath = path;
+}
+
+/** The repository passed with `--repository=` or `open-file` at launch; the renderer opens it like any other path. */
 function launchRepository(): string | null {
-  const path = process.argv.find(arg => arg.startsWith("--repository="))?.slice("--repository=".length);
-  if (!path || !isAbsolute(path) || path.includes("\0") || Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES) return null;
-  return path;
+  rendererLaunchChecked = true;
+  const argPath = process.argv.find(arg => arg.startsWith("--repository="))?.slice("--repository=".length);
+  if (isValidRepositoryPath(argPath)) return argPath;
+  if (isValidRepositoryPath(pendingOpenFilePath)) {
+    const pending = pendingOpenFilePath;
+    pendingOpenFilePath = null;
+    return pending;
+  }
+  return null;
 }
 
 function registerRepositorySessionIpc(): void {
@@ -340,6 +366,10 @@ function registerRepositorySessionIpc(): void {
   ipcMain.handle(IPC_OPERATION_FETCH, (event, params: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.fetchRepository(params));
+  });
+  ipcMain.handle(IPC_OPERATION_PUSH, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.pushRepository(params));
   });
   ipcMain.handle(IPC_OPERATION_CANCEL, event => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
@@ -645,10 +675,82 @@ async function sessionResult<T>(action: () => Promise<T>): Promise<RepositorySes
 }
 
 
+function installApplicationMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    ...(process.platform === "darwin" ? [{
+      label: "CherryPeek",
+      submenu: [
+        { role: "about" as const, label: "关于 CherryPeek" },
+        { type: "separator" as const },
+        { role: "services" as const, label: "服务" },
+        { type: "separator" as const },
+        { role: "hide" as const, label: "隐藏 CherryPeek" },
+        { role: "hideOthers" as const, label: "隐藏其他" },
+        { role: "unhide" as const, label: "全部显示" },
+        { type: "separator" as const },
+        { role: "quit" as const, label: "退出 CherryPeek" },
+      ],
+    }] : []),
+    {
+      label: "文件",
+      submenu: [
+        {
+          label: "打开仓库…",
+          accelerator: "CmdOrCtrl+O",
+          click: () => {
+            if (!window || window.isDestroyed()) return;
+            void dialog.showOpenDialog(window, { properties: ["openDirectory"] }).then(result => {
+              const chosen = result.canceled ? undefined : result.filePaths[0];
+              if (chosen) requestOpenRepository(chosen);
+            });
+          },
+        },
+        { type: "separator" },
+        { role: "close", label: "关闭窗口" },
+      ],
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
+        { type: "separator" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        { role: "selectAll", label: "全选" },
+      ],
+    },
+    {
+      label: "视图",
+      submenu: [
+        { role: "resetZoom", label: "实际大小" },
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "切换全屏" },
+        ...(!app.isPackaged ? [{ type: "separator" as const }, { role: "toggleDevTools" as const, label: "切换开发者工具" }] : []),
+      ],
+    },
+    {
+      label: "窗口",
+      submenu: [
+        { role: "minimize", label: "最小化" },
+        { role: "zoom", label: "缩放" },
+        ...(process.platform === "darwin" ? [{ type: "separator" as const }, { role: "front" as const, label: "前置全部窗口" }] : []),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 async function createWindow(): Promise<void> {
+  const windowStatePath = resolve(app.getPath("userData"), "window-state.json");
+  const initialWindowState = readWindowState(windowStatePath);
   window = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    width: initialWindowState.width,
+    height: initialWindowState.height,
+    ...(initialWindowState.x !== undefined && initialWindowState.y !== undefined ? { x: initialWindowState.x, y: initialWindowState.y } : {}),
     minWidth: 850,
     minHeight: 560,
     show: false,
@@ -665,6 +767,7 @@ async function createWindow(): Promise<void> {
       allowRunningInsecureContent: false,
     },
   });
+  trackWindowState(window, windowStatePath, initialWindowState);
   const syncWindowAppearance = () => {
     const dark = nativeTheme.shouldUseDarkColors;
     const background = dark ? "#121311" : "#f7f7f5";
@@ -687,8 +790,10 @@ async function createWindow(): Promise<void> {
   });
   window.webContents.on("will-attach-webview", event => event.preventDefault());
   await window.loadFile(RENDERER_ENTRY);
+  if (initialWindowState.isMaximized) window.maximize();
   window.show();
   window.on("closed", () => {
+    rendererLaunchChecked = false;
     window = undefined;
     void quitApplication();
   });
@@ -703,6 +808,10 @@ async function quitApplication(): Promise<void> {
   app.quit();
 }
 
+app.on("open-file", (event, path) => {
+  event.preventDefault();
+  requestOpenRepository(path);
+});
 app.on("window-all-closed", () => { void quitApplication(); });
 process.on("SIGINT", () => { void quitApplication(); });
 process.on("SIGTERM", () => { void quitApplication(); });
@@ -718,6 +827,7 @@ app.on("session-created", ses => {
 });
 
 void app.whenReady().then(async () => {
+  installApplicationMenu();
   const mode = process.argv.find(arg => arg.startsWith("--smoke-mode="))?.split("=", 2)[1];
   const executable = mode === "missing-core" ? resolve(APP_ROOT, "resources/missing-core") : CORE_ENTRY;
   const appDataDir = resolve(app.getPath("userData"), "repository-state");

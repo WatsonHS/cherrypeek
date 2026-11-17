@@ -181,6 +181,10 @@ export type ResponseData =
       section: "repositoryFetched";
     }
   | {
+      result: PushResult;
+      section: "repositoryPushed";
+    }
+  | {
       git: GitInfo;
       section: "git";
     }
@@ -284,6 +288,7 @@ export type OperationBlocker =
       kind: "dirty";
       paths: DirtyOperationPath[];
       pathsTruncated: boolean;
+      replaceToken?: string | null;
     }
   | {
       kind: "checkedOutElsewhere";
@@ -314,6 +319,15 @@ export type OperationBlocker =
   | {
       kind: "unsafeState";
       message: string;
+    }
+  | {
+      kind: "remoteRejected";
+      message: string;
+      remote: string;
+    }
+  | {
+      baseRefName: string;
+      kind: "notAncestorMerged";
     };
 export type OperationRun =
   | {
@@ -321,9 +335,11 @@ export type OperationRun =
       outcome: "rejected";
     }
   | {
+      committedOid?: string | null;
       headOid?: string | null;
       headReference?: string | null;
       outcome: "done";
+      untracked?: UntrackedOutcome | null;
       updatedRef?: UpdatedRef | null;
     };
 export type RefSnapshotChangeKind = "fastForward" | "rewritten" | "created" | "deleted" | "unknown";
@@ -348,6 +364,20 @@ export type WorkspaceSide = "staged" | "unstaged";
 export type WorkspaceFileKind = "text" | "binary" | "tooLarge" | "symlink" | "missing" | "notFile";
 export type TreeEntryKind = "directory" | "file" | "symlink" | "submodule";
 export type FileContentKind = "text" | "binary" | "lfs" | "submodule" | "symlink" | "tooLarge" | "missing";
+export type PushResult =
+  | {
+      blockers: OperationBlocker[];
+      outcome: "rejected";
+    }
+  | {
+      finishedAtUnixMs: number;
+      newOid: string;
+      outcome: "done";
+      refName: string;
+      remote: string;
+      remoteRefName: string;
+      setUpstream: boolean;
+    };
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
@@ -746,13 +776,25 @@ export interface RefTarget {
 export interface OperationCheck {
   allowed: boolean;
   blockers: OperationBlocker[];
+  identicalUntrackedCount: number;
   preservedDirtyCount: number;
 }
 export interface DirtyOperationPath {
   path: GitPath;
+  replace?: UntrackedDifference | null;
   staged: boolean;
   unstaged: boolean;
   untracked: boolean;
+}
+export interface UntrackedDifference {
+  localOnlyLines?: number | null;
+  upstreamOnlyLines?: number | null;
+}
+export interface UntrackedOutcome {
+  backedUpCount: number;
+  backupDir?: string | null;
+  discardedCount?: number;
+  identicalCount: number;
 }
 export interface UpdatedRef {
   newOid: string;
@@ -1397,6 +1439,10 @@ export interface WorkspaceStatus {
    */
   complete: boolean;
   conflictCount: number;
+  /**
+   * Draft commit message from MERGE_MSG / SQUASH_MSG / COMMIT_EDITMSG when distinct from HEAD.
+   */
+  draftCommitMessage?: string | null;
   /**
    * @maxItems 2000
    */

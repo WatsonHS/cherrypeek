@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { _electron as electron } from "playwright";
+
+const root = resolve(import.meta.dirname, "../..");
+const require = createRequire(import.meta.url);
+const temp = await mkdtemp(join(tmpdir(), "commitscope-fetch-history-"));
+const upstream = join(temp, "upstream");
+const local = join(temp, "local");
+const git = (dir, ...args) => execFileSync("git", ["-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args], { encoding: "utf8" }).trim();
+let app;
+try {
+  await mkdir(upstream);
+  git(upstream, "init", "-q", "-b", "main");
+  for (let i = 0; i < 60; i++) git(upstream, "commit", "-q", "--allow-empty", "-m", `old ${i}`);
+  git(temp, "clone", "-q", upstream, local);
+  for (let i = 0; i < 20; i++) git(upstream, "commit", "-q", "--allow-empty", "-m", `new ${i}`);
+  const latest = git(upstream, "rev-parse", "HEAD");
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  app = await electron.launch({ executablePath: require("electron"), args: [resolve(root, "apps/desktop/dist/main/index.cjs"), `--repository=${local}`, `--user-data-dir=${join(temp, "profile")}`], env, chromiumSandbox: true });
+  const page = await app.firstWindow();
+  await page.setViewportSize({ width: 1250, height: 760 });
+  const list = page.locator('[aria-label="提交列表"] [role="listbox"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="preview-state"][data-state="ready"]'));
+  await page.getByTestId("scope-picker").click();
+  await page.getByTestId("scope-option-allBranches").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="scope-picker"]')?.getAttribute("aria-label")?.includes("全部分支"));
+  await page.getByTestId("update-fetch-menu").click();
+  await page.getByTestId("fetch-button").click();
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${oid}"]`), latest, { timeout: 20000 });
+  assert.equal(await list.evaluate(element => element.scrollTop), 0, "refresh at the tip should show the newest commit");
+  await list.evaluate(element => { element.scrollTop = 1200; });
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交列表"] [role="listbox"]').scrollTop > 1000);
+  await list.evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${oid}"]`), latest);
+  assert.equal(await list.evaluate(element => element.scrollTop), 0, "scrolling back up should reveal the fetched tip");
+  await list.evaluate(element => { element.scrollTop = 1200; });
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交列表"] [role="listbox"]').scrollTop > 1000);
+  const anchor = await list.evaluate(element => {
+    const top = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll('[data-testid="commit-row"]')].find(item => item.getBoundingClientRect().bottom > top);
+    return { oid: row.dataset.oid, offset: row.getBoundingClientRect().top - top };
+  });
+  for (let i = 0; i < 5; i++) git(upstream, "commit", "-q", "--allow-empty", "-m", `later ${i}`);
+  const later = git(upstream, "rev-parse", "HEAD");
+  await page.getByTestId("update-fetch-menu").click();
+  await page.getByTestId("fetch-button").click();
+  await page.waitForFunction(() => Number(document.querySelector('[aria-label="提交列表"] [role="listbox"]')?.dataset.loadedCount) === 85, null, { timeout: 20000 });
+  const after = await list.locator(`[data-testid="commit-row"][data-oid="${anchor.oid}"]`).evaluate((row, top) => row.getBoundingClientRect().top - top, await list.evaluate(element => element.getBoundingClientRect().top));
+  assert.ok(Math.abs(after - anchor.offset) <= 4, `refresh should retain a visible history anchor: ${anchor.offset} -> ${after}`);
+  await list.evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${oid}"]`), later);
+  await list.evaluate(element => { element.scrollTop = 1200; });
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交列表"] [role="listbox"]').scrollTop > 1000);
+  for (let i = 0; i < 205; i++) git(upstream, "commit", "-q", "--allow-empty", "-m", `many ${i}`);
+  const newest = git(upstream, "rev-parse", "HEAD");
+  await page.getByTestId("update-fetch-menu").click();
+  await page.getByTestId("fetch-button").click();
+  await page.waitForFunction(() => Number(document.querySelector('[aria-label="提交列表"] [role="listbox"]')?.dataset.loadedCount) === 200, null, { timeout: 20000 });
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${oid}"]`), newest);
+  assert.equal(await list.evaluate(element => element.scrollTop), 0, "an anchor outside the refreshed page should reset to the newest commit");
+  await list.evaluate(element => { element.scrollTop = 1000; });
+  await page.waitForFunction(() => document.querySelector('[aria-label="提交列表"] [role="listbox"]').scrollTop > 900);
+  await list.evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(oid => document.querySelector(`[data-testid="commit-row"][data-oid="${oid}"]`), newest);
+  assert.equal(git(local, "rev-parse", "HEAD"), git(local, "rev-parse", "refs/heads/main"));
+  assert.notEqual(git(local, "rev-parse", "HEAD"), latest, "fetch must not fast-forward local HEAD");
+  console.log("Fetch history Electron smoke passed: tip, retained and missing anchors, scrolling, and unchanged local HEAD.");
+} finally {
+  if (app) await app.close();
+  await rm(temp, { recursive: true, force: true });
+}

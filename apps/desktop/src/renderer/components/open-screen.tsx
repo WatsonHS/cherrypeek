@@ -49,7 +49,7 @@ export function OpenScreen({ preview, actions, recent }: { preview: RepositoryVi
       <section aria-label="打开仓库" className="flex flex-col gap-2.5 rounded-[14px] border border-line bg-panel p-4">
         <span className="text-[13px] font-semibold">或者输入仓库路径</span>
         <PathField actions={actions} disabled={loading} />
-        <span className="text-xs text-fg3">可以是仓库根目录或其中任意子目录；也支持 bare 仓库和 linked worktree。</span>
+        <span className="text-xs text-fg3">可以是仓库根目录或其中任意子目录；也支持 bare 仓库和 linked worktree，也可直接将仓库文件夹拖入窗口打开。</span>
       </section>
     </div>
   </main>;

@@ -238,7 +238,10 @@ body:has([data-slot="popover-content"][data-state="open"]) .window-toolbar {
   .topbar-scope-picker { max-width: clamp(110px, 16vw, 200px); min-width: 0; flex: 0 1 auto; }
   .topbar-worktree-meta,
   .topbar-action-label,
+  .topbar-push-label,
+  .topbar-push-copy,
   .topbar-activity-count { display: none; }
+  .topbar-publish-label { max-width: 58px; overflow: hidden; text-overflow: ellipsis; }
   .topbar-search-controls { flex: 0 1 214px; }
   .topbar-search-controls > label { min-width: 0; }
   .topbar-updates-label { max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

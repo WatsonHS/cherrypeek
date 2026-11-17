@@ -4,7 +4,7 @@ import type { ChangeStats, GitPath } from "../../../../../packages/protocol/src/
 import type { StatsBucket, StatsSelection } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { RepositorySessionResult } from "../../../../../packages/protocol/src/repository-session.js";
 import type { StatsCommitPage } from "../../../../../packages/protocol/src/generated/server-message.js";
-import { bucketLabel, compareText } from "../lib/stats-range.js";
+import { bucketEnd, bucketLabel, clipToRange, compareText } from "../lib/stats-range.js";
 import { crumbOf } from "../lib/stats-store.js";
 import type { ExclusionsState, StatsCrumb, StatsRequest, StatsSlot } from "../lib/stats-store.js";
 import { cn } from "../lib/utils.js";
@@ -63,8 +63,13 @@ function ChangeCards({ stats, request, prefix, exclusions, onPrefix, onLoadExclu
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
       <StatsCard title="增加 / 删除行" coverage={stats.coverage} hint={<AddDelLegend />}>
         <SignedBars label={`增加和删除行数，每${bucket === "tenMinutes" ? " 10 分钟" : bucket === "hour" ? "小时" : bucket === "day" ? "天" : bucket === "week" ? "周" : "月"}一柱，共增加 ${formatCount(totals.additions)} 行，删除 ${formatCount(totals.deletions)} 行`}
-          items={stats.buckets.map(item => ({ label: bucketLabel(item.startUnix, bucket), add: item.additions, del: item.deletions }))} />
-        <p className="m-0 text-xs text-fg3">行数相对第一父提交；merge 提交不计；二进制只计文件数。</p>
+          onRangeSelect={{ onZoom: actions.zoomTime, onFilter: actions.filterTime }}
+          items={stats.buckets.map((item, index) => {
+            const end = stats.buckets[index + 1]?.startUnix ?? bucketEnd(item.startUnix, bucket);
+            const clipped = clipToRange(item.startUnix, end, range);
+            return { label: bucketLabel(item.startUnix, bucket), add: item.additions, del: item.deletions, startUnix: clipped.startUnix, endUnix: clipped.endUnix };
+          })} />
+        <p className="m-0 text-xs text-fg3">行数相对第一父提交；merge 提交不计；二进制只计文件数；拖动柱状图可框选放大或在提交页查看。</p>
       </StatsCard>
       <NetGrowthCard stats={stats} bucket={bucket} />
     </div>
