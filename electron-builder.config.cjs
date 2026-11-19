@@ -7,6 +7,8 @@
 const { dirname, join } = require("node:path");
 
 const release = process.env.COMMITSCOPE_RELEASE === "1";
+const notarizeWithBuilder = release && process.env.COMMITSCOPE_NOTARIZE !== "0";
+const releaseTargets = process.env.COMMITSCOPE_NOTARIZE === "0" ? ["dir"] : ["dmg", "zip"];
 const electronDist = join(dirname(require.resolve("electron/package.json")), "dist");
 
 /** @type {import('electron-builder').Configuration} */
@@ -37,8 +39,8 @@ module.exports = {
     gatekeeperAssess: false,
     entitlements: "build/entitlements.mac.plist",
     entitlementsInherit: "build/entitlements.mac.plist",
-    notarize: true,
-    target: ["dmg", "zip"],
+    notarize: notarizeWithBuilder,
+    target: releaseTargets,
   } : {
     category: "public.app-category.developer-tools",
     identity: "-",

@@ -6,11 +6,13 @@
 
 1. Apple Developer Program 账号。
 2. **Developer ID Application** 证书装进登录钥匙串（Xcode → Settings → Accounts → Manage Certificates，或开发者网站生成后导入）。检查：`security find-identity -v -p codesigning` 能看到 `Developer ID Application: …`。
-3. 公证凭据存进钥匙串，二选一：
-   - App Store Connect API key（推荐，不依赖个人 Apple ID 密码）：`xcrun notarytool store-credentials <配置名> --key <AuthKey_XXXX.p8> --key-id <Key ID> --issuer <Issuer ID>`
-   - Apple ID 与 app 专用密码：`xcrun notarytool store-credentials <配置名> --apple-id <邮箱> --team-id <Team ID>`（按提示输入 app 专用密码）
+3. 公证凭据二选一：
+   - **直接复用已登录的 Xcode 账号（无需额外配置密码）**：只要 `Xcode → Settings → Accounts` 已登录拥有该团队权限的开发者账号，`pnpm release:mac` 会在未检测到 `notarytool` 配置时自动通过 `xcodebuild -exportArchive -allowProvisioningUpdates`（`destination=upload`）提交 Apple 公证并轮询 `stapler` 装订票据。
+   - **钥匙串 `notarytool` 配置（适合无图形界面的构建机）**：
+     - App Store Connect API key：`xcrun notarytool store-credentials cherrypeek --key <AuthKey_XXXX.p8> --key-id <Key ID> --issuer <Issuer ID>`
+     - Apple ID 与 app 专用密码：`xcrun notarytool store-credentials cherrypeek --apple-id <邮箱> --team-id <Team ID>`
 
-   之后只需要配置名；密钥和密码留在钥匙串里，不写进仓库、命令历史或环境变量文件。
+   密钥和密码留在钥匙串或 Xcode 会话里，不写进仓库、命令历史或环境变量文件。
 4. 安装 GitHub CLI 并登录：`gh auth login`。
 
 ## 每次发布
