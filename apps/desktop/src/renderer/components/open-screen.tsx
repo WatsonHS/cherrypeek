@@ -17,7 +17,7 @@ export function OpenScreen({ preview, actions, recent }: { preview: RepositoryVi
             <AppMark />
             <h1 className="m-0 text-[26px] font-semibold tracking-[-0.01em]">CherryPeek</h1>
           </div>
-          <p className="m-0 text-sm text-fg2">只读查看本地 Git 历史。浏览分支和 worktree 都不会 checkout。</p>
+          <p className="m-0 text-sm text-fg2">浏览本地 Git 历史、分支关系与统计分析。切换分支和 worktree 不会 checkout，基础收口操作仅在你点击时执行。</p>
         </div>
         <div className="flex gap-2">
           <Button size="lg" onClick={() => { void actions.choose(); }} disabled={loading}>
@@ -56,12 +56,13 @@ export function OpenScreen({ preview, actions, recent }: { preview: RepositoryVi
 }
 
 function AppMark(): React.JSX.Element {
-  return <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true" className="shrink-0">
-    <rect width="28" height="28" rx="8" fill="#1B1B19" />
-    <path d="M10 7v14" stroke="#8BA8FF" strokeWidth="2" strokeLinecap="round" fill="none" />
-    <path d="M10 17c0-4 8-3 8-7.5" stroke="#F0A15E" strokeWidth="2" strokeLinecap="round" fill="none" />
-    <circle cx="10" cy="9" r="2.4" fill="#8BA8FF" />
-    <circle cx="10" cy="20" r="2.4" fill="#8BA8FF" />
-    <circle cx="18" cy="9.5" r="2.4" fill="#F0A15E" />
+  return <svg width="32" height="32" viewBox="100 100 824 824" aria-hidden="true" data-testid="app-mark" className="shrink-0">
+    <rect x="108" y="108" width="808" height="808" rx="180" fill="#FBF4EC" stroke="#2B2A2E" strokeOpacity="0.12" strokeWidth="16" />
+    <path d="M392 232 L392 556" fill="none" stroke="#2B2A2E" strokeWidth="32" strokeLinecap="round" />
+    <path d="M392 324 C 470 356, 640 372, 664 472" fill="none" stroke="#2B2A2E" strokeWidth="32" strokeLinecap="round" />
+    <path d="M392 232 C 430 166, 512 148, 574 170 C 540 226, 464 256, 392 232 Z" fill="#3E9B57" />
+    <circle cx="392" cy="324" r="35" fill="#FBF4EC" stroke="#2B2A2E" strokeWidth="23" />
+    <circle cx="392" cy="700" r="144" fill="#E1253B" />
+    <circle cx="664" cy="596" r="124" fill="#E1253B" />
   </svg>;
 }

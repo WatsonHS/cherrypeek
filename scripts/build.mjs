@@ -21,6 +21,7 @@ await rm(dist, { recursive: true, force: true });
 await mkdir(resources, { recursive: true });
 await copyFile(resolve(root, `target/${binaryDir}/commitscope-daemon`), resolve(resources, "commitscope-daemon"));
 await chmod(resolve(resources, "commitscope-daemon"), 0o755);
+await copyFile(resolve(root, "docs/brand/icon/cherrypeek-256.png"), resolve(resources, "icon.png"));
 await buildRenderer({ configFile: resolve(desktop, "vite.config.ts") });
 await buildBundle({
   entryPoints: [resolve(desktop, "src/main/index.ts")],

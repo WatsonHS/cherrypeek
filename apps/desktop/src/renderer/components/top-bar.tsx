@@ -18,7 +18,7 @@ import { RepositoryUpdateControl } from "./repository-update-control.js";
 import { SyncAction, SyncTags } from "./branch-sync.js";
 import type { FastForwardMergeTarget } from "./fast-forward-merge-dialog.js";
 import type { OperationsActions } from "../lib/use-operations.js";
-import { refTip, syncRowModel, webRemote, webUrlLabel } from "../lib/operations.js";
+import { refTip, syncRowModel, webRemote, webUrlLabel, type DivergedSyncTarget } from "../lib/operations.js";
 import type { BranchStart } from "./create-branch-dialog.js";
 import type { ActivityStats, RefSnapshotDiff, RepositoryObservation, SearchIdentity } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { PageSwitch, type AppPage } from "./page-switch.js";
@@ -33,7 +33,7 @@ const HINT_CLASS = "flex h-7 max-w-[clamp(96px,14vw,200px)] items-center gap-1 r
 
 export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectCommit, onLoadNavigation, onLoadMergeStatus, onCancelMergeStatus,
   activityQuery, onSearchQueryChange, observation, refDiff, refDiffLoading, refDiffError,
-  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, onCreateBranch, onFastForwardMerge, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
+  onLoadRefDiff, onCancelRefDiff, onObserve, onOpenHandoff, onCreateBranch, onFastForwardMerge, onResolveDiverged, activityStats, activityLoading, activityError, onLoadActivity, onActivityAuthor,
   page, onPageChange, workspace, workspaceBranch, filesAvailable, pageSearch, history }: {
   preview: RepositoryView;
   actions: RepositoryActions;
@@ -56,6 +56,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
   onOpenHandoff(request: HandoffRequest): void;
   onCreateBranch(start: BranchStart): void;
   onFastForwardMerge?(target: FastForwardMergeTarget): void;
+  onResolveDiverged?(target: DivergedSyncTarget): void;
   activityStats: ActivityStats | null;
   activityLoading: boolean;
   activityError: string | null;
@@ -104,7 +105,7 @@ export function TopBar({ preview, actions, recent, onRefreshRecent, onSelectComm
     <PageSwitch page={page} onChange={onPageChange} workspace={workspace} workspaceBranch={workspaceBranch} filesAvailable={filesAvailable}
       behind={ops?.headBehind ? { branch: ops.headBehind.branch, count: ops.headBehind.behind, upstream: ops.headBehind.upstream } : null} />
     <ScopePicker dimmed={page === "workspace"} preview={preview} open={scopeOpen} onOpenChange={setScopeOpen} onChange={scope => actions.switchScope(scope)} onLoadNavigation={onLoadNavigation}
-      onOpenHandoff={onOpenHandoff} onCreateBranch={onCreateBranch} onFastForwardMerge={onFastForwardMerge} ops={ops}
+      onOpenHandoff={onOpenHandoff} onCreateBranch={onCreateBranch} onFastForwardMerge={onFastForwardMerge} onResolveDiverged={onResolveDiverged} ops={ops}
       onLoadMergeStatus={onLoadMergeStatus} onCancelMergeStatus={onCancelMergeStatus} onRefresh={actions.refresh} disabled={busy} />
     {repository.isShallow ? <Badge variant="warn">浅克隆</Badge> : null}
     <div className="min-w-0 flex-1 basis-0" />
@@ -217,6 +218,7 @@ function ShortcutGuide({ hasPageSearch }: { hasPageSearch: boolean }): React.JSX
   const altCmd = mac ? "⌥⌘" : "Ctrl+Alt+";
   const groups: { title: string; rows: [string, string][] }[] = [
     { title: "全局", rows: [
+      ["打开仓库", `${cmd}O`],
       ["快速跳转", `${cmd}K`],
       ["切换页面：提交 / 文件 / 工作区 / 统计", `${cmd}1 / 2 / 3 / 4`],
       ["后退 / 前进", `${cmd}[ / ]`],
@@ -392,7 +394,7 @@ function sameScope(left: RepositoryScope | undefined, right: RepositoryScope): b
   return false;
 }
 
-function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onCreateBranch, onFastForwardMerge, ops, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
+function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, onOpenHandoff, onCreateBranch, onFastForwardMerge, onResolveDiverged, ops, onLoadMergeStatus, onCancelMergeStatus, onRefresh, disabled, dimmed }: {
   preview: RepositoryView;
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -401,6 +403,7 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
   onOpenHandoff(request: HandoffRequest): void;
   onCreateBranch(start: BranchStart): void;
   onFastForwardMerge?(target: FastForwardMergeTarget): void;
+  onResolveDiverged?(target: DivergedSyncTarget): void;
   ops: OperationsActions | null;
   onLoadMergeStatus(names: string[]): void;
   onCancelMergeStatus(): Promise<void>;
@@ -592,6 +595,28 @@ function ScopePicker({ preview, open, onOpenChange, onChange, onLoadNavigation, 
                 {kind !== "tag" ? <ActionMenu label={`更多操作 ${shortName}`} menuLabel="分支操作" testId="branch-more"
                   triggerClassName="opacity-0 group-hover/ref:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
                   items={[
+                    ...(syncModel?.action === "diverged" && onResolveDiverged && ops && ops.view.syncs[ref.name]?.upstream ? [{
+                      key: "resolve-diverged",
+                      label: "同步 / 解决冲突…",
+                      disabled: ops.busy,
+                      onSelect: () => {
+                        const sync = ops.view.syncs[ref.name]!;
+                        const upstream = sync.upstream!;
+                        onOpenChange(false);
+                        onResolveDiverged({
+                          targetRef: ref.name,
+                          expectedTargetOid: sync.oid,
+                          sourceRef: upstream.refName,
+                          expectedSourceOid: upstream.oid,
+                          switchToTarget: false,
+                          canPushAfter: upstream.refName.startsWith("refs/remotes/"),
+                          defaultPushAfter: false,
+                          pushRemote: upstream.refName.startsWith("refs/remotes/")
+                            ? (upstream.refName.slice("refs/remotes/".length).split("/", 1)[0] ?? null)
+                            : null,
+                        });
+                      },
+                    }] : []),
                     ...(syncModel?.action === "push" && ops ? [{ key: "push", label: `推送到 ${syncModel.upstream}`, disabled: ops.busy, onSelect: () => { onOpenChange(false); void ops.pushBranch(ref.name); } }] : []),
                     ...(syncModel?.action === "noUpstream" && preferredRemote && ops ? [{ key: "publish", label: `发布到 ${preferredRemote}（设置上游）`, disabled: ops.busy, onSelect: () => { onOpenChange(false); void ops.pushBranch(ref.name, { remote: preferredRemote, setUpstream: true }); } }] : []),
                     ...(mergeTarget && onFastForwardMerge && ops ? [{

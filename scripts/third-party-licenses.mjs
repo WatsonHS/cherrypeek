@@ -20,14 +20,30 @@ function licenseTexts(directory) {
 const packages = [];
 
 // npm: production dependencies of the workspace (what the renderer and main bundles contain).
-const npm = JSON.parse(execFileSync("pnpm", ["licenses", "list", "--prod", "--json"], { cwd: root, encoding: "utf8", maxBuffer: 64 << 20 }));
-for (const [license, entries] of Object.entries(npm)) {
-  for (const entry of entries) {
-    for (const [index, version] of entry.versions.entries()) {
-      packages.push({ name: entry.name, version, license, source: "npm", texts: licenseTexts(entry.paths?.[index] ?? entry.paths?.[0]) });
+// Walk `pnpm -r list --prod` directly from local node_modules so pruned global pnpm store index files never break release builds.
+const seenNpm = new Set();
+function collectNpmDeps(deps) {
+  if (!deps || typeof deps !== "object") return;
+  for (const entry of Object.values(deps)) {
+    if (!entry || typeof entry !== "object") continue;
+    const { from, version, path: pkgPath, dependencies } = entry;
+    if (typeof version === "string" && !version.startsWith("link:") && typeof pkgPath === "string") {
+      const name = typeof from === "string" && from.length > 0 ? from : JSON.parse(readFileSync(join(pkgPath, "package.json"), "utf8")).name;
+      const key = `${name}@${version}`;
+      if (!seenNpm.has(key)) {
+        seenNpm.add(key);
+        const manifest = existsSync(join(pkgPath, "package.json")) ? JSON.parse(readFileSync(join(pkgPath, "package.json"), "utf8")) : {};
+        const declared = typeof manifest.license === "string"
+          ? manifest.license
+          : (manifest.license && typeof manifest.license === "object" && typeof manifest.license.type === "string" ? manifest.license.type : "UNKNOWN");
+        packages.push({ name, version, license: declared, source: "npm", texts: licenseTexts(pkgPath) });
+      }
     }
+    collectNpmDeps(dependencies);
   }
 }
+const workspaceList = JSON.parse(execFileSync("pnpm", ["-r", "list", "--prod", "--depth", "Infinity", "--json"], { cwd: root, encoding: "utf8", maxBuffer: 64 << 20 }));
+for (const project of workspaceList) collectNpmDeps(project.dependencies);
 // Electron is a build dependency but ships inside the app.
 const electronDir = dirname(execFileSync(process.execPath, ["-p", "require.resolve('electron/package.json')"], { cwd: root, encoding: "utf8" }).trim());
 const electron = JSON.parse(readFileSync(join(electronDir, "package.json"), "utf8"));

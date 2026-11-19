@@ -1,6 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, session, shell, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, session, shell, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from "electron";
 import { execFile } from "node:child_process";
-import { watch, readdirSync, readFileSync, statSync, writeFileSync, type FSWatcher } from "node:fs";
+import { existsSync, watch, readdirSync, readFileSync, statSync, writeFileSync, type FSWatcher } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { RepositoryObservationEvent } from "../../../../packages/protocol/src/repository-session.js";
 import type { RepositorySessionInfo } from "../../../../packages/protocol/src/generated/server-message.js";
@@ -19,6 +19,7 @@ const PRELOAD_ENTRY = resolve(__dirname, "../preload.cjs");
 const CORE_ENTRY = app.isPackaged
   ? resolve(process.resourcesPath, "commitscope-daemon")
   : resolve(APP_ROOT, "resources/commitscope-daemon");
+const DEV_ICON_ENTRY = resolve(APP_ROOT, "resources/icon.png");
 const APP_URL = pathToFileURL(RENDERER_ENTRY).href;
 const IPC_GET_STATUS = "commitscope:core:get-status";
 const IPC_STATUS_CHANGED = "commitscope:core:status-changed";
@@ -80,6 +81,7 @@ const IPC_OPERATION_FETCH = "commitscope:operations:fetch";
 const IPC_OPERATION_PUSH = "commitscope:operations:push";
 const IPC_OPERATION_CANCEL = "commitscope:operations:cancel";
 const IPC_BRANCH_SYNC = "commitscope:operations:branch-sync";
+const IPC_MERGE_PREVIEW = "commitscope:operations:preview-merge";
 const IPC_OPERATION_CHECK = "commitscope:operations:check";
 const IPC_OPERATION_RUN = "commitscope:operations:run";
 const IPC_REMOTE_PAGE_OPEN = "commitscope:remote:open-page";
@@ -96,7 +98,7 @@ const IPC_EVOLUTION_CHUNK = "commitscope:evolution:chunk";
 const IPC_EVOLUTION_CANCEL = "commitscope:evolution:cancel";
 const IPC_COPY_TEXT = "commitscope:clipboard:write-text";
 const IPC_OPEN_WORKSPACE_IN = "commitscope:workspace:open-in";
-const MAX_COPY_TEXT_LENGTH = 64 * 1024;
+const MAX_COPY_TEXT_LENGTH = 256 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
 let window: BrowserWindow | undefined;
 let core: CoreProcess | undefined;
@@ -494,6 +496,10 @@ function registerRepositorySessionIpc(): void {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.getBranchSync(params));
   });
+  ipcMain.handle(IPC_MERGE_PREVIEW, (event, params: unknown) => {
+    if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
+    return sessionResult(() => repositorySessions!.previewMerge(params));
+  });
   ipcMain.handle(IPC_OPERATION_CHECK, (event, operation: unknown) => {
     if (!isTrustedMainFrame(event)) throw new Error("Untrusted IPC sender");
     return sessionResult(() => repositorySessions!.checkOperation(operation));
@@ -827,6 +833,20 @@ app.on("session-created", ses => {
 });
 
 void app.whenReady().then(async () => {
+  if (process.platform === "darwin") {
+    const devIcon = !app.isPackaged && existsSync(DEV_ICON_ENTRY) ? DEV_ICON_ENTRY : undefined;
+    if (devIcon) {
+      const image = nativeImage.createFromPath(devIcon);
+      if (!image.isEmpty()) app.dock?.setIcon(image);
+    }
+    app.setAboutPanelOptions({
+      applicationName: "CherryPeek",
+      applicationVersion: app.getVersion(),
+      version: "",
+      copyright: "Copyright © 2026 Sheng Huang · MIT License",
+      ...(devIcon ? { iconPath: devIcon } : {}),
+    });
+  }
   installApplicationMenu();
   const mode = process.argv.find(arg => arg.startsWith("--smoke-mode="))?.split("=", 2)[1];
   const executable = mode === "missing-core" ? resolve(APP_ROOT, "resources/missing-core") : CORE_ENTRY;

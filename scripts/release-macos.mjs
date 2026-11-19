@@ -30,10 +30,14 @@ async function run(command, args, env = {}) {
 
 // Preconditions, checked before anything is built.
 if (process.platform !== "darwin" || process.arch !== "arm64") fail("第一版只发布 Apple 芯片版，请在 Apple 芯片的 Mac 上运行。");
-const profile = process.env.APPLE_KEYCHAIN_PROFILE;
-if (!profile) fail("没有设置 APPLE_KEYCHAIN_PROFILE。先用 `xcrun notarytool store-credentials <名字>` 保存公证凭据，再以 APPLE_KEYCHAIN_PROFILE=<名字> 运行。");
+const profile = process.env.APPLE_KEYCHAIN_PROFILE || "cherrypeek";
 const identities = output("security", ["find-identity", "-v", "-p", "codesigning"]);
 if (!/Developer ID Application/u.test(identities)) fail("钥匙串里没有 Developer ID Application 证书（security find-identity -v -p codesigning）。");
+try {
+  execFileSync("xcrun", ["notarytool", "history", "--keychain-profile", profile], { cwd: root, stdio: "pipe" });
+} catch {
+  fail(`钥匙串里找不到可用的公证配置 "${profile}"。请先运行一次：\n  xcrun notarytool store-credentials ${profile} --apple-id <Apple ID 邮箱> --team-id <Team ID>\n（按提示输入在 appleid.apple.com 生成的 App 专用密码，或改用 --key/--key-id/--issuer 保存 App Store Connect API Key），再重新执行 pnpm release:mac。`);
+}
 
 // The license list is part of the app; regenerate it, then require a clean tree so the release matches a commit.
 await run(process.execPath, ["scripts/third-party-licenses.mjs"]);

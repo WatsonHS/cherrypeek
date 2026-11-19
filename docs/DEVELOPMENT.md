@@ -4,7 +4,32 @@
 
 ## 开发进度
 
-2026-11-17 完成 **M7「审阅收口与推送」（`P7-01`–`P7-04`）** 全链路实现与端到端实窗验收（M8 仍待排期）：
+2026-11-20 发布前收口与 CherryPeek 0.1.0 品牌 / 发行准备：
+- 品牌图标与原生界面补齐：将欢迎页 `OpenScreen`（`apps/desktop/src/renderer/components/open-screen.tsx`）残留的旧版 CommitScope 蓝橙方块图标替换为定稿的 CherryPeek 矢量图标（`docs/brand/icon/cherrypeek.svg`），新增 `apps/desktop/public/icon.svg` 与 `index.html` 图标声明；`scripts/build.mjs` 同步复制 `cherrypeek-256.png` 至 `dist/resources/icon.png`，主进程（`apps/desktop/src/main/index.ts`）在 macOS 开发态设置 Dock 图标并补齐原生「关于 CherryPeek」面板信息；`ShortcutGuide` 补充 `⌘O` 打开仓库说明，移除未引用的早期 `placeholder-widgets.tsx`。
+- 打包脚本与发行文档同步：`scripts/package-macos.mjs` 清理历史 `CommitScope-*` 产物并补齐包元信息，`scripts/release-macos.mjs` 在构建前前置校验 `notarytool` 钥匙串凭据（默认配置名 `cherrypeek`），`scripts/third-party-licenses.mjs` 改为直接从本地 `pnpm -r list --prod` 解析依赖以免全局 pnpm store 索引裁剪阻断发布；同步更新 `docs/releases/v0.1.0.md`、`README.md` 与 `README.en.md`（纳入 M5–M8 安全收口、三栏轻量合并与批次审阅完整口径），重新生成 `build/icon.icns` 与 `THIRD_PARTY_LICENSES.md`。
+- 全套验证（本机 arm64）：`pnpm icon:mac`、`pnpm licenses:third-party`、`pnpm protocol:check`、`pnpm typecheck`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`（0 告警）、`cargo test --workspace --locked`（5 + 125 项及集成测试全过）、`pnpm test:renderer`、`pnpm test:protocol`、`pnpm test:pages`（55 项）、Electron 实窗冒烟（`test:smoke`、`test:smoke:pages`、`test:smoke:batch-review`、`m7-review-gate-smoke`、`m8-three-pane-merge-smoke`）以及 `pnpm package:mac` + `pnpm test:smoke:package` 全部通过（并复核 `output/playwright/p0-01-ready.png` 新欢迎页图标）。
+
+2026-11-18 高频提交批次追踪、细粒度时间筛选与交给 Agent 扩容改进：
+- 上次更新 / 自上次查看新增批次追踪与 `excludeTips` 拓扑过滤：`HistoryPage` 与 `OperationRun::Done`（快进更新、快进合入、合并同步）在后端流式测量完整新增总数与 `[minUnix, maxUnix]` 时间跨度（不写被查看仓库）；`SearchQuery` 支持可选 `excludeTips`（数量上限 2000，仅非空时以只读 Git `rev-list --not` 解析），统一驱动 `searchCommits`、`activityStats` 与统计页（`with_stats_rows`）。前端在更新回执、超首屏未读顶部提示条、分界线、筛选芯片条与统计页提供一键“筛选 / 查看统计 / 交给 Agent”。
+- 小时级与精确到时分筛选：提交页搜索加入近 1 / 3 / 6 / 12 小时预设及“按天 / 精确到时分（`datetime-local`）”模式，并新增实时条件芯片条 `ActiveSearchChips`；统计页同步加入 3 小时 / 12 小时预设与自定义精确到时分模式。
+- 交给 Agent 突破 200 条与 64 KiB 限制：`GetHandoffFactsParams` 支持可选 `rangeExcludeTips` / `rangeHeadTips` / `rangeOldestOid`，`getHandoffFacts` 返回全量 `HandoffRangeSummary`（精确总数、完整端点、前 80 与末 20 条代表性提交摘要）；剪贴板与 prompt 上限提升至 256 KiB，并支持多级收缩及提交详情任意非顶点位置“审阅从这里到最新”。
+- 验证（本机源码版）：新增 `tests/renderer/update-batch.test.mjs` 与 `tests/smoke/batch-review-smoke.mjs`（`pnpm test:smoke:batch-review`），扩展 Rust 单元测试与 `tests/renderer/{search-date,stats-store,handoff-prompt}.test.mjs`、`tests/pages/stats-git.test.mjs`。
+
+2026-11-18 基于 3 万+ 提交 / 9.34 GiB 真实仓库压测暴露瓶颈的专项性能优化：
+- 文件改动回填优化（`crates/daemon/src/{change_index.rs,metadata_index.rs}`）：通过 `git log --full-history -m --raw -z` 发现历史 `.gitattributes` 路径后按 `cat-file --batch-check=%(objectname)` 指纹分组复用 `--attr-source` 执行 `diff-tree --stdin`，合并提交非第一父路径改用纯 `--raw --no-renames` 批量比对，启用 `core.bigFileThreshold=2m` 控制超大文本对象 Myers diff 内存飙升，并在多 chunk 时受控并行 + `prepare_cached` 批量写入 SQLite。
+- 查询内存、全文匹配与多引用延迟优化（`crates/daemon/src/{search.rs,change_stats.rs,stats.rs,evolution.rs,details.rs}`）：`with_stats_rows` 与 `change_stats::collect` 取消全表排序临时 B-Tree 与未命中行全字段反序列化，按命中 OID 走主键查询 `commit_changes`；`searchCommits` 消息过滤零分配直接比对 SQLite UTF-8 切片及 ASCII+CJK 组合；`branchesContaining` 去除冗余 `--topo-order` / `read_commit_metadata` 并在完整历史上放开已有 commit-graph 读取。
+
+2026-11-18 修复历史列表右缘时间滑轨在顶部悬空与交互遮挡的问题：
+- 边界与全局进度对齐（`apps/desktop/src/renderer/lib/time-track.ts` / `apps/desktop/src/renderer/components/history-time-slider.tsx` / `apps/desktop/src/renderer/components/commit-list.tsx`）：新增 `timeTrackBounds`、`followProgressFor` 与 `viewportReadingSeconds`，滑轨上下界贴合会话已知最新/最早提交时刻（不再补当天 `24:00` 空白时段），不足一屏不可滚时隐藏滑轨；跟随列表时用行间/底部插值与累计进度驱动滑块从顶端 `0%` 平滑走到最底 `100%`（顶底严格贴边）。
+- 窄轨热区与标签错位：交互热区保持右缘 16px 窄轨，展开的 140px 日期标签与渐变底设为 `pointer-events-none`、不再拦截列表滚轮或点击，列表滚动立即解除悬停冻结，并为顶部半截日期与相邻标签错位避让。
+- 定向验证（本机源码版）：更新 `tests/renderer/time-track.test.mjs`（6 项）与 `tests/smoke/history-date-navigation-smoke.mjs`（覆盖凌晨 `01:06` 最新提交在 `scrollTop = 0` 与 `Home` 返回时滑块贴顶、移至左侧 40px 后列表正常滚轮滚动、月历/滑轨拖拽/键盘导航及只读快照），`pnpm typecheck`、`pnpm build`、`pnpm test:renderer`（235 项）、`node tests/smoke/history-date-navigation-smoke.mjs`、`pnpm test:smoke:history` 与 `git diff --check` 全部通过（并目视复核 `output/playwright/history-date-navigation/{collapsed,slider-hover}.png`）。
+
+2026-11-18 已提交 M7 及收尾改动（`a7eb488`），并完成 **M8「分叉同步与 JetBrains 式三栏轻量合并」（`P8-01`–`P8-03`）** 全链路实现与实窗验收：
+- 协议与后端（`crates/core` / `crates/daemon` / `apps/desktop/src/main`）：新增只读可取消查询 `previewMerge`（借助 `ReadOnlyGit::run_with_env` + 独立临时 `GIT_OBJECT_DIRECTORY` / `GIT_ALTERNATE_OBJECT_DIRECTORIES` 运行 `git merge-tree --write-tree -z`，被查看仓库零写入）以及 `CompleteMerge` 操作（支持干净分叉的 `MergeCommit` 与保留原 `GIT_AUTHOR_*` 的无冲突 `SingleCommitRebase`，以及通过临时 `GIT_INDEX_FILE` + `hash-object -w` + `commit-tree` + 原子 `read-tree -m -u` / `update-ref` 完成的冲突合并；无共同祖先、criss-cross、结构性/二进制冲突及超过 `10 文件 / 128 KiB / 512 KiB` 上限返回 `Unsupported`）。
+- 桌面端与三栏双边箭头视图：`RefusalDialog`（`update` / `push` / `mergeInto` 的分叉场景）与 `ScopePicker` 行菜单新增「同步 / 解决冲突…」，进入 `DivergedSyncDialog` 预演分叉同步；存在普通文本冲突时继续保留「交给 Agent…」为主入口，同时提供「顺手解决冲突…」打开全宽 `ThreePaneMergeView`（左本分支只读 ｜ 左 `»` / `×` 连接带 ｜ 中可编辑结果与块内微调 / `↺` 重置 ｜ 右 `«` / `×` 连接带 ｜ 右合入源只读，支持 `»` 后接 `«` 等双边点击按顺序拼入、词级差异高亮、三栏同步滚动与勾选完成后立即非强制推送）。中途按 `Esc`、取消或「交给 Agent…」退出零残留、无 `.git/MERGE_HEAD` 或 `rebase-merge` 中间态。
+- 全量验证（本机源码版）：新增 `tests/renderer/three-way-merge.test.mjs` 与 `pnpm test:smoke:m8`（`tests/smoke/m8-three-pane-merge-smoke.mjs`），连同 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`（0 告警）、`cargo test --workspace --locked`（5 + 116 + 12 = 133 项）、`pnpm protocol:check`、`pnpm typecheck`、`pnpm build`、`pnpm test:protocol`（63 项）、`pnpm test:renderer`（232 项）、`pnpm test:pages`（54 项）与全套 Electron smoke（`test:smoke`、`test:smoke:pages`、`test:smoke:update-current`、`test:smoke:operations`、`test:smoke:m7`、`test:smoke:m8`）及 `git diff --check` 全部通过。
+
+2026-11-17 完成 **M7「审阅收口与推送」（`P7-01`–`P7-04`）** 全链路实现与端到端实窗验收：
 - 协议与后端（`crates/core` / `crates/daemon` / `apps/desktop/src/main`）：新增可取消的 `pushRepository`（严格非强制推送与首次 `--set-upstream`、远端拒绝返回 `RemoteRejected`）、`DeleteBranch`（仅祖先合入且未在任何 worktree 检出）、`FastForwardMerge`、`WorkspaceStage` / `WorkspaceUnstage`（含 rename 双路径与 unborn `HEAD`、越界路径拦截）、`WorkspaceDiscard`、`WorkspaceCommit`（`--cleanup=whitespace` 保留 `#` 正文行）以及 `WorkspaceStatus.draftCommitMessage`（读取 `MERGE_MSG` / `SQUASH_MSG` / 异于 `HEAD` 的 `COMMIT_EDITMSG`）。
 - 桌面端与工作区收口关口：顶栏保留「更新 {分支}」，检出分支领先上游或无上游且有远端时并列「推送 ↑N / 发布分支」与取消控制；范围菜单、仓库弹层与 `⌘K` 同步接入推送、快进合入与直接删除已合入本地分支；工作区页接入「交给 Agent ▾」（只读审阅 / 整理提交）、单文件与全量暂存撤回、二次确认单文件丢弃与草稿自动载入（保留 hook 失败已输入说明并提示不用 `--no-verify`）。
 - 实窗与全套验证（本机源码版）：新增 `pnpm test:smoke:m7`（`tests/smoke/m7-review-gate-smoke.mjs`），连同 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（5 + 114 + 12 项）、`pnpm protocol:check`、`pnpm typecheck`、`pnpm build`、`pnpm test:protocol`（62 项）、`pnpm test:renderer`（226 项）、`pnpm test:pages`（53 项）与全部实窗 smoke（`test:smoke`、`test:smoke:pages`、`test:smoke:update-current`、`test:smoke:operations`、`test:smoke:m7`）全部通过。后续按 [路线图](ROADMAP.md) 待排期 M8（分叉同步与 JetBrains 式左-中-右三栏双边箭头零中间态轻量合并）。
@@ -133,9 +158,9 @@ P4-01 已交付首批查询和内存优化：十万提交 OID 搜索中位数约
 
 ## macOS 本机打包
 
-在当前架构的 Mac 上执行 `pnpm package:mac`，会先构建 release Rust 核心与桌面代码，再生成 `release/mac-arm64/CherryPeek.app` 和 `release/CherryPeek-0.1.0-arm64.dmg`（Apple Silicon）。只需要应用目录时可执行 `pnpm package:mac --dir`。打开 DMG 后将 CommitScope 拖到 Applications，或直接打开生成的 `.app`。
+在当前架构的 Mac 上执行 `pnpm package:mac`，会先构建 release Rust 核心与桌面代码，再生成 `release/mac-arm64/CherryPeek.app` 和 `release/CherryPeek-0.1.0-arm64.dmg`（Apple Silicon）。只需要应用目录时可执行 `pnpm package:mac --dir`。打开 DMG 后将 CherryPeek 拖到 Applications，或直接打开生成的 `.app`。
 
-运行应用只需兼容的系统 Git，不依赖 Node、pnpm、Rust 或项目源码。使用当前 PATH 查找 Git，找不到时尝试 `/usr/bin/git`；Git 必须支持 `--no-lazy-fetch`。本机包使用 ad-hoc 签名，尚未做公开分发的 Developer ID 签名与公证，也未验证 Intel 或干净系统安装。默认应用数据位于 `~/Library/Application Support/commitscope/`，其中 `repository-state/` 存放仓库缓存与查看记录。
+运行应用只需兼容的系统 Git，不依赖 Node、pnpm、Rust 或项目源码。使用当前 PATH 查找 Git，找不到时尝试 `/usr/bin/git`；Git 必须支持 `--no-lazy-fetch`。本机试用包（`pnpm package:mac`）使用 ad-hoc 签名；公开发布包使用 `pnpm release:mac` 完成 Developer ID 签名与 Apple 公证（见 [发布流程](RELEASE.md)）。打包版默认应用数据位于 `~/Library/Application Support/CherryPeek/`（源码直接启动时位于 `@commitscope/desktop/`），其中 `repository-state/` 存放仓库缓存与查看记录。
 
 打包后可运行 `pnpm test:smoke:package` 检查包内核心、系统 Git、真实提交加载与退出清理。具体配置、试用范围和证据见 [P4-02 本机打包记录](implementation/p4-02-macos-package.md)。
 
@@ -178,7 +203,10 @@ pnpm test:smoke:history
 pnpm test:smoke:fetch-history
 pnpm test:smoke:update-current
 pnpm test:smoke:operations
+pnpm test:smoke:m7
+pnpm test:smoke:m8
 pnpm test:smoke:stats
+pnpm test:smoke:batch-review
 pnpm test:smoke:virtual-history
 pnpm test:smoke:scope-navigation
 pnpm test:smoke:metadata-index
@@ -194,7 +222,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 `pnpm protocol:generate` 从 Rust 类型导出三份 schema 和 TypeScript，`protocol:check` 只校验产物一致性。`test:protocol` 覆盖真实 daemon、受控故障协议和慢 Git 子进程回收。Smoke 会启动并关闭真实 Electron 窗口，覆盖正常启动、失败状态、隔离与进程退出；本地截图写入已忽略的 `output/playwright/`。`test:repository` 自动生成临时真实 Git 仓库，完成独立字段对照、只读快照与 Electron 界面验证。性能实测见首屏基线；发布预算尚未验收。
 
-P5-06 的同名文件验证可运行 `pnpm test:pages --test-name-pattern=P5-06` 和 `pnpm test:smoke:update-current`。M5 / M6 / M7 daemon 对照已并入 `pnpm test:pages`（可用 `--test-name-pattern=M7` 定向运行），M7 审阅收口与推送全链路实窗验收命令为 `pnpm test:smoke:m7`（自动先构建再运行）。修改后端提交前运行 `cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm test:pages`、`pnpm test:protocol`；涉及索引再运行 `pnpm test:indexing`。`tests/benchmarks/` 的测量命令与目标目录规则见上述两份性能报告。
+P5-06 的同名文件验证可运行 `pnpm test:pages --test-name-pattern=P5-06` 和 `pnpm test:smoke:update-current`。M5 / M6 / M7 / M8 daemon 对照已并入 `pnpm test:pages`（可用 `--test-name-pattern=M8` 定向运行），M7 与 M8 实窗验收命令分别为 `pnpm test:smoke:m7` 与 `pnpm test:smoke:m8`（自动先构建再运行）。修改后端提交前运行 `cargo test --workspace --locked`、`pnpm protocol:check`、`pnpm test:pages`、`pnpm test:protocol`；涉及索引再运行 `pnpm test:indexing`。`tests/benchmarks/` 的测量命令与目标目录规则见上述两份性能报告。
 
 统计调度定向验证可运行 `pnpm test:pages --test-name-pattern='statistics survive|evolution pauses|generation replacement'`，默认构建 debug daemon；其中 SQLite 统计等待点仅存在于 debug 构建，不能用 release daemon 跑这一等待点测试。桌面 transport / 控制器回归已并入 `pnpm test:protocol`，修改 main 时另跑 `pnpm typecheck`。真实仓库性能使用 release 构建，命令和进程树口径见[统计调度测量](benchmarks/stats-scheduling.md)。
 
@@ -202,7 +230,9 @@ P5-06 的同名文件验证可运行 `pnpm test:pages --test-name-pattern=P5-06`
 
 `test:indexing` 使用真实 Git 对照 SQLite 的完整元数据与固定快照成员，并验证暂停 / 取消、强退续建、缓存故障、配额和只读边界；`test:smoke:metadata-index` 验证实际窗口中的索引状态与控制。直接运行 daemon 可用 `COMMITSCOPE_INDEX_QUOTA_BYTES` 调整每库配额，范围为 256 KiB 至 2 GiB，默认 2 GiB；该配额包含数据库与事务侧文件。暂停和取消保留已提交批次，重建只清理当前仓库的应用缓存。
 
-`test:search` 对照真实 Git fixture 验证完整消息、Unicode 大小写、身份组合、日期、OID、部分结果版本和双向分页；实际项目仓库试用通过显式 `pnpm test:search -- --real-repository` 运行。`test:smoke:metadata-search` 检查真实窗口中的搜索和筛选流程。大仓搜索延迟仍需后续测量，每页扫描当前已索引前缀。
+`test:search` 对照真实 Git fixture 验证完整消息、Unicode 大小写、身份组合、日期、OID、部分结果版本和双向分页；实际项目仓库试用通过显式 `pnpm test:search -- --real-repository` 运行。`test:smoke:metadata-search` 检查真实窗口中的搜索和筛选流程。只读查询经 `commit_path_changes(path, oid)` 索引、延迟摘要物化及会话级 `excludeTips` 缓存避免重扫未命中行与重复 `diff-tree`。
+
+统计与索引优化（2026-11-19 第二至四轮）另包含：`repository::discover_repository_probe` 合并多项 `rev-parse` 探测、非 shallow/grafted 仓库默认放行 commit-graph、`metadata_index` 采用 1024 批次先落库元数据再以 4096 批（ASCII 快速折叠）追平 `message_fts_rowid` 的无内容 FTS5 `trigram` 候选索引、根据本机物理内存与核心/性能核数自适应决定 `2..=12` worker、Git pack 缓存限额与 SQLite `cache_size`/`mmap_size`（保留 `WITHOUT ROWID` 与 `-l20000`）、搜索使用窄列扫描 + 主键延迟构造 `CommitSummary`、统计采用 CSR 整数图 DFS / 字符串驻留、按 OID 排序的 64 批流式 `commit_changes` 扫描与请求后堆内存归还；工作区读取（`workspace::read_status`）保持 `core.fsmonitor=false` 与 `--no-optional-locks` 只读边界不变，按暂存/未暂存侧跳过空侧 `diff --numstat`、未暂存侧固定 `--no-renames`、将污路径在 `256` 路径 / `16 KiB` 上限内直传 `-- <pathspecs>`（包含重命名源路径，超限回退）并与 `COMMIT_EDITMSG` 草稿复核并发执行；回归仍以原有 `cargo test`、`test:indexing`、`test:search`、`test:pages` 及独立 release 进程树测量脚本验证。
 
 `test:graph` 对照独立 Git 验证有效父关系、六列连接、跨页大小与检查点淘汰重放、浅克隆 / grafts / SHA-256、取消和只读边界；`test:smoke:history-graph` 验证真实图、分隔线桥接、搜索返回、虚拟窗口淘汰与缩放主题。宽图 fixture 生成与串行 release 测量命令见 [P2-01 基线](benchmarks/p2-01-history-graph-scroll.md)。
 

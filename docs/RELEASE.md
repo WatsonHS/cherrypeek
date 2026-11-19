@@ -22,10 +22,10 @@
 5. 构建并签名、公证：
 
    ```sh
-   APPLE_KEYCHAIN_PROFILE=<配置名> pnpm release:mac
+   APPLE_KEYCHAIN_PROFILE=cherrypeek pnpm release:mac
    ```
 
-   脚本依次：检查 Apple 芯片、证书与配置名；重新生成第三方许可证清单并要求工作区干净；构建、签名、公证应用（electron-builder 装订票据）；对 DMG 签名、公证并装订；用 `codesign --verify --deep --strict`、`stapler validate` 和 `spctl --assess` 按用户机器的方式检查应用与 DMG；写出 SHA-256。任一步失败即停止，不会产生“半签名”的发布物。
+   （若保存在钥匙串中的配置名就是 `cherrypeek`，也可省略环境变量直接运行 `pnpm release:mac`。）脚本依次：检查 Apple 芯片、证书与钥匙串公证凭据；重新生成第三方许可证清单并要求工作区干净；构建、签名、公证应用（electron-builder 装订票据）；对 DMG 签名、公证并装订；用 `codesign --verify --deep --strict`、`stapler validate` 和 `spctl --assess` 按用户机器的方式检查应用与 DMG；写出 SHA-256。任一步失败即停止，不会产生“半签名”的发布物。
 6. 打标签并上传（脚本最后会打印同样的命令）：
 
    ```sh
