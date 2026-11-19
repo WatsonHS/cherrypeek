@@ -619,11 +619,14 @@ function validRequestParams(method: string, params: unknown): boolean {
     (params.limit as number) >= 1 && (params.limit as number) <= 100) return true;
   if (method === "getActivityStats" && isRecord(params) && hasExactKeys(params, ["query"]) && isSearchQuery(params.query)) return true;
   if ((method === "observeRepository" || method === "diffRefSnapshots") && isRecord(params) && hasExactKeys(params, [])) return true;
-  if (method === "getHandoffFacts" && isRecord(params) && hasExactKeys(params, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"]) &&
+  if (method === "getHandoffFacts" && isRecord(params) && hasKeysWithOptional(params, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"], ["rangeExcludeTips", "rangeHeadTips", "rangeOldestOid"]) &&
     (params.branchRef === null || typeof params.branchRef === "string" && Buffer.byteLength(params.branchRef, "utf8") <= 16 * 1024 && !params.branchRef.includes("\0")) &&
     (params.operationWorktreeId === null || typeof params.operationWorktreeId === "string" && params.operationWorktreeId.length > 0 && Buffer.byteLength(params.operationWorktreeId, "utf8") <= 256) &&
     (params.staleWorktreeId === null || typeof params.staleWorktreeId === "string" && params.staleWorktreeId.length > 0 && Buffer.byteLength(params.staleWorktreeId, "utf8") <= 256) &&
-    (params.selectedOid === null || typeof params.selectedOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.selectedOid))) return true;
+    (params.selectedOid === null || typeof params.selectedOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.selectedOid)) &&
+    (params.rangeExcludeTips === undefined || Array.isArray(params.rangeExcludeTips) && params.rangeExcludeTips.length <= 2000 && params.rangeExcludeTips.every(validOid)) &&
+    (params.rangeHeadTips === undefined || Array.isArray(params.rangeHeadTips) && params.rangeHeadTips.length <= 2000 && params.rangeHeadTips.every(validOid)) &&
+    (params.rangeOldestOid === undefined || params.rangeOldestOid === null || validOid(params.rangeOldestOid))) return true;
   if (["getCommit", "branchesContaining"].includes(method) && isRecord(params) && hasExactKeys(params, ["oid"]) &&
     typeof params.oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(params.oid)) return true;
   if (["listChangedFiles", "readMergeCommits"].includes(method) && isRecord(params) &&
@@ -676,6 +679,7 @@ function validRequestParams(method: string, params: unknown): boolean {
       Buffer.byteLength(params.remote, "utf8") <= 256)) return true;
   if (method === "pushRepository") return validPushRepositoryParams(params);
   if (method === "getBranchSync") return validBranchSyncParams(params);
+  if (method === "previewMerge") return validPreviewMergeParams(params);
   if (method === "checkOperation" || method === "runOperation") return validOperationParams(params);
   if (method === "getActivityOverview" || method === "getNotableStats") return validStatsQueryParams(params);
   if (method === "getChangeStats") return validChangeStatsParams(params);
@@ -717,6 +721,30 @@ export function validPushRepositoryParams(params: unknown): boolean {
 export function validBranchSyncParams(params: unknown): boolean {
   return isRecord(params) && hasExactKeys(params, ["refNames"]) && Array.isArray(params.refNames) &&
     params.refNames.length >= 1 && params.refNames.length <= 50 && params.refNames.every(validRefName);
+}
+
+export function validPreviewMergeParams(params: unknown): boolean {
+  return isRecord(params) && hasExactKeys(params, ["expectedSourceOid", "expectedTargetOid", "sourceRef", "targetRef"]) &&
+    validLocalBranchRef(params.targetRef) && validBranchRef(params.sourceRef) &&
+    params.targetRef !== params.sourceRef && validOid(params.expectedTargetOid) && validOid(params.expectedSourceOid);
+}
+
+function validResolvedMergeFiles(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 10) return false;
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  for (const item of value) {
+    if (!isRecord(item) || !hasExactKeys(item, ["contents", "mode", "pathHex"]) ||
+      !validPathHex(item.pathHex) || seen.has(item.pathHex as string) ||
+      (item.mode !== "100644" && item.mode !== "100755") ||
+      typeof item.contents !== "string" || item.contents.includes("\0")) {
+      return false;
+    }
+    seen.add(item.pathHex as string);
+    totalBytes += Buffer.byteLength(item.contents, "utf8");
+    if (totalBytes > 512 * 1024) return false;
+  }
+  return true;
 }
 
 export function validOperationParams(params: unknown): boolean {
@@ -767,6 +795,25 @@ export function validRepositoryOperation(operation: Record<string, unknown>): bo
       typeof operation.message === "string" && operation.message.trim().length > 0 &&
       Buffer.byteLength(operation.message, "utf8") <= 65536 && !operation.message.includes("\0") &&
       (operation.expectedHeadOid === undefined || operation.expectedHeadOid === null || validOid(operation.expectedHeadOid));
+  }
+  if (operation.kind === "completeMerge") {
+    return hasKeysWithOptional(
+      operation,
+      ["expectedSourceOid", "expectedTargetOid", "kind", "message", "mode", "resolvedFiles", "sourceRef", "switchToTarget", "targetRef"],
+      ["expectedHeadOid"],
+    ) &&
+      validLocalBranchRef(operation.targetRef) &&
+      validBranchRef(operation.sourceRef) &&
+      operation.targetRef !== operation.sourceRef &&
+      validOid(operation.expectedTargetOid) &&
+      validOid(operation.expectedSourceOid) &&
+      (operation.expectedHeadOid === undefined || operation.expectedHeadOid === null || validOid(operation.expectedHeadOid)) &&
+      (operation.mode === "mergeCommit" || operation.mode === "singleCommitRebase") &&
+      typeof operation.message === "string" && operation.message.trim().length > 0 &&
+      Buffer.byteLength(operation.message, "utf8") <= 65536 && !operation.message.includes("\0") &&
+      typeof operation.switchToTarget === "boolean" &&
+      validResolvedMergeFiles(operation.resolvedFiles) &&
+      (operation.mode === "mergeCommit" || (operation.resolvedFiles as unknown[]).length === 0);
   }
   return false;
 }
@@ -842,7 +889,7 @@ function requestLaneFor(method: ClientRequestMessage["method"]): RequestLane {
 
 /** P5-02 / P5-03 and M6: ordinary session reads that can be cancelled and drained. `runOperation` is in OPERATION_METHODS. */
 const M5_M6_READ_METHODS = [
-  "getBranchSync", "checkOperation", "getActivityOverview", "getChangeStats", "getNotableStats", "getStatsCommits",
+  "getBranchSync", "previewMerge", "checkOperation", "getActivityOverview", "getChangeStats", "getNotableStats", "getStatsCommits",
   "getStatsExclusions", "setStatsExclusions", "estimateEvolution", "analyzeEvolution",
 ];
 
@@ -868,19 +915,21 @@ function validPathHex(value: unknown): boolean {
 }
 
 function isSearchQuery(value: unknown): boolean {
-  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"])) return false;
+  if (!isRecord(value) || !hasKeysWithOptional(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"], ["excludeTips"])) return false;
   const timestamp = (item: unknown) => item === null || Number.isSafeInteger(item);
   const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
     isRecord(identity) && hasExactKeys(identity, ["email", "name"]) &&
     typeof identity.name === "string" && Buffer.byteLength(identity.name, "utf8") <= 4096 &&
     typeof identity.email === "string" && Buffer.byteLength(identity.email, "utf8") <= 4096);
+  const excludeTips = value.excludeTips === undefined ||
+    Array.isArray(value.excludeTips) && value.excludeTips.length <= 2000 && value.excludeTips.every(validOid);
   return typeof value.message === "string" && Buffer.byteLength(value.message, "utf8") <= 4096 &&
     typeof value.caseSensitive === "boolean" && identities(value.authors) && identities(value.committers) &&
     typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
     (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
     (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
     typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128 &&
-    validSearchPathFilter(value.path);
+    validSearchPathFilter(value.path) && excludeTips;
 }
 
 function validSearchPathFilter(value: unknown): boolean {

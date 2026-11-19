@@ -32,12 +32,22 @@ export type HandoffOperationStep =
   | "workspaceStage"
   | "workspaceUnstage"
   | "workspaceDiscard"
-  | "workspaceCommit";
+  | "workspaceCommit"
+  | "completeMerge";
 
 export type HandoffTarget =
   | { kind: "commit"; oid: string }
   /** A batch of commits, newest first. `complete` is false when only the loaded part is listed. */
-  | { kind: "commits"; commits: HandoffRangeCommit[]; complete: boolean; reason: "new" | "toNewest" }
+  | {
+      kind: "commits";
+      commits: HandoffRangeCommit[];
+      complete: boolean;
+      reason: "new" | "toNewest";
+      excludeTips?: string[];
+      headTips?: string[];
+      oldestOid?: string;
+      totalCount?: number;
+    }
   | { kind: "branch"; ref: string }
   | { kind: "worktree"; id: string; stale: boolean }
   | { kind: "workspace"; repository: HandoffOperationRepository; status: WorkspaceStatus; focusPath?: GitPath | null; observedAtUnixMs: number }
@@ -108,12 +118,12 @@ export interface BuiltHandoffPrompt {
 export class HandoffPromptError extends Error {
   readonly code = "PROMPT_TOO_LARGE";
   constructor() {
-    super("必要的仓库标识超过 64 KiB，无法安全生成可复制的 prompt。");
+    super("必要的仓库标识超过 256 KiB，无法安全生成可复制的 prompt。");
     this.name = "HandoffPromptError";
   }
 }
 
-const MAX_PROMPT_BYTES = 64 * 1024;
+const MAX_PROMPT_BYTES = 256 * 1024;
 const MAX_TITLE_CHARS = 200;
 
 export const HANDOFF_SCENARIO_TITLES: Record<HandoffScenario, string> = {
@@ -198,7 +208,8 @@ export function handoffRequestKey(request: HandoffRequest | null): string {
   if (!request) return "none";
   const { target } = request;
   const subject = target.kind === "commit" ? target.oid
-    : target.kind === "commits" ? `${target.commits[0]?.oid ?? ""}..${target.commits.at(-1)?.oid ?? ""}:${target.commits.length}`
+    : target.kind === "commits"
+      ? `${target.commits[0]?.oid ?? ""}..${target.commits.at(-1)?.oid ?? ""}:${target.commits.length}:${target.totalCount ?? ""}:${target.oldestOid ?? ""}:${target.excludeTips?.join(",") ?? ""}:${target.headTips?.join(",") ?? ""}`
       : target.kind === "branch" ? target.ref
         : target.kind === "workspace" ? `${target.observedAtUnixMs}:${target.focusPath?.rawHex ?? "all"}:${target.status.entries.length}:${target.status.headOid ?? ""}`
           : target.kind === "operation" ? `${target.operation}@${target.failedAtUnixMs}:${"subject" in target ? target.subject.branch?.refName ?? "" : ""}` : `${target.id}:${target.stale ? "stale" : "available"}`;
@@ -209,8 +220,8 @@ export function handoffRequestKey(request: HandoffRequest | null): string {
 export function handoffFactsTarget(target: HandoffTarget): { kind: "commit"; oid: string } | Exclude<HandoffTarget, { kind: "commits" | "operation" | "workspace" }> | null {
   if (target.kind === "operation" || target.kind === "workspace") return null;
   if (target.kind !== "commits") return target;
-  const newest = target.commits[0];
-  return newest ? { kind: "commit", oid: newest.oid } : null;
+  const newestOid = target.commits[0]?.oid ?? target.headTips?.[0];
+  return newestOid ? { kind: "commit", oid: newestOid } : null;
 }
 
 /**
@@ -228,13 +239,14 @@ export function cleanupAvailable(facts: HandoffPromptFacts | null): boolean {
 }
 
 /** One sentence for the dialog: what the agent will be asked to do. */
-export function handoffSummary(request: HandoffRequest): string {
+export function handoffSummary(request: HandoffRequest, facts?: HandoffPromptFacts | null): string {
   const { scenario, target } = request;
   switch (scenario) {
     case "review-range": {
-      const count = target.kind === "commits" ? target.commits.length : 0;
+      const exactCount = facts?.rangeSummary?.totalCount;
+      const count = exactCount ?? (target.kind === "commits" ? (target.totalCount ?? target.commits.length) : 0);
       const which = target.kind === "commits" && target.reason === "new" ? "上次查看后新增的" : "从这里到最新的";
-      const more = target.kind === "commits" && !target.complete ? "（至少）" : "";
+      const more = exactCount === undefined && target.kind === "commits" && !target.complete && target.totalCount === undefined ? "（至少）" : "";
       return `让 Agent 审阅${which}${more} ${count} 个提交：先概括这批改动，再按严重程度列出问题和修改建议。只读，不改代码。`;
     }
     case "review": return "让 Agent 审阅这个提交，列出问题和修改建议。只读，不改代码。";
@@ -265,7 +277,16 @@ export function buildHandoffPrompt(
   const extra = note.trim();
   // The note is the user's own text, so it may sit in the instructions.
   const body = extra ? `${promptBody(facts, request)}\n\n补充说明（来自用户）：\n${extra}` : promptBody(facts, request);
-  const limits = { branchCommits: 50, changedFiles: 50, mergeCommits: 50, overlapPaths: 20, rangeCommits: 200, dirtyPaths: 50 };
+  const limits = {
+    branchCommits: 50,
+    changedFiles: 50,
+    mergeCommits: 50,
+    overlapPaths: 20,
+    rangeCommits: 200,
+    tailCommits: 20,
+    excludeTips: 50,
+    dirtyPaths: 50,
+  };
   let shortened = false;
 
   while (true) {
@@ -282,13 +303,18 @@ export function buildHandoffPrompt(
     ].join("\n");
     if (utf8Length(text) <= MAX_PROMPT_BYTES) return { text, marker, referenceData, shortened };
     shortened = true;
-    if (limits.rangeCommits > 50) limits.rangeCommits = 50;
+    if (limits.rangeCommits > 80) limits.rangeCommits = 80;
+    else if (limits.rangeCommits > 30) limits.rangeCommits = 30;
+    else if (limits.tailCommits > 10) limits.tailCommits = 10;
     else if (limits.changedFiles > 0) limits.changedFiles = limits.changedFiles > 10 ? 10 : 0;
     else if (limits.branchCommits > 0) limits.branchCommits = limits.branchCommits > 10 ? 10 : 0;
     else if (limits.mergeCommits > 0) limits.mergeCommits = limits.mergeCommits > 10 ? 10 : 0;
     else if (limits.overlapPaths > 0) limits.overlapPaths = 0;
     else if (limits.dirtyPaths > 0) limits.dirtyPaths = limits.dirtyPaths > 10 ? 10 : 0;
     else if (limits.rangeCommits > 10) limits.rangeCommits = 10;
+    else if (limits.tailCommits > 0) limits.tailCommits = 0;
+    else if (limits.rangeCommits > 0) limits.rangeCommits = 0;
+    else if (limits.excludeTips > 10) limits.excludeTips = 10;
     else throw new HandoffPromptError();
   }
 }
@@ -313,6 +339,22 @@ function promptBody(facts: HandoffPromptFacts | null, request: HandoffRequest): 
 
   switch (request.scenario) {
     case "review-range": {
+      const summary = facts?.rangeSummary ?? null;
+      if (summary) {
+        const shown = summary.headCommits.length + summary.tailCommits.length;
+        const count = summary.totalCount;
+        const rangeHint = summary.excludeTips.length > 0
+          ? "从参考数据 headTips 可达、但 excludeTips 不可达的全部提交"
+          : "从最新端点 newest 可达、但最早端点 oldest 的父提交不可达的全部提交";
+        return [
+          "请审阅 R1 中的一批提交。参考数据 RANGE 提供了完整范围边界（headTips / excludeTips / newest / oldest）以及按从新到旧排列的代表性提交摘要（K1 最新）。只读，不修改代码、提交或分支。",
+          count > shown
+            ? `这批精确共 ${count} 个提交（参考数据已列出首尾代表性提交与精确边界）；请在本地只读运行 git log / git diff --stat 检查${rangeHint}。`
+            : `这批共 ${count} 个提交（已全部列出）。`,
+          "先用几句话概括这批改动整体在做什么；再按严重程度列出正确性问题、遗漏的边界、风险和可疑改动，每条标明对应提交的完整 OID 和文件位置，给出修改建议但不要直接修改。后面的提交改掉了前面的问题时，以最新结果为准，不重复报告。",
+          "CherryPeek 的观察时间和本地引用快照见参考数据；W1 只是 CherryPeek 打开的目录，不代表这些提交只属于某个分支。",
+        ].join("\n\n");
+      }
       const range = request.target.kind === "commits" ? request.target : null;
       const count = range?.commits.length ?? 0;
       return [
@@ -396,22 +438,54 @@ const RECORDS_FOR: Record<HandoffScenario, string[]> = {
 
 function referenceRecords(
   facts: HandoffPromptFacts | null,
-  limits: { branchCommits: number; changedFiles: number; mergeCommits: number; overlapPaths: number; rangeCommits: number; dirtyPaths: number },
+  limits: {
+    branchCommits: number;
+    changedFiles: number;
+    mergeCommits: number;
+    overlapPaths: number;
+    rangeCommits: number;
+    tailCommits: number;
+    excludeTips: number;
+    dirtyPaths: number;
+  },
   request: HandoffRequest,
 ): Record<string, unknown> {
   if (request.target.kind === "operation") return operationRecords(request.target, limits);
   if (request.target.kind === "workspace") return workspaceRecords(request.target, limits);
   const all = allReferenceRecords(facts, limits);
-  if (request.target.kind === "commits" && request.target.commits.length) {
-    const { commits, complete } = request.target;
-    all.RANGE = {
-      newest: commits[0]!.oid,
-      oldest: commits.at(-1)!.oid,
-      commits: commits.slice(0, limits.rangeCommits).map((commit, index) => ({ id: `K${index + 1}`, oid: commit.oid, title: boundedTitle(commit.summary) })),
-      count: commits.length,
-      complete: complete && commits.length <= limits.rangeCommits,
-      truncated: !complete || commits.length > limits.rangeCommits,
-    };
+  if (request.target.kind === "commits") {
+    const summary = facts?.rangeSummary ?? null;
+    if (summary) {
+      const headCommits = summary.headCommits.slice(0, limits.rangeCommits);
+      const tailCommits = summary.tailCommits.slice(0, limits.tailCommits);
+      const excludeTips = summary.excludeTips.slice(0, limits.excludeTips);
+      all.RANGE = {
+        newest: summary.newestOid,
+        oldest: summary.oldestOid,
+        headTips: summary.headTips,
+        excludeTips,
+        excludeTipsCount: summary.excludeTips.length,
+        excludeTipsTruncated: summary.excludeTips.length > excludeTips.length,
+        commits: headCommits.map((commit, index) => ({ id: `K${index + 1}`, oid: commit.oid, title: boundedTitle(commit.summary) })),
+        ...(tailCommits.length > 0 ? {
+          tailCommits: tailCommits.map(commit => ({ oid: commit.oid, title: boundedTitle(commit.summary) })),
+        } : {}),
+        totalCount: summary.totalCount,
+        count: summary.totalCount,
+        complete: summary.totalCount <= headCommits.length + tailCommits.length,
+        truncated: summary.totalCount > headCommits.length + tailCommits.length,
+      };
+    } else if (request.target.commits.length) {
+      const { commits, complete } = request.target;
+      all.RANGE = {
+        newest: commits[0]!.oid,
+        oldest: commits.at(-1)!.oid,
+        commits: commits.slice(0, limits.rangeCommits).map((commit, index) => ({ id: `K${index + 1}`, oid: commit.oid, title: boundedTitle(commit.summary) })),
+        count: commits.length,
+        complete: complete && commits.length <= limits.rangeCommits,
+        truncated: !complete || commits.length > limits.rangeCommits,
+      };
+    }
   }
   if (!facts && !all.RANGE) return all;
   const kept: Record<string, unknown> = {};
@@ -583,6 +657,7 @@ const STEP_TEXT: Record<HandoffOperationStep, string> = {
   workspaceUnstage: "取消暂存工作区改动",
   workspaceDiscard: "丢弃单个工作区改动",
   workspaceCommit: "提交已暂存的工作区改动",
+  completeMerge: "同步分叉分支 / 解决合并冲突",
 };
 
 /** Bodies of templates 7, 8, 9 and 12 (operation variant). Repository text stays in the data block; the body uses ids and counts only. */

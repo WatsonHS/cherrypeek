@@ -75,7 +75,8 @@ const MAX_WINDOW = 1_800;
 
 export function hasSearchCriteria(query: SearchQuery): boolean {
   return query.message !== "" || query.authors.length > 0 || query.committers.length > 0 || query.oidPrefix !== "" ||
-    query.fromTimestamp !== null || query.toTimestamp !== null || query.timeField === "author" || query.path !== null;
+    query.fromTimestamp !== null || query.toTimestamp !== null || query.timeField === "author" || query.path !== null ||
+    (query.excludeTips?.length ?? 0) > 0;
 }
 
 export function searchQueryKey(query: SearchQuery): string {

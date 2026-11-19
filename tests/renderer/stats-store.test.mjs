@@ -295,3 +295,32 @@ test("zoomRange refines bucket granularity and clearZoom / setPreset restores", 
   assert.equal(store.getView().bucket, "day");
   store.dispose();
 });
+
+test("3h, 12h presets and custom precise datetime ranges select fine-grained buckets", async () => {
+  const { api, store, binding } = setup();
+  store.bind(binding());
+  await tick();
+  api.resolve("activity", ok(overview("thirty days")));
+  await tick();
+
+  store.setPreset("3h");
+  await tick();
+  assert.equal(store.getView().bucket, "tenMinutes");
+  assert.equal(api.calls.at(-1).params.range.endUnix - api.calls.at(-1).params.range.startUnix, 3 * 3_600);
+  api.resolve("activity", ok(overview("three hours")), 0);
+  await tick();
+
+  store.setPreset("12h");
+  await tick();
+  assert.equal(store.getView().bucket, "hour");
+  assert.equal(api.calls.at(-1).params.range.endUnix - api.calls.at(-1).params.range.startUnix, 12 * 3_600);
+  api.resolve("activity", ok(overview("twelve hours")), 0);
+  await tick();
+
+  store.setPreset("custom");
+  store.setCustom({ from: "2026-06-15", to: "2026-06-15", precise: true, fromDateTime: "2026-06-15T09:15", toDateTime: "2026-06-15T11:45" });
+  await tick();
+  assert.equal(store.getView().bucket, "tenMinutes");
+  assert.equal(api.calls.at(-1).params.range.endUnix - api.calls.at(-1).params.range.startUnix, (2 * 60 + 31) * 60);
+  store.dispose();
+});

@@ -34,6 +34,9 @@ const STATUS_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
 const NUMSTAT_OUTPUT_LIMIT: usize = 32 * 1024 * 1024;
 /// Above this many tracked changes the per-file line counts are skipped (reported as null).
 const NUMSTAT_PATH_LIMIT: usize = 5_000;
+/// Cap argv pathspec fan-out so status numstat avoids OS command-line limits across platforms.
+const NUMSTAT_ARGV_PATH_LIMIT: usize = 256;
+const NUMSTAT_ARGV_BYTE_LIMIT: usize = 16 * 1024;
 const FILE_READ_LIMIT: u64 = 1024 * 1024;
 const FILE_TEXT_LIMIT: usize = 256 * 1024;
 const GITLINK_MODE: &str = "160000";
@@ -301,6 +304,8 @@ fn run_numstat(
     if cached {
         args.push(string_arg("--cached"));
         args.push(string_arg("--find-renames"));
+    } else {
+        args.push(string_arg("--no-renames"));
     }
     args.extend(diff_flags());
     args.extend([string_arg("--numstat"), string_arg("-z"), string_arg("--")]);
@@ -319,6 +324,75 @@ fn run_numstat(
         return Err(git_output_error(&output.stderr));
     }
     Ok(parse_numstat_z(&output.stdout))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NumstatPlan {
+    Skip,
+    Run(Vec<OsString>),
+}
+
+fn raw_bytes_to_os_string(bytes: &[u8]) -> Option<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(std::ffi::OsStr::from_bytes(bytes).to_os_string())
+    }
+    #[cfg(windows)]
+    {
+        std::str::from_utf8(bytes).ok().map(OsString::from)
+    }
+}
+
+fn build_side_numstat_plan(mut raw_paths: Vec<&[u8]>) -> NumstatPlan {
+    if raw_paths.is_empty() {
+        return NumstatPlan::Skip;
+    }
+    raw_paths.sort_unstable();
+    raw_paths.dedup();
+    let total_bytes: usize = raw_paths.iter().map(|path| path.len()).sum();
+    if raw_paths.len() > NUMSTAT_ARGV_PATH_LIMIT || total_bytes > NUMSTAT_ARGV_BYTE_LIMIT {
+        // Fall back to an unscoped diff when argv bounds are tight; `--no-renames` / dirty index still apply.
+        return NumstatPlan::Run(Vec::new());
+    }
+    match raw_paths
+        .into_iter()
+        .map(raw_bytes_to_os_string)
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(specs) => NumstatPlan::Run(specs),
+        None => NumstatPlan::Run(Vec::new()),
+    }
+}
+
+fn build_numstat_plans(records: &[StatusRecord]) -> (NumstatPlan, NumstatPlan) {
+    let tracked_changes = records
+        .iter()
+        .filter(|record| !record.untracked && record.conflict.is_none())
+        .count();
+    if tracked_changes == 0 || tracked_changes > NUMSTAT_PATH_LIMIT {
+        return (NumstatPlan::Skip, NumstatPlan::Skip);
+    }
+    let mut staged_raw = Vec::new();
+    let mut unstaged_raw = Vec::new();
+    for record in records
+        .iter()
+        .filter(|record| !record.untracked && record.conflict.is_none())
+    {
+        if record.staged.is_some() {
+            staged_raw.push(record.path.as_slice());
+            if let Some(original) = record.original_path.as_deref() {
+                staged_raw.push(original);
+            }
+        }
+        if record.unstaged.is_some() {
+            unstaged_raw.push(record.path.as_slice());
+        }
+    }
+    (
+        build_side_numstat_plan(staged_raw),
+        build_side_numstat_plan(unstaged_raw),
+    )
 }
 
 fn change_status(letter: u8) -> ChangedFileStatus {
@@ -399,19 +473,48 @@ fn read_status_at(
 ) -> WorkspaceResult<WorkspaceStatus> {
     let git = user_git(executable)?;
     let status = run_status(&git, tree, &[], cancelled, deadline)?;
-    let tracked_changes = status
-        .records
-        .iter()
-        .filter(|record| !record.untracked && record.conflict.is_none())
-        .count();
-    let (staged_counts, unstaged_counts) =
-        if tracked_changes > 0 && tracked_changes <= NUMSTAT_PATH_LIMIT {
-            (
-                run_numstat(&git, tree, true, &[], cancelled, deadline)?,
-                run_numstat(&git, tree, false, &[], cancelled, deadline)?,
-            )
-        } else {
-            (HashMap::new(), HashMap::new())
+    let (staged_plan, unstaged_plan) = build_numstat_plans(&status.records);
+    let head_oid = status.head_oid.as_deref();
+    let (staged_counts, unstaged_counts, draft_commit_message) =
+        match (&staged_plan, &unstaged_plan) {
+            (NumstatPlan::Skip, NumstatPlan::Skip) => (
+                HashMap::new(),
+                HashMap::new(),
+                read_draft_commit_message(executable, tree, head_oid, cancelled, deadline),
+            ),
+            _ => std::thread::scope(|scope| -> WorkspaceResult<_> {
+                let draft_handle = scope.spawn(|| {
+                    read_draft_commit_message(executable, tree, head_oid, cancelled, deadline)
+                });
+                let (staged_res, unstaged_res) = match (&staged_plan, &unstaged_plan) {
+                    (NumstatPlan::Run(staged_specs), NumstatPlan::Run(unstaged_specs)) => {
+                        let staged_handle = scope.spawn(|| {
+                            run_numstat(&git, tree, true, staged_specs, cancelled, deadline)
+                        });
+                        let unstaged_res =
+                            run_numstat(&git, tree, false, unstaged_specs, cancelled, deadline);
+                        let staged_res = staged_handle.join().unwrap_or_else(|_| {
+                            Err(detail_error(
+                                ErrorCode::GitError,
+                                "Workspace numstat worker failed",
+                                false,
+                            ))
+                        });
+                        (staged_res, unstaged_res)
+                    }
+                    (NumstatPlan::Run(staged_specs), NumstatPlan::Skip) => (
+                        run_numstat(&git, tree, true, staged_specs, cancelled, deadline),
+                        Ok(HashMap::new()),
+                    ),
+                    (NumstatPlan::Skip, NumstatPlan::Run(unstaged_specs)) => (
+                        Ok(HashMap::new()),
+                        run_numstat(&git, tree, false, unstaged_specs, cancelled, deadline),
+                    ),
+                    (NumstatPlan::Skip, NumstatPlan::Skip) => unreachable!(),
+                };
+                let draft_commit_message = draft_handle.join().unwrap_or(None);
+                Ok((staged_res?, unstaged_res?, draft_commit_message))
+            })?,
         };
     let mut records = status.records;
     records.sort_by(|left, right| left.path.cmp(&right.path));
@@ -459,13 +562,6 @@ fn read_status_at(
         entries.push(entry);
     }
     let complete = entries.len() == listed;
-    let draft_commit_message = read_draft_commit_message(
-        executable,
-        tree,
-        status.head_oid.as_deref(),
-        cancelled,
-        deadline,
-    );
     Ok(WorkspaceStatus {
         observed_at_unix_ms: now_unix_ms(),
         head_reference: status
@@ -1409,6 +1505,145 @@ mod tests {
         assert_eq!(
             status(&tree, 2000).draft_commit_message.as_deref(),
             Some("Merge branch 'topic'")
+        );
+    }
+
+    #[test]
+    fn status_numstat_handles_single_side_and_renamed_with_unstaged_edits() {
+        let root = temp_root("numstat-sides");
+        let _cleanup = TestDir(root.clone());
+        run(&root, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(
+            root.join("c.txt"),
+            (1..=20)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "--quiet", "-m", "root"]);
+        let tree = Worktree {
+            git_dir: root.join(".git"),
+            root: root.clone(),
+            oid_length: 40,
+        };
+
+        // Unstaged-only edit skips cached numstat and counts exact lines.
+        std::fs::write(root.join("a.txt"), "one\ntwo-edited\nthree\n").unwrap();
+        let unstaged_only = status(&tree, 2000);
+        let entry = unstaged_only.entries.first().unwrap();
+        assert!(entry.staged.is_none());
+        let unstaged = entry.unstaged.as_ref().unwrap();
+        assert_eq!((unstaged.additions, unstaged.deletions), (Some(2), Some(1)));
+
+        // Staged-only edit skips worktree numstat and counts exact lines.
+        run(&root, &["add", "a.txt"]);
+        let staged_only = status(&tree, 2000);
+        let entry = staged_only.entries.first().unwrap();
+        assert!(entry.unstaged.is_none());
+        let staged = entry.staged.as_ref().unwrap();
+        assert_eq!((staged.additions, staged.deletions), (Some(2), Some(1)));
+
+        // Staged rename + unstaged modification + pending draft message concurrently.
+        run(&root, &["commit", "--quiet", "-m", "baseline"]);
+        run(&root, &["mv", "c.txt", "d.txt"]);
+        let mut edited: String = (1..=20).map(|line| format!("line {line}\n")).collect();
+        edited.push_str("line 21\n");
+        std::fs::write(root.join("d.txt"), edited).unwrap();
+        std::fs::write(
+            tree.git_dir.join("COMMIT_EDITMSG"),
+            "feat: draft rename\n# comment\n",
+        )
+        .unwrap();
+        let both = status(&tree, 2000);
+        assert_eq!(both.entries.len(), 1);
+        let d = &both.entries[0];
+        assert_eq!(d.original_path.as_ref().unwrap().display, "c.txt");
+        let staged = d.staged.as_ref().unwrap();
+        assert_eq!(staged.status, ChangedFileStatus::Renamed);
+        assert_eq!((staged.additions, staged.deletions), (Some(0), Some(0)));
+        let unstaged = d.unstaged.as_ref().unwrap();
+        assert_eq!(unstaged.status, ChangedFileStatus::Modified);
+        assert_eq!((unstaged.additions, unstaged.deletions), (Some(1), Some(0)));
+        assert_eq!(
+            both.draft_commit_message.as_deref(),
+            Some("feat: draft rename")
+        );
+    }
+
+    #[test]
+    fn numstat_plan_bounds_argv_and_skips_clean_sides() {
+        let ignored_only = vec![
+            StatusRecord {
+                path: b"new.txt".to_vec(),
+                untracked: true,
+                ..StatusRecord::default()
+            },
+            StatusRecord {
+                path: b"conflict.txt".to_vec(),
+                conflict: Some(WorkspaceConflict::BothModified),
+                ..StatusRecord::default()
+            },
+        ];
+        assert_eq!(
+            build_numstat_plans(&ignored_only),
+            (NumstatPlan::Skip, NumstatPlan::Skip)
+        );
+
+        let over_total_limit: Vec<StatusRecord> = (0..=NUMSTAT_PATH_LIMIT)
+            .map(|index| StatusRecord {
+                path: format!("f-{index}.txt").into_bytes(),
+                unstaged: Some(b'M'),
+                ..StatusRecord::default()
+            })
+            .collect();
+        assert_eq!(
+            build_numstat_plans(&over_total_limit),
+            (NumstatPlan::Skip, NumstatPlan::Skip)
+        );
+
+        let staged_rename = vec![StatusRecord {
+            path: b"d.txt".to_vec(),
+            original_path: Some(b"c.txt".to_vec()),
+            staged: Some(b'R'),
+            ..StatusRecord::default()
+        }];
+        assert_eq!(
+            build_numstat_plans(&staged_rename),
+            (
+                NumstatPlan::Run(vec![OsString::from("c.txt"), OsString::from("d.txt")]),
+                NumstatPlan::Skip,
+            )
+        );
+
+        let over_argv_count: Vec<StatusRecord> = (0..=NUMSTAT_ARGV_PATH_LIMIT)
+            .map(|index| StatusRecord {
+                path: format!("u-{index}.txt").into_bytes(),
+                unstaged: Some(b'M'),
+                ..StatusRecord::default()
+            })
+            .collect();
+        assert_eq!(
+            build_numstat_plans(&over_argv_count),
+            (NumstatPlan::Skip, NumstatPlan::Run(Vec::new()))
+        );
+
+        let over_argv_bytes = vec![
+            StatusRecord {
+                path: vec![b'a'; 9_000],
+                unstaged: Some(b'M'),
+                ..StatusRecord::default()
+            },
+            StatusRecord {
+                path: vec![b'b'; 9_000],
+                unstaged: Some(b'M'),
+                ..StatusRecord::default()
+            },
+        ];
+        assert_eq!(
+            build_numstat_plans(&over_argv_bytes),
+            (NumstatPlan::Skip, NumstatPlan::Run(Vec::new()))
         );
     }
 }

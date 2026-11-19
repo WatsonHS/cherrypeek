@@ -3,8 +3,11 @@
 //! This is the only module that builds a Git runner in operation mode. Each operation is a fixed
 //! argument template; the caller supplies only validated names, never Git arguments.
 
+mod merge;
 mod untracked;
 mod untracked_backup;
+
+pub use merge::preview_merge;
 
 use std::{
     ffi::OsString,
@@ -1657,6 +1660,7 @@ fn prepare(
                 error_fallback: "提交失败",
             });
         }
+        Operation::CompleteMerge { .. } => unreachable!("handled by merge module"),
     }
     if let (Some(name), Some(branch)) = (new_name, created_branch) {
         if name.is_empty()
@@ -1824,6 +1828,14 @@ pub fn check_operation(
         cancelled,
         deadline,
     };
+    if matches!(params.operation, Operation::CompleteMerge { .. }) {
+        return merge::check_complete_merge(
+            session,
+            &i,
+            &params.operation,
+            session.discovered.oid_length,
+        );
+    }
     Ok(prepare(&i, &params.operation, session.discovered.oid_length)?.check)
 }
 
@@ -1841,6 +1853,19 @@ pub fn run_operation(
         cancelled,
         deadline,
     };
+    if matches!(params.operation, Operation::CompleteMerge { .. }) {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(from_git(GitFailure::Cancelled));
+        }
+        return merge::run_complete_merge(
+            executable,
+            session,
+            &i,
+            &params.operation,
+            session.discovered.oid_length,
+            cancelled,
+        );
+    }
     let prepared = prepare(&i, &params.operation, session.discovered.oid_length)?;
     if !prepared.check.allowed {
         return Ok(OperationRun::Rejected {
@@ -1989,13 +2014,95 @@ pub fn run_operation(
     } else {
         (None, prepared.updated)
     };
+    let (added_count, added_min_unix, added_max_unix) = match (
+        !prepared.read_committed_head,
+        updated_ref
+            .as_ref()
+            .and_then(|u| u.old_oid.as_deref().map(|old| (old, u.new_oid.as_str()))),
+    ) {
+        (true, Some((old_oid, new_oid))) => measure_added_range(
+            executable,
+            recovery_inspector.directory,
+            session.discovered.oid_length,
+            old_oid,
+            new_oid,
+        ),
+        _ => (None, None, None),
+    };
     Ok(OperationRun::Done {
         head_oid,
         head_reference,
         updated_ref,
         untracked,
         committed_oid,
+        added_count,
+        added_min_unix,
+        added_max_unix,
     })
+}
+
+pub(crate) fn measure_added_range(
+    executable: &Path,
+    repo_path: &Path,
+    oid_length: usize,
+    old_oid: &str,
+    new_oid: &str,
+) -> (Option<u64>, Option<i64>, Option<i64>) {
+    if old_oid == new_oid {
+        return (Some(0), None, None);
+    }
+    let Ok(git) = ReadOnlyGit::new(executable.to_path_buf()) else {
+        return (None, None, None);
+    };
+    let uncancellable = AtomicBool::new(false);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let args = vec![
+        string_arg("-c"),
+        string_arg("core.commitGraph=false"),
+        string_arg("rev-list"),
+        string_arg("--timestamp"),
+        string_arg(new_oid),
+        string_arg("--not"),
+        string_arg(old_oid),
+        string_arg("--"),
+    ];
+    let Ok(mut stream) = git.stream_lines(repo_path, &args, 128) else {
+        return (None, None, None);
+    };
+    let mut count = 0_u64;
+    let mut min_ts: Option<i64> = None;
+    let mut max_ts: Option<i64> = None;
+    loop {
+        if Instant::now() >= deadline {
+            return (None, None, None);
+        }
+        match stream.next_line(&uncancellable, deadline) {
+            Ok(Some(line)) => {
+                let line = line.strip_suffix(b"\r").unwrap_or(&line);
+                let Some(sep) = line.iter().position(|byte| *byte == b' ') else {
+                    return (None, None, None);
+                };
+                let Ok(ts_str) = std::str::from_utf8(&line[..sep]) else {
+                    return (None, None, None);
+                };
+                let Ok(ts) = ts_str.parse::<i64>() else {
+                    return (None, None, None);
+                };
+                let oid_bytes = &line[sep + 1..];
+                if oid_bytes.len() != oid_length || !oid_bytes.iter().all(u8::is_ascii_hexdigit) {
+                    return (None, None, None);
+                }
+                count += 1;
+                if count > 250_000 {
+                    return (None, None, None);
+                }
+                min_ts = Some(min_ts.map_or(ts, |current| current.min(ts)));
+                max_ts = Some(max_ts.map_or(ts, |current| current.max(ts)));
+            }
+            Ok(None) => return (Some(count), min_ts, max_ts),
+            Err(_) => return (None, None, None),
+        }
+    }
 }
 
 /// A lock in application data serializes writers across daemon processes / linked worktrees.

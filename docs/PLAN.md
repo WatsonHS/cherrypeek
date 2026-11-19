@@ -362,6 +362,43 @@ M7 审阅收口与推送与 M8 分叉同步与三栏轻量合并的路线规划�
     - 性能结果或不适用原因：不适用（仅在工作区页操作触发局部状态刷新）。
     - 剩余限制：暂不支持按 hunk/按行部分暂存与就地冲突编辑（冲突轻量合并预留 M8 排期）。
 
+## M8：分叉同步与三栏轻量合并
+
+2026-11-18 用户确认提交 M7 并开放 M8 白名单，按 [PRODUCT](PRODUCT.md)「分叉同步与三栏轻量合并（M8）」与 [ARCHITECTURE](ARCHITECTURE.md) 执行边界实现，未验收前保持未勾选：
+
+- [x] **P8-01 零中间态三方预演与无冲突分叉同步。** 新增可取消只读查询 `previewMerge` 及 `CompleteMerge` 操作的 `MergeCommit` / `SingleCommitRebase` 无冲突模式。依赖 P5-02、P7-01。完成条件：
+  - `previewMerge` 使用独立临时 `GIT_OBJECT_DIRECTORY` + `GIT_ALTERNATE_OBJECT_DIRECTORIES` 运行 `git merge-tree --write-tree -z`，被查看仓库（含 `.git/objects` 与工作区）在预演期间前后快照完全一致；工作区存在已跟踪脏改动、目标在其他 worktree 检出、引用已变化或已有进行中操作时返回 `Blocked`。
+  - 遇到无共同祖先、criss-cross 多共同祖先、非 `CONFLICT (contents)` 结构性冲突（如 `modify/delete`、`file/directory`）、二进制/非 UTF-8 或超过 `10 文件 / 128 KiB / 512 KiB` 上限时明确返回 `Unsupported` 并引导交给 Agent。
+  - 无冲突分叉弹窗（`DivergedSyncDialog`）保留「交给 Agent…」主位置，同时支持选择 **合并同步（双父 merge commit）** 或 **单提交线性变基**（当仅领先 1 个单父普通提交且 `--merge-base` 无冲突时可选，保留原 Author 姓名/邮箱/时间且无 `.git/rebase-merge` 中间态），并支持勾选同步后立即执行非强制推送。
+  - 完成记录（2026-11-18）：
+    - 任务 ID：P8-01 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`crates/core/src/operations.rs`、`crates/daemon/src/{git_command,operations,server}.rs`、`crates/daemon/src/operations/merge.rs`、`apps/desktop/src/main/{protocol-transport,repository-session-controller,index}.ts`、`DivergedSyncDialog`；`tests/protocol/m5-m6-wiring.test.mjs`、`tests/pages/operations-git.test.mjs`、`tests/smoke/m8-three-pane-merge-smoke.mjs`。
+    - 验证命令与结果：`cargo test --workspace --locked`（5 + 116 + 12 = 133 项通过，含 `preview_is_zero_write_and_clean_single_commit_rebase_preserves_author`）、`pnpm test:protocol`（63 项通过）、`pnpm test:pages`（54 项通过，含零写入 `snapshotTree` 断言与 dirty/structuralConflict/binaryOrNonUtf8/crissCross 分支覆盖）、`pnpm test:smoke:m8`（Case 1 分叉单提交变基保留原作者信息并立即推送至本地裸远端）通过。
+    - 性能结果或不适用原因：不适用（用户触发的单次分叉预演与同步操作，单文件上限 128 KiB、总上限 512 KiB、最多 10 文件，受 20s 桌面预演取消/超时保护）。
+    - 剩余限制：仅支持普通无冲突或单提交无冲突线性变基；多提交 rebase、结构性冲突、criss-cross 及无共同祖先情形交由 Agent。
+- [x] **P8-02 JetBrains 式左-中-右三栏双边箭头合并视图。** 实现纯算法模块 `three-way-merge.ts` 与全宽 `ThreePaneMergeView` 合并编辑器。依赖 P8-01。完成条件：
+  - 仅在存在普通文本冲突且通过预演边界检查时从分叉弹窗/拒绝框的「顺手解决冲突…」进入，全宽并排展示 **左栏（本地只读）｜左装订线连接带与 `»` / `×` ｜ 中栏（最终结果，自动合入无冲突差异块，支持直接微调编辑）｜ 右装订线连接带与 `«` / `×` ｜ 右栏（远端/目标只读）**，打开时定位到第 1 处冲突并支持三栏同步滚动与词级差异高亮。
+  - 点击 `»` 或 `«` 可一步解决单侧冲突；若继续点击另一侧箭头则按点击先后顺序自然拼入中栏；两侧均 `×` 则保留共同祖先内容并计为已解决；支持单块 `↺` 重置与上下冲突跳转；顶部实时显示剩余冲突数，清零前禁点确认按钮。
+  - 完成记录（2026-11-18）：
+    - 任务 ID：P8-02 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`apps/desktop/src/renderer/lib/three-way-merge.ts`、`apps/desktop/src/renderer/components/three-pane-merge-view.tsx` 与 `diverged-sync-dialog.tsx`；`tests/renderer/{three-way-merge,operations}.test.mjs`、`tests/smoke/m8-three-pane-merge-smoke.mjs`。
+    - 验证命令与结果：`pnpm typecheck`、`pnpm build`、`pnpm test:renderer`（232 项通过，含非重叠自动合并、同改自动合并、相邻行合并冲突聚合、`»`/`«` 正逆序追加、双 `×` 回退基线、块级编辑与 `↺` 重置、CRLF 往返，以及 `divergedSyncTargetFromRefusal` 在 `update`/`push`/`mergeInto` 下的方向校准）、`pnpm test:smoke:m8`（2-hunk 冲突窗口内 `»` + `«` 顺序追加与块内文本编辑、剩余冲突数实时更新及按钮禁用/启用门禁）通过；并目视核对 `output/playwright/m8-three-pane-merge/*.png` 布局与连接带渲染。
+    - 性能结果或不适用原因：不适用（最多 10 文件 / 512 KiB 文本内容在内存中分块渲染）。
+    - 剩余限制：仅面向普通文本 `CONFLICT (contents)` / `add/add`；不含语法高亮语言服务或三栏语法着色（保留词级行内变更高亮）。
+- [x] **P8-03 原子落盘、取消零残留与端到端回归测试。** 完成冲突解决后通过临时 `GIT_INDEX_FILE` + `commit-tree` 原子建树提交与安全推进分支，补全协议、算法、daemon 独立 Git 对照与 Electron 实窗验收 `test:smoke:m8`。依赖 P8-01、P8-02。完成条件：
+  - 确认落盘时持仓库操作锁再次核验两侧 `expectedOid`、`expectedHeadOid` 与未跟踪文件防覆盖，写入的 commit / tree 与独立 Git 解决结果完全一致；中途按 `Esc` 取消或点击「交给 Agent…」直接关闭界面，被查看仓库无任何中间态、零文件改动。
+  - `cargo fmt` / `clippy` / `test`、`protocol:check`、`typecheck`、`build`、`test:protocol`、`test:renderer`、`test:pages` 及全部实窗 smoke（含 `test:smoke:m8`）退出码 0。
+  - 完成记录（2026-11-18）：
+    - 任务 ID：P8-03 · 实现版本：本机源码版。
+    - 验收环境 / fixture：`crates/daemon/src/operations/merge.rs`、`tests/pages/operations-git.test.mjs`、`tests/smoke/m8-three-pane-merge-smoke.mjs` 与全量 Electron/Rust 测试套件。
+    - 验证命令与结果：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`（0 告警）、`cargo test --workspace --locked`（5 + 116 + 12 = 133 项）、`pnpm protocol:check`、`pnpm typecheck`、`pnpm build`、`pnpm test:protocol`（63 项）、`pnpm test:renderer`（232 项）、`pnpm test:pages`（54 项）、`pnpm test:smoke`、`pnpm test:smoke:pages`、`pnpm test:smoke:update-current`、`pnpm test:smoke:operations`、`pnpm test:smoke:m7`、`pnpm test:smoke:m8`（验证取消零写、无 `.git/MERGE_HEAD` 残留、`merge + push` 原子提交到远端）与 `git diff --check` 全部退出码 0。
+    - 性能结果或不适用原因：不适用（单次提交与本地工作区原子推进）。
+    - 剩余限制：保持工作区已跟踪干净门槛与 10 文件 / 128 KiB / 512 KiB 轻量合并边界，不接手进行中的 `.git/MERGE_HEAD` 或 `rebase-merge`。
+
+## 高频提交批次追踪与交接扩容（2026-11-18）
+
+- [x] **高频新增批次联动、精确到时分筛选与 Handoff 256 KiB 扩容**：在不突破白名单的前提下，打通“上次更新 / 自上次查看新增”全量测量、拓扑 `excludeTips` 一键筛选/统计、近 1/3/6/12 小时与精确到时分筛选以及超过 200 条的完整拓扑 `rangeSummary` 交给 Agent（256 KiB 上限与多级摘要收缩）；详见 [DEVELOPMENT](DEVELOPMENT.md) 与 [HANDOFF](HANDOFF.md)。
+
 ## 完成一项任务的记录格式
 
 ```text

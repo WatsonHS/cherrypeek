@@ -8,6 +8,7 @@ import { graphAboveLanes, graphHighlight, graphPaths, graphWidthForMaxLane, hidd
 import { GraphResizeHandle } from "./graph-resize-handle.js";
 import { refLabels, type OtherWorktreeHead } from "../lib/ref-labels.js";
 import { cn } from "../lib/utils.js";
+import { unseenBatchFromSession, type UpdateBatchRecord } from "../lib/update-batch.js";
 import { IdentityAvatar } from "./identity-avatar.js";
 import { RefChips } from "./ref-label.js";
 import { Button } from "./ui/button.js";
@@ -19,6 +20,7 @@ import { HistoryDayStrip, type DayMarker } from "./history-day-strip.js";
 import type { HandoffRequest } from "../lib/handoff-prompt.js";
 import { localDateInput } from "../lib/search-date.js";
 import { historyPrefetchDistance } from "../lib/history-prefetch.js";
+import { viewportReadingSeconds, type CommitScrollSample } from "../lib/time-track.js";
 
 const ROW: GraphGeometry = { rowHeight: 60, mid: 22, laneGap: 9, x0: 7 };
 const DAY_ROW_HEIGHT = 34;
@@ -65,7 +67,7 @@ export function refsByTarget(refs: RefInfo[]): Map<string, RefInfo[]> {
   return index;
 }
 
-export function CommitList({ preview, selectedOid, onSelect, onActivate, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onOpenHandoff, onCancelHistoryDate, onRetryHistoryDate }: {
+export function CommitList({ preview, selectedOid, onSelect, onActivate, captureSelectionIntent, selectIfCurrent, onCancel, onRetry, onRetryPage, onCancelPage, onLoadWindowEdge, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor, restorationAnchor, onSetAnchorRestorationSpace, activityDays, activityDaysPartial, activityDaysTruncated, onLocateHistoryDate, onLocateHistoryTime, onScrubbingChange, onJumpToNewest, onOpenHandoff, onFilterBatch, onStatsBatch, onCancelHistoryDate, onRetryHistoryDate }: {
   preview: RepositoryView;
   selectedOid: string | undefined;
   onSelect(oid: string): void;
@@ -95,6 +97,8 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   onJumpToNewest(): Promise<boolean>;
   /** Hands the commits new since the last visit to an agent for review. */
   onOpenHandoff?(request: HandoffRequest): void;
+  onFilterBatch?(batch: UpdateBatchRecord): void;
+  onStatsBatch?(batch: UpdateBatchRecord): void;
   onCancelHistoryDate(): Promise<void>;
   onRetryHistoryDate(): Promise<void>;
 }): React.JSX.Element {
@@ -116,18 +120,96 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     preview.newSinceLastSeenStatus === "ready" ? preview.lastSeenDividerOid : null),
   [preview.commits, preview.lastSeenDividerOid, preview.newSinceLastSeenStatus]);
   const virtual = React.useMemo(() => createVirtualLayout(entries), [entries]);
+  const hasDivider = entries.some(entry => entry.kind === "divider");
   const newSinceLastVisit = React.useMemo(() => {
     const divider = entries.find(entry => entry.kind === "divider");
     if (!divider) return null;
     const index = preview.commits.findIndex(commit => `last-seen-${commit.oid}` === divider.key);
     return index > 0 ? preview.commits.slice(0, index).map(commit => ({ oid: commit.oid, summary: commit.summary })) : null;
   }, [entries, preview.commits]);
+  const unseenBatch = React.useMemo(() => unseenBatchFromSession({
+    session: preview.session,
+    status: preview.newSinceLastSeenStatus,
+    count: preview.newSinceLastSeenCount,
+    minUnix: preview.newSinceLastSeenMinUnix,
+    maxUnix: preview.newSinceLastSeenMaxUnix,
+  }), [preview.session, preview.newSinceLastSeenStatus, preview.newSinceLastSeenCount, preview.newSinceLastSeenMinUnix, preview.newSinceLastSeenMaxUnix]);
   const dayMarkers = React.useMemo<DayMarker[]>(() => entries.flatMap(entry =>
     entry.kind === "day" ? [{ offset: virtual.offset(entry.key) ?? 0, label: entry.label, day: entry.dayKey }] : []), [entries, virtual]);
+  const commitSamples = React.useMemo<CommitScrollSample[]>(() => {
+    const samples: CommitScrollSample[] = [];
+    for (const entry of entries) {
+      if (entry.kind !== "commit") continue;
+      const date = parseGitTime(entry.commit.committer.timestamp);
+      const offset = virtual.offset(entry.key);
+      if (!date || offset === undefined) continue;
+      samples.push({
+        top: offset,
+        bottom: offset + entry.height,
+        seconds: Math.floor(date.getTime() / 1000),
+      });
+    }
+    return samples;
+  }, [entries, virtual]);
+  const viewportSessionKey = preview.session ? `${preview.session.repoId}:${preview.session.generation}` : null;
+  const atNewest = preview.windowPreviousCursor === null;
+  const reachedEnd = preview.commits.length > 0 && preview.windowNextCursor === null && preview.state === "ready"
+    && preview.opening === null && !preview.pageLoading && !preview.refreshing && !preview.scopeSwitching
+    && !preview.pageError;
+  const sessionBoundsRef = React.useRef<{ key: string | null; newest: number | null; oldest: number | null }>({
+    key: null,
+    newest: null,
+    oldest: null,
+  });
+  if (sessionBoundsRef.current.key !== viewportSessionKey) {
+    sessionBoundsRef.current = { key: viewportSessionKey, newest: null, oldest: null };
+  }
+  if (atNewest && commitSamples.length > 0) {
+    let maxSeconds = sessionBoundsRef.current.newest ?? commitSamples[0]!.seconds;
+    for (const sample of commitSamples) {
+      if (sample.seconds > maxSeconds) maxSeconds = sample.seconds;
+    }
+    sessionBoundsRef.current.newest = maxSeconds;
+  }
+  if (reachedEnd && commitSamples.length > 0) {
+    let minSeconds = sessionBoundsRef.current.oldest ?? commitSamples[0]!.seconds;
+    for (const sample of commitSamples) {
+      if (sample.seconds < minSeconds) minSeconds = sample.seconds;
+    }
+    sessionBoundsRef.current.oldest = minSeconds;
+  }
+  const newestSeconds = sessionBoundsRef.current.newest;
+  const oldestSeconds = sessionBoundsRef.current.oldest;
   const latestSelectedOid = React.useRef(selectedOid);
   latestSelectedOid.current = selectedOid;
-  const latestScrollModel = React.useRef({ preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor });
-  latestScrollModel.current = { preview, entries, virtual, onCancelPage, onPrefetchPreviousPage, onPrefetchNextPage, onViewportAnchor };
+  const latestScrollModel = React.useRef({
+    preview,
+    entries,
+    virtual,
+    commitSamples,
+    atNewest,
+    reachedEnd,
+    newestSeconds,
+    oldestSeconds,
+    onCancelPage,
+    onPrefetchPreviousPage,
+    onPrefetchNextPage,
+    onViewportAnchor,
+  });
+  latestScrollModel.current = {
+    preview,
+    entries,
+    virtual,
+    commitSamples,
+    atNewest,
+    reachedEnd,
+    newestSeconds,
+    oldestSeconds,
+    onCancelPage,
+    onPrefetchPreviousPage,
+    onPrefetchNextPage,
+    onViewportAnchor,
+  };
   const [range, setRange] = React.useState<VirtualRange>(() => virtual.range(0, 600, 12));
   const [graphExpanded, setGraphExpanded] = React.useState(false);
   const [customGraphLanes, setCustomGraphLanes] = React.useState<number | null>(null);
@@ -135,9 +217,21 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   const [graphScrollLeft, setGraphScrollLeft] = React.useState(0);
   const [viewportDay, setViewportDay] = React.useState<string | null>(null);
   const [viewportSeconds, setViewportSeconds] = React.useState<number | null>(null);
+  const [sliderMetrics, setSliderMetrics] = React.useState<{
+    canScroll: boolean;
+    atTop: boolean;
+    atBottom: boolean;
+    fullWindowScrollRatio: number | null;
+  }>({
+    canScroll: false,
+    atTop: true,
+    atBottom: false,
+    fullWindowScrollRatio: null,
+  });
+  const [listScrollRevision, setListScrollRevision] = React.useState(0);
+  const pendingUserScrollRevision = React.useRef(false);
   /** The time slider is being dragged; the list follows it without the locating notice. */
   const [scrubbing, setScrubbing] = React.useState(false);
-  const viewportSessionKey = preview.session ? `${preview.session.repoId}:${preview.session.generation}` : null;
   const previousPageLoading = React.useRef(preview.pageLoading);
   const previousPageRequestKind = React.useRef(preview.pageRequestKind);
   const viewportSessionRef = React.useRef<string | null>(null);
@@ -178,17 +272,55 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   }, [preview.commits, useActivityDays]);
   const timeRailDays = useActivityDays ? activityDays! : loadedDateDays;
   const timeRailLoading = preview.pageLoading && preview.pageRequestKind === "dateLocation";
+  const syncViewportReading = React.useCallback((element: HTMLDivElement | null, userScrolled = false) => {
+    const model = latestScrollModel.current;
+    if (!element || !model.commitSamples.length) {
+      setSliderMetrics(previous => !previous.canScroll && previous.atTop && !previous.atBottom && previous.fullWindowScrollRatio === null
+        ? previous
+        : { canScroll: false, atTop: true, atBottom: false, fullWindowScrollRatio: null });
+      return;
+    }
+    const maxScroll = Math.max(0, element.scrollHeight - element.clientHeight);
+    const canScroll = !model.atNewest || !model.reachedEnd || maxScroll > 1;
+    const clampedTop = Math.min(Math.max(0, element.scrollTop), maxScroll);
+    const atTop = model.atNewest && clampedTop <= 0.5;
+    const atBottom = model.reachedEnd && maxScroll > 1 && clampedTop >= maxScroll - 0.5;
+    const fullWindowScrollRatio = model.atNewest && model.reachedEnd && maxScroll > 1
+      ? Math.round((clampedTop / maxScroll) * 1000) / 1000
+      : null;
+    const reading = viewportReadingSeconds(model.commitSamples, {
+      scrollTop: clampedTop,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      readingOffsetPx: DAY_ROW_HEIGHT,
+      atNewest: model.atNewest,
+      atOldest: model.reachedEnd,
+      newestSeconds: model.newestSeconds,
+      oldestSeconds: model.oldestSeconds,
+    });
+    const nextSeconds = reading === null ? null : Math.round(reading);
+    setViewportSeconds(previous => previous === nextSeconds ? previous : nextSeconds);
+    setSliderMetrics(previous =>
+      previous.canScroll === canScroll
+      && previous.atTop === atTop
+      && previous.atBottom === atBottom
+      && previous.fullWindowScrollRatio === fullWindowScrollRatio
+        ? previous
+        : { canScroll, atTop, atBottom, fullWindowScrollRatio });
+    if (userScrolled) setListScrollRevision(revision => revision + 1);
+  }, []);
+
   React.useEffect(() => {
     const firstDate = preview.commits[0] ? parseGitTime(preview.commits[0].committer.timestamp) : null;
     if (viewportSessionRef.current !== viewportSessionKey) {
       viewportSessionRef.current = viewportSessionKey;
       setViewportDay(firstDate ? localDateInput(firstDate) : null);
-      setViewportSeconds(firstDate ? Math.floor(firstDate.getTime() / 1000) : null);
+      if (!commitSamples.length) setViewportSeconds(null);
     } else if (viewportDay === null && firstDate) {
       setViewportDay(localDateInput(firstDate));
-      setViewportSeconds(Math.floor(firstDate.getTime() / 1000));
     }
-  }, [preview.commits, viewportDay, viewportSessionKey]);
+  }, [preview.commits, commitSamples.length, viewportDay, viewportSessionKey]);
+
   const visibleEntries = entries.slice(range.start, range.end);
   const activeDescendant = selectedOid && visibleEntries.some(entry => entry.kind === "commit" && entry.commit.oid === selectedOid)
     ? rowId(selectedOid) : undefined;
@@ -197,7 +329,8 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     const element = listRef.current;
     if (!element) return;
     setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, [virtual]);
+    syncViewportReading(element, false);
+  }, [virtual, syncViewportReading]);
 
   const maybePrefetch = React.useCallback((element: HTMLDivElement, direction: "up" | "down") => {
     const model = latestScrollModel.current;
@@ -230,6 +363,7 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     pendingPrefetchCompletion.current = null;
     previousPageLoading.current = preview.pageLoading;
     previousPageRequestKind.current = preview.pageRequestKind;
+    pendingUserScrollRevision.current = false;
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
     frameRef.current = 0;
   }, [viewportSessionKey]);
@@ -283,7 +417,10 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       }
     }
     scrollSample.current = direction ? { top: nextTop, at: now, direction } : null;
-    if (!isProgrammatic) latestScrollDirection.current = direction;
+    if (!isProgrammatic) {
+      latestScrollDirection.current = direction;
+      pendingUserScrollRevision.current = true;
+    }
     lastScrollTop.current = nextTop;
     if (preview.session) {
       const anchor = captureWindowAnchor(element, preview.session, entries, virtual);
@@ -294,8 +431,6 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
         const date = commit ? parseGitTime(commit.committer.timestamp) : null;
         const day = date ? localDateInput(date) : null;
         setViewportDay(current => current === day ? current : day);
-        const seconds = date ? Math.floor(date.getTime() / 1000) : null;
-        setViewportSeconds(current => current === seconds ? current : seconds);
       }
     }
     if (frameRef.current) return;
@@ -303,8 +438,11 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       frameRef.current = 0;
       const model = latestScrollModel.current;
       const current = listRef.current;
+      const userScrolled = pendingUserScrollRevision.current;
+      pendingUserScrollRevision.current = false;
       if (!current) return;
       setRange(model.virtual.range(current.scrollTop, current.clientHeight, 12));
+      syncViewportReading(current, userScrolled);
       if (pendingAnchor.current) {
         if (model.preview.session) pendingAnchor.current = captureWindowAnchor(current, model.preview.session, model.entries, model.virtual);
       }
@@ -359,7 +497,8 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     lastScrollTop.current = element.scrollTop;
     onViewportAnchor(anchor.oid);
     setRange(virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, [preview.windowRevision, preview.session, onViewportAnchor, virtual, resetScrollSpeed]);
+    syncViewportReading(element, false);
+  }, [preview.windowRevision, preview.session, onViewportAnchor, virtual, resetScrollSpeed, syncViewportReading]);
 
   React.useLayoutEffect(() => {
     if (preview.pageRevision === 0 || preview.pageRevision === lastRestoredPageRevision.current) return;
@@ -374,6 +513,7 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       lastScrollTop.current = 0;
       onViewportAnchor(preview.commits[0]?.oid);
       setRange(virtual.range(0, element.clientHeight, 12));
+      syncViewportReading(element, false);
       lastRestoredPageRevision.current = preview.pageRevision;
       return;
     }
@@ -400,8 +540,9 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     lastScrollTop.current = target;
     onViewportAnchor(anchor.oid);
     setRange(virtual.range(target, element.clientHeight, 12));
+    syncViewportReading(element, false);
     lastRestoredPageRevision.current = preview.pageRevision;
-  }, [preview.pageRevision, preview.anchorMissing, preview.anchorRestorationSpace, restorationAnchor, onSetAnchorRestorationSpace, onViewportAnchor, virtual, resetScrollSpeed]);
+  }, [preview.pageRevision, preview.anchorMissing, preview.anchorRestorationSpace, restorationAnchor, onSetAnchorRestorationSpace, onViewportAnchor, virtual, resetScrollSpeed, syncViewportReading]);
 
   // Keep a selected row visible even when it is outside the currently mounted DOM slice.
   React.useLayoutEffect(() => {
@@ -421,8 +562,9 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       lastScrollTop.current = target;
       onViewportAnchor(selectedOid);
       setRange(virtual.range(target, element.clientHeight, 12));
+      syncViewportReading(element, false);
     }
-  }, [selectedOid, resetScrollSpeed]);
+  }, [selectedOid, resetScrollSpeed, syncViewportReading]);
 
   const move = (delta: number | "first" | "last") => {
     const commits = preview.commits;
@@ -465,7 +607,8 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     programmaticScrollTop.current = element.scrollTop;
     lastScrollTop.current = element.scrollTop;
     setRange(latestScrollModel.current.virtual.range(element.scrollTop, element.clientHeight, 12));
-  }, [resetScrollSpeed]);
+    syncViewportReading(element, false);
+  }, [resetScrollSpeed, syncViewportReading]);
   const jumpToDate = React.useCallback(async (day: string): Promise<boolean> => {
     pendingDateJump.current = false;
     const found = await onLocateHistoryDate(day);
@@ -485,7 +628,6 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     return found;
   }, [onLocateHistoryTime, placeDateJump]);
   // Back to the newest commit: scroll up when it is still loaded, otherwise load its page first.
-  const atNewest = preview.windowPreviousCursor === null;
   const goNewest = React.useCallback(async () => {
     const element = listRef.current;
     if (!element) return;
@@ -506,10 +648,15 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       programmaticScrollTop.current = 0;
       lastScrollTop.current = 0;
       setRange(latestScrollModel.current.virtual.range(0, list.clientHeight, 12));
+      syncViewportReading(list, false);
     }));
-  }, [atNewest, onJumpToNewest, resetScrollSpeed]);
+  }, [atNewest, onJumpToNewest, resetScrollSpeed, syncViewportReading]);
   // Declared after the keep-selected-visible effect so the jump placement wins.
   React.useLayoutEffect(() => { placeDateJump(); }, [selectedOid, virtual, placeDateJump]);
+  // Run after anchor restoration, selection scrolling, and jump placement have updated scrollTop.
+  React.useLayoutEffect(() => {
+    syncViewportReading(listRef.current, false);
+  }, [commitSamples, atNewest, reachedEnd, viewportSessionKey, syncViewportReading]);
 
   const collapseGraph = () => {
     if (listRef.current) {
@@ -526,9 +673,6 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
   const loadingEmpty = preview.state === "loading" && preview.commits.length === 0;
   const finishedEmpty = preview.state === "ready" && preview.commits.length === 0;
   const interrupted = (preview.state === "error" || preview.state === "cancelled") && preview.commits.length > 0;
-  const reachedEnd = preview.commits.length > 0 && preview.windowNextCursor === null && preview.state === "ready"
-    && preview.opening === null && !preview.pageLoading && !preview.refreshing && !preview.scopeSwitching
-    && !preview.pageError;
 
   return <GraphHighlightContext.Provider value={highlights}><nav aria-label="提交列表" className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     {preview.error && preview.repository ? <div role="alert" className="mx-2 mb-2 flex items-start gap-2 rounded-[10px] border border-bad-line bg-bad-bg px-3 py-2.5 text-[13px]">
@@ -550,6 +694,33 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
       <Button variant="outline" size="sm" onClick={() => { void (timeRailLoading ? onCancelHistoryDate() : onCancelPage()); }}>{timeRailLoading ? "取消定位" : "取消"}</Button>
     </div> : null}
 
+
+    {unseenBatch && !hasDivider ? <div role="status" data-testid="unseen-overflow-banner"
+      className="mx-2 mb-2 flex flex-wrap items-center gap-2 rounded-[10px] border border-accent/25 bg-accent-soft px-3 py-1.5 text-xs text-fg">
+      <span className="min-w-0 flex-1 font-medium text-accent-fg tabular-nums">
+        自上次查看新增 {unseenBatch.addedCount} 个提交
+        {preview.commits.some(commit => commit.isNewSinceLastSeen) ? "（超出当前已加载列表）" : ""}
+      </span>
+      <div className="flex shrink-0 items-center gap-1.5">
+        {onFilterBatch ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="unseen-overflow-filter"
+          onClick={() => onFilterBatch(unseenBatch)}>筛选</Button> : null}
+        {onStatsBatch ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="unseen-overflow-stats"
+          onClick={() => onStatsBatch(unseenBatch)}>查看统计</Button> : null}
+        {onOpenHandoff ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="unseen-overflow-handoff"
+          onClick={() => onOpenHandoff({
+            scenario: "review-range",
+            target: {
+              kind: "commits",
+              commits: preview.commits.filter(commit => commit.isNewSinceLastSeen).map(commit => ({ oid: commit.oid, summary: commit.summary })),
+              complete: false,
+              reason: "new",
+              excludeTips: unseenBatch.oldTips,
+              headTips: unseenBatch.newTips,
+              totalCount: unseenBatch.addedCount ?? undefined,
+            },
+          })}>交给 Agent</Button> : null}
+      </div>
+    </div> : null}
 
     <div className="relative flex min-h-0 flex-1">
     <div className="relative flex min-h-0 min-w-0 flex-1">
@@ -602,8 +773,16 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
         ? <DayRow key={entry.key} entry={entry} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth} />
         : entry.kind === "divider" ? <LastSeenDivider key={entry.key} graph={entry.graph} width={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount} contentMinWidth={expandedContentMinWidth}
           newCount={newSinceLastVisit?.length ?? 0}
+          onFilter={onFilterBatch && unseenBatch ? () => onFilterBatch(unseenBatch) : undefined}
+          onStats={onStatsBatch && unseenBatch ? () => onStatsBatch(unseenBatch) : undefined}
           onReview={onOpenHandoff && newSinceLastVisit ? () => onOpenHandoff({ scenario: "review-range", target: {
-            kind: "commits", commits: newSinceLastVisit, complete: preview.windowPreviousCursor === null, reason: "new",
+            kind: "commits",
+            commits: newSinceLastVisit,
+            complete: preview.windowPreviousCursor === null,
+            reason: "new",
+            ...(preview.session?.previousView?.tips.length ? { excludeTips: preview.session.previousView.tips } : {}),
+            ...(preview.session?.tips.length ? { headTips: preview.session.tips } : {}),
+            ...(preview.newSinceLastSeenCount !== null ? { totalCount: preview.newSinceLastSeenCount } : {}),
           } }) : undefined} />
         : <CommitRow key={entry.commit.oid} commit={entry.commit} graphWidth={graphColumnWidth} expanded={graphExpanded} visibleLaneCount={visibleLaneCount}
           contentMinWidth={expandedContentMinWidth} onExpandGraph={() => setGraphExpanded(true)}
@@ -622,9 +801,12 @@ export function CommitList({ preview, selectedOid, onSelect, onActivate, capture
     {!graphExpanded && preview.commits.length ? <GraphResizeHandle left={16 + graphColumnWidth - graphScrollLeft} lanes={visibleLaneCount}
       drawnLanes={drawnLaneCount} laneGap={ROW.laneGap} onChange={setCustomGraphLanes} onReset={() => setCustomGraphLanes(null)} /> : null}
     </div>
-    {preview.commits.length ? <HistoryTimeSlider days={timeRailDays}
+    {preview.commits.length && sliderMetrics.canScroll ? <HistoryTimeSlider days={timeRailDays}
       partial={!useActivityDays || activityDaysPartial ? "counting" : activityDaysTruncated ? "truncated" : false}
       sessionKey={viewportSessionKey} viewportSeconds={viewportSeconds} loading={timeRailLoading} onChooseTime={jumpToTime}
+      newestSeconds={newestSeconds} oldestSeconds={oldestSeconds}
+      followProgress={sliderMetrics.fullWindowScrollRatio} atTop={sliderMetrics.atTop} atBottom={sliderMetrics.atBottom}
+      listScrollRevision={listScrollRevision}
       onScrubbingChange={value => { setScrubbing(value); onScrubbingChange?.(value); }} /> : null}
     </div>
   </nav></GraphHighlightContext.Provider>;
@@ -730,9 +912,11 @@ function DayRow({ entry, width, expanded, visibleLaneCount, contentMinWidth }: {
   </div>;
 }
 
-function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinWidth, newCount, onReview }: {
+function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinWidth, newCount, onFilter, onStats, onReview }: {
   graph: HistoryCommit["graph"]; width: number; expanded: boolean; visibleLaneCount: number; contentMinWidth?: number;
   newCount: number;
+  onFilter?(): void;
+  onStats?(): void;
   onReview?(): void;
 }): React.JSX.Element {
   const lanes = React.useMemo(() => graphAboveLanes(graph, visibleLaneCount - 1), [graph, visibleLaneCount]);
@@ -742,6 +926,12 @@ function LastSeenDivider({ graph, width, expanded, visibleLaneCount, contentMinW
     <GraphLanes bridgeGraph={graph} width={width} height={DAY_ROW_HEIGHT} lanes={lanes} expanded={expanded} visibleLaneCount={visibleLaneCount} testId="graph-last-seen-bridge" />
     <span className="h-px flex-1 bg-line" />
     <span>上次看到这里</span>
+    {onFilter && newCount > 0 ? <button type="button" data-testid="divider-filter-new"
+      className="rounded-md px-1.5 py-0.5 text-[11px] text-fg2 hover:bg-hover hover:text-fg"
+      onClick={onFilter}>筛选</button> : null}
+    {onStats && newCount > 0 ? <button type="button" data-testid="divider-stats-new"
+      className="rounded-md px-1.5 py-0.5 text-[11px] text-fg2 hover:bg-hover hover:text-fg"
+      onClick={onStats}>查看统计</button> : null}
     {onReview && newCount > 0 ? <button type="button" data-testid="handoff-new-commits"
       className="rounded-md px-1.5 py-0.5 text-[11px] text-accent-fg hover:bg-hover"
       title={`把上面 ${newCount} 个新提交交给 Agent 审阅`} onClick={onReview}>交给 Agent 审阅这 {newCount} 个</button> : null}

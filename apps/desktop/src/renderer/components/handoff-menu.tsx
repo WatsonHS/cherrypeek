@@ -19,19 +19,34 @@ export function CommitHandoffMenu({ oid, isMerge, toNewest, onOpenHandoff }: {
   oid: string;
   isMerge: boolean;
   /** Commits from the newest down to this one, newest first; null when it is the newest or not in the history list. */
-  toNewest: { commits: HandoffRangeCommit[]; complete: boolean } | null;
+  toNewest: { commits: HandoffRangeCommit[]; complete: boolean; oldestOid?: string; headTips?: string[] } | null;
   onOpenHandoff(request: HandoffRequest): void;
 }): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const commit = { kind: "commit" as const, oid };
+  const rangeLabel = toNewest
+    ? toNewest.complete
+      ? `审阅从这里到最新的 ${toNewest.commits.length} 个提交`
+      : "审阅从这里到最新的全部提交"
+    : "";
   const reading: MenuItem[] = [
     { key: "review", label: "审阅这个提交", hint: "列出问题和修改建议，不改代码", request: { scenario: "review", target: commit } },
     ...(isMerge ? [{ key: "explain-merge", label: "解释这个 merge 带入了什么", hint: "按父提交分组说明带入的改动", request: { scenario: "explain-merge" as const, target: commit } }] : []),
-    ...(toNewest && toNewest.commits.length > 1 ? [{
+    ...(toNewest && (toNewest.commits.length > 1 || !toNewest.complete) ? [{
       key: "review-range",
-      label: `审阅从这里到最新的 ${toNewest.complete ? "" : "至少 "}${toNewest.commits.length} 个提交`,
+      label: rangeLabel,
       hint: "先概括这批改动，再列出问题",
-      request: { scenario: "review-range" as const, target: { kind: "commits" as const, commits: toNewest.commits, complete: toNewest.complete, reason: "toNewest" as const } },
+      request: {
+        scenario: "review-range" as const,
+        target: {
+          kind: "commits" as const,
+          commits: toNewest.commits,
+          complete: toNewest.complete,
+          reason: "toNewest" as const,
+          ...(toNewest.oldestOid ? { oldestOid: toNewest.oldestOid } : {}),
+          ...(toNewest.headTips?.length ? { headTips: toNewest.headTips } : {}),
+        },
+      },
     }] : []),
   ];
   const changing: MenuItem[] = [

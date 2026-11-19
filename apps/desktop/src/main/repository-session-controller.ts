@@ -46,10 +46,10 @@ import type {
 import type { CoreStatus } from "../../../../packages/protocol/src/core-status.js";
 import type { RequestContext, ServerResponseMessage } from "../../../../packages/protocol/src/messages.js";
 import { CoreProcess } from "./core-process.js";
-import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "../../../../packages/protocol/src/generated/client-message.js";
-import type { BranchSyncResult, OperationCheck, OperationRun, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
+import type { GetBranchSyncParams, PreviewMergeParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "../../../../packages/protocol/src/generated/client-message.js";
+import type { BranchSyncResult, MergePreviewResult, OperationCheck, OperationRun, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
   EvolutionEstimate, EvolutionChunk, EvolutionResult } from "../../../../packages/protocol/src/generated/server-message.js";
-import { ProtocolClientError, validBranchSyncParams, validOperationParams, validPushRepositoryParams, validStatsQueryParams, validChangeStatsParams, validStatsCommitsParams,
+import { ProtocolClientError, validBranchSyncParams, validPreviewMergeParams, validOperationParams, validPushRepositoryParams, validStatsQueryParams, validChangeStatsParams, validStatsCommitsParams,
   validStatsExclusionsParams, validEvolutionParams } from "./protocol-transport.js";
 import { buildRemotePageUrl, type RemotePageTarget, type RemoteWebInfo } from "./remote-page-url.js";
 
@@ -170,7 +170,7 @@ export class RepositorySessionController {
    */
   private readonly channelIntent: Record<ReadChannel, number> = {
     workspaceStatus: 0, workspaceContent: 0, tree: 0, fileContent: 0, fileHistory: 0, fileChange: 0, pathChanges: 0, commitInfo: 0, blame: 0,
-    branchSync: 0, operationCheck: 0, statsActivity: 0, statsChange: 0, statsNotable: 0, statsCommits: 0, statsExclusionsRead: 0, statsExclusionsWrite: 0,
+    branchSync: 0, mergePreview: 0, operationCheck: 0, statsActivity: 0, statsChange: 0, statsNotable: 0, statsCommits: 0, statsExclusionsRead: 0, statsExclusionsWrite: 0,
     evolutionEstimate: 0, evolutionAnalyze: 0,
   };
   /** P5-04: the remotes of the latest navigation snapshot, valid only while that session is the current one. */
@@ -1055,6 +1055,15 @@ export class RepositorySessionController {
     return this.runChannelRequest("branchSync", session, signal => this.readSingleSection(session, "getBranchSync", params, signal,
       data => data.section === "branchSync" ? data.result : undefined,
       result => result.branches.length <= params.refNames.length && result.branches.every(branch => params.refNames.includes(branch.refName))));
+  }
+
+  async previewMerge(input: unknown): Promise<MergePreviewResult> {
+    if (!validPreviewMergeParams(input)) throw new ProtocolClientError("INVALID_REQUEST", "合并预演参数无效");
+    const params = input as PreviewMergeParams;
+    const session = this.requireCurrent();
+    this.requireCapability("repositoryOperations");
+    return this.runChannelRequest("mergePreview", session, signal => this.readSingleSection(session, "previewMerge", params, signal,
+      data => data.section === "mergePreview" ? data.result : undefined, () => true));
   }
 
   async checkOperation(input: unknown): Promise<OperationCheck> {
@@ -1989,7 +1998,10 @@ export class RepositorySessionController {
         }
         const currentMetadata = JSON.stringify({ cursor: data.cursor, offset: data.offset, pageSize: data.pageSize,
           previousCursor: data.previousCursor, hasMore: data.hasMore,
-          newSinceLastSeenStatus: data.newSinceLastSeenStatus, lastSeenDividerOid: data.lastSeenDividerOid });
+          newSinceLastSeenStatus: data.newSinceLastSeenStatus, lastSeenDividerOid: data.lastSeenDividerOid,
+          newSinceLastSeenCount: data.newSinceLastSeenCount ?? null,
+          newSinceLastSeenMinUnix: data.newSinceLastSeenMinUnix ?? null,
+          newSinceLastSeenMaxUnix: data.newSinceLastSeenMaxUnix ?? null });
         if (metadata && metadata !== currentMetadata) throw invalidSessionResponse("刷新历史页分块元数据不一致");
         metadata = currentMetadata;
         if (data.pageSize !== pageSize || commits.length + data.commits.length > pageSize) throw invalidSessionResponse("刷新历史页超过请求上限");
@@ -2003,7 +2015,10 @@ export class RepositorySessionController {
         commits.push(...data.commits);
         page = { commits, offset: data.offset, pageSize: data.pageSize, cursor: data.cursor,
           previousCursor: data.previousCursor, hasMore: data.hasMore,
-          newSinceLastSeenStatus: data.newSinceLastSeenStatus, lastSeenDividerOid: data.lastSeenDividerOid };
+          newSinceLastSeenStatus: data.newSinceLastSeenStatus, lastSeenDividerOid: data.lastSeenDividerOid,
+          ...(data.newSinceLastSeenCount !== undefined ? { newSinceLastSeenCount: data.newSinceLastSeenCount } : {}),
+          ...(data.newSinceLastSeenMinUnix !== undefined ? { newSinceLastSeenMinUnix: data.newSinceLastSeenMinUnix } : {}),
+          ...(data.newSinceLastSeenMaxUnix !== undefined ? { newSinceLastSeenMaxUnix: data.newSinceLastSeenMaxUnix } : {}) };
         if (chunk.done) sawTerminalPage = true;
       },
     });
@@ -2232,12 +2247,27 @@ function validateActivityStatsParams(value: unknown): GetActivityStatsParams {
 function validateHandoffFactsParams(value: unknown): GetHandoffFactsParams {
   const validNullableText = (item: unknown, maxBytes: number) => item === null || typeof item === "string" && item.length > 0 &&
     Buffer.byteLength(item, "utf8") <= maxBytes && !item.includes("\0");
-  if (!isRecord(value) || !hasExactKeys(value, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"]) ||
+  const validOidText = (item: unknown): item is string =>
+    typeof item === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(item);
+  const validOidList = (item: unknown): item is string[] =>
+    Array.isArray(item) && item.length <= 2000 && item.every(validOidText);
+  if (!isRecord(value) || !exactKeys(value, ["branchRef", "operationWorktreeId", "selectedOid", "staleWorktreeId"], ["rangeExcludeTips", "rangeHeadTips", "rangeOldestOid"]) ||
     !validNullableText(value.branchRef, 16 * 1024) || !validNullableText(value.operationWorktreeId, 256) || !validNullableText(value.staleWorktreeId, 256) ||
-    !(value.selectedOid === null || typeof value.selectedOid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(value.selectedOid))) {
+    !(value.selectedOid === null || validOidText(value.selectedOid)) ||
+    !(value.rangeExcludeTips === undefined || validOidList(value.rangeExcludeTips)) ||
+    !(value.rangeHeadTips === undefined || validOidList(value.rangeHeadTips)) ||
+    !(value.rangeOldestOid === undefined || value.rangeOldestOid === null || validOidText(value.rangeOldestOid))) {
     throw new ProtocolClientError("INVALID_REQUEST", "Agent 交接资料请求参数无效");
   }
-  return value as unknown as GetHandoffFactsParams;
+  return {
+    branchRef: value.branchRef as string | null,
+    operationWorktreeId: value.operationWorktreeId as string | null,
+    selectedOid: typeof value.selectedOid === "string" ? value.selectedOid.toLowerCase() : null,
+    staleWorktreeId: value.staleWorktreeId as string | null,
+    ...(value.rangeExcludeTips !== undefined ? { rangeExcludeTips: value.rangeExcludeTips.map(oid => oid.toLowerCase()) } : {}),
+    ...(value.rangeHeadTips !== undefined ? { rangeHeadTips: value.rangeHeadTips.map(oid => oid.toLowerCase()) } : {}),
+    ...(value.rangeOldestOid !== undefined ? { rangeOldestOid: typeof value.rangeOldestOid === "string" ? value.rangeOldestOid.toLowerCase() : null } : {}),
+  };
 }
 
 function validateGetCommitParams(value: unknown): GetCommitParams {
@@ -2300,7 +2330,7 @@ function validateFileParent(parentIndex: number | null, parentCount: number): vo
 }
 
 function isSearchQuery(value: unknown): value is SearchQuery {
-  if (!isRecord(value) || !hasExactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"])) return false;
+  if (!isRecord(value) || !exactKeys(value, ["authors", "caseSensitive", "committers", "fromTimestamp", "message", "oidPrefix", "path", "timeField", "timeZone", "toTimestamp"], ["excludeTips"])) return false;
   const path = value.path;
   const validPath = path === null || isRecord(path) && hasExactKeys(path, ["includeDescendants", "kind", "rawHex"]) &&
     (path.kind === "file" || path.kind === "directory") && typeof path.includeDescendants === "boolean" &&
@@ -2310,12 +2340,14 @@ function isSearchQuery(value: unknown): value is SearchQuery {
   const identities = (item: unknown) => Array.isArray(item) && item.length <= 50 && item.every(identity =>
     isRecord(identity) && hasExactKeys(identity, ["email", "name"]) && typeof identity.name === "string" &&
     Buffer.byteLength(identity.name, "utf8") <= 4096 && typeof identity.email === "string" && Buffer.byteLength(identity.email, "utf8") <= 4096);
+  const excludeTips = value.excludeTips === undefined || Array.isArray(value.excludeTips) && value.excludeTips.length <= 2000 &&
+    value.excludeTips.every(oid => typeof oid === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(oid));
   return typeof value.message === "string" && Buffer.byteLength(value.message, "utf8") <= 4096 &&
     typeof value.caseSensitive === "boolean" && identities(value.authors) && identities(value.committers) &&
     typeof value.oidPrefix === "string" && (value.oidPrefix === "" || /^[0-9a-fA-F]{4,64}$/.test(value.oidPrefix)) &&
     (value.timeField === "author" || value.timeField === "committer") && timestamp(value.fromTimestamp) && timestamp(value.toTimestamp) &&
     (value.fromTimestamp === null || value.toTimestamp === null || (value.fromTimestamp as number) < (value.toTimestamp as number)) &&
-    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128 && validPath;
+    typeof value.timeZone === "string" && value.timeZone.length > 0 && Buffer.byteLength(value.timeZone, "utf8") <= 128 && validPath && excludeTips;
 }
 
 function sameSearchPageMetadata(left: SearchPage, right: SearchPage): boolean {
@@ -2409,6 +2441,9 @@ function appendHistoryPageChunk(
     hasMore: data.hasMore,
     newSinceLastSeenStatus: data.newSinceLastSeenStatus,
     lastSeenDividerOid: data.lastSeenDividerOid,
+    newSinceLastSeenCount: data.newSinceLastSeenCount ?? null,
+    newSinceLastSeenMinUnix: data.newSinceLastSeenMinUnix ?? null,
+    newSinceLastSeenMaxUnix: data.newSinceLastSeenMaxUnix ?? null,
   });
   if (state.metadata && currentMetadata !== state.metadata) throw invalidSessionResponse("历史页分块元数据不一致");
   state.metadata = currentMetadata;
@@ -2435,6 +2470,9 @@ function appendHistoryPageChunk(
     hasMore: data.hasMore,
     newSinceLastSeenStatus: data.newSinceLastSeenStatus,
     lastSeenDividerOid: data.lastSeenDividerOid,
+    ...(data.newSinceLastSeenCount !== undefined ? { newSinceLastSeenCount: data.newSinceLastSeenCount } : {}),
+    ...(data.newSinceLastSeenMinUnix !== undefined ? { newSinceLastSeenMinUnix: data.newSinceLastSeenMinUnix } : {}),
+    ...(data.newSinceLastSeenMaxUnix !== undefined ? { newSinceLastSeenMaxUnix: data.newSinceLastSeenMaxUnix } : {}),
   };
   if (chunk.done) state.sawTerminalPage = true;
 }
@@ -2676,7 +2714,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 type ReadChannel = "workspaceStatus" | "workspaceContent" | "tree" | "fileContent" | "fileHistory" | "fileChange" | "pathChanges" | "commitInfo" | "blame"
-  | "branchSync" | "operationCheck" | "statsActivity" | "statsChange" | "statsNotable" | "statsCommits" | "statsExclusionsRead" | "statsExclusionsWrite"
+  | "branchSync" | "mergePreview" | "operationCheck" | "statsActivity" | "statsChange" | "statsNotable" | "statsCommits" | "statsExclusionsRead" | "statsExclusionsWrite"
   | "evolutionEstimate" | "evolutionAnalyze";
 
 interface ActiveChannelRequest {

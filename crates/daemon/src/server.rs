@@ -93,6 +93,7 @@ enum RequestOperation {
     FetchRepository(commitscope_core::FetchRepositoryParams),
     PushRepository(commitscope_core::PushRepositoryParams),
     GetBranchSync(commitscope_core::GetBranchSyncParams),
+    PreviewMerge(commitscope_core::PreviewMergeParams),
     CheckOperation(commitscope_core::OperationParams),
     RunOperation(commitscope_core::OperationParams),
     RecordRepositoryView,
@@ -604,6 +605,7 @@ fn operation_requires_session(operation: &RequestOperation) -> bool {
             | RequestOperation::FetchRepository(_)
             | RequestOperation::PushRepository(_)
             | RequestOperation::GetBranchSync(_)
+            | RequestOperation::PreviewMerge(_)
             | RequestOperation::CheckOperation(_)
             | RequestOperation::RunOperation(_)
             | RequestOperation::RecordRepositoryView
@@ -1194,16 +1196,21 @@ fn dispatch_request(
                 cancelled,
                 git_path.map(std::path::Path::to_path_buf),
                 session,
-                move |_, session, cancelled, deadline| {
+                move |git, session, cancelled, deadline| {
                     crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
-                    let stats =
-                        crate::change_stats::change_stats(session, &params, cancelled, deadline)
-                            .map_err(|e| crate::details::DetailError {
-                                code: e.code,
-                                message: e.message,
-                                retryable: false,
-                            })?;
+                    let stats = crate::change_stats::change_stats(
+                        Some(git),
+                        session,
+                        &params,
+                        cancelled,
+                        deadline,
+                    )
+                    .map_err(|e| crate::details::DetailError {
+                        code: e.code,
+                        message: e.message,
+                        retryable: false,
+                    })?;
                     Ok((ResponseData::ChangeStats { stats }, 1))
                 },
             );
@@ -1221,16 +1228,21 @@ fn dispatch_request(
                 cancelled,
                 git_path.map(std::path::Path::to_path_buf),
                 session,
-                move |_, session, cancelled, deadline| {
+                move |git, session, cancelled, deadline| {
                     crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
-                    let stats =
-                        crate::change_stats::notable_stats(session, &params, cancelled, deadline)
-                            .map_err(|e| crate::details::DetailError {
-                            code: e.code,
-                            message: e.message,
-                            retryable: false,
-                        })?;
+                    let stats = crate::change_stats::notable_stats(
+                        Some(git),
+                        session,
+                        &params,
+                        cancelled,
+                        deadline,
+                    )
+                    .map_err(|e| crate::details::DetailError {
+                        code: e.code,
+                        message: e.message,
+                        retryable: false,
+                    })?;
                     Ok((ResponseData::NotableStats { stats }, 1))
                 },
             );
@@ -1248,16 +1260,21 @@ fn dispatch_request(
                 cancelled,
                 git_path.map(std::path::Path::to_path_buf),
                 session,
-                move |_, session, cancelled, deadline| {
+                move |git, session, cancelled, deadline| {
                     crate::stats::prepare_worker(cancelled, deadline)?;
                     let _ = (&params, cancelled, deadline);
-                    let page =
-                        crate::change_stats::stats_commits(session, &params, cancelled, deadline)
-                            .map_err(|e| crate::details::DetailError {
-                            code: e.code,
-                            message: e.message,
-                            retryable: false,
-                        })?;
+                    let page = crate::change_stats::stats_commits(
+                        Some(git),
+                        session,
+                        &params,
+                        cancelled,
+                        deadline,
+                    )
+                    .map_err(|e| crate::details::DetailError {
+                        code: e.code,
+                        message: e.message,
+                        retryable: false,
+                    })?;
                     Ok((ResponseData::StatsCommitPage { page }, 1))
                 },
             );
@@ -1369,15 +1386,20 @@ fn dispatch_request(
                 cancelled,
                 git_path.map(std::path::Path::to_path_buf),
                 session,
-                move |_, session, cancelled, deadline| {
+                move |git, session, cancelled, deadline| {
                     crate::stats::prepare_worker(cancelled, deadline)?;
-                    let stats =
-                        crate::stats::activity_overview(session, &params, cancelled, deadline)
-                            .map_err(|e| crate::details::DetailError {
-                                code: e.code,
-                                message: e.message,
-                                retryable: false,
-                            })?;
+                    let stats = crate::stats::activity_overview(
+                        Some(git),
+                        session,
+                        &params,
+                        cancelled,
+                        deadline,
+                    )
+                    .map_err(|e| crate::details::DetailError {
+                        code: e.code,
+                        message: e.message,
+                        retryable: false,
+                    })?;
                     Ok((ResponseData::ActivityOverview { stats }, 1))
                 },
             );
@@ -1783,6 +1805,27 @@ fn dispatch_request(
                         git, session, &params, cancelled, deadline,
                     )?;
                     Ok((ResponseData::BranchSync { result }, 1))
+                },
+            );
+        }
+        RequestOperation::PreviewMerge(params) => {
+            let session = bound_session.expect("session context was checked before dispatch");
+            spawn_commit_detail_worker(
+                workers,
+                sender.clone(),
+                Arc::clone(shutdown),
+                Arc::clone(requests),
+                request_id,
+                repo_id,
+                generation,
+                cancelled,
+                git_path.map(std::path::Path::to_path_buf),
+                session,
+                move |git, session, cancelled, deadline| {
+                    let result = crate::operations::preview_merge(
+                        git, session, &params, cancelled, deadline,
+                    )?;
+                    Ok((ResponseData::MergePreview { result }, 1))
                 },
             );
         }
@@ -2591,6 +2634,9 @@ fn emit_refresh_result(
                 has_more: page.has_more,
                 new_since_last_seen_status: page.new_since_last_seen_status,
                 last_seen_divider_oid: page.last_seen_divider_oid.clone(),
+                new_since_last_seen_count: page.new_since_last_seen_count,
+                new_since_last_seen_min_unix: page.new_since_last_seen_min_unix,
+                new_since_last_seen_max_unix: page.new_since_last_seen_max_unix,
             },
         };
         if !send_queued_message(sender, shutdown, &message) {
@@ -2752,6 +2798,7 @@ fn validate_request(
         | "fetchRepository"
         | "pushRepository"
         | "getBranchSync"
+        | "previewMerge"
         | "checkOperation"
         | "runOperation"
         | "recordRepositoryView"
@@ -3122,6 +3169,11 @@ fn validate_request(
                             )
                         })
                 }
+                "previewMerge" => {
+                    serde_json::from_value::<commitscope_core::PreviewMergeParams>(params.clone())
+                        .map(RequestOperation::PreviewMerge)
+                        .map_err(|_| (ErrorCode::InvalidRequest, "previewMerge params 无效".into()))
+                }
                 "checkOperation" => {
                     serde_json::from_value::<commitscope_core::OperationParams>(params.clone())
                         .map(RequestOperation::CheckOperation)
@@ -3219,6 +3271,7 @@ fn validate_request(
         | "fetchRepository"
         | "pushRepository"
         | "getBranchSync"
+        | "previewMerge"
         | "checkOperation"
         | "runOperation"
         | "recordRepositoryView"
@@ -3972,6 +4025,9 @@ fn send_history_page_chunks(
                 has_more: page.has_more,
                 new_since_last_seen_status: page.new_since_last_seen_status,
                 last_seen_divider_oid: page.last_seen_divider_oid.clone(),
+                new_since_last_seen_count: page.new_since_last_seen_count,
+                new_since_last_seen_min_unix: page.new_since_last_seen_min_unix,
+                new_since_last_seen_max_unix: page.new_since_last_seen_max_unix,
             },
         };
         if !send_task_message(sender, shutdown, cancelled, &message) {
@@ -4510,6 +4566,9 @@ fn pack_history_chunks(
                 has_more: page.has_more,
                 new_since_last_seen_status: page.new_since_last_seen_status,
                 last_seen_divider_oid: page.last_seen_divider_oid.clone(),
+                new_since_last_seen_count: page.new_since_last_seen_count,
+                new_since_last_seen_min_unix: page.new_since_last_seen_min_unix,
+                new_since_last_seen_max_unix: page.new_since_last_seen_max_unix,
             },
         };
         if current.len() > COMMIT_CHUNK_SIZE
@@ -4543,6 +4602,9 @@ fn pack_history_chunks(
                     has_more: page.has_more,
                     new_since_last_seen_status: page.new_since_last_seen_status,
                     last_seen_divider_oid: page.last_seen_divider_oid.clone(),
+                    new_since_last_seen_count: page.new_since_last_seen_count,
+                    new_since_last_seen_min_unix: page.new_since_last_seen_min_unix,
+                    new_since_last_seen_max_unix: page.new_since_last_seen_max_unix,
                 },
             };
             if serde_json::to_vec(&single).map_err(|_| ())?.len() > RESPONSE_TARGET_BYTES {

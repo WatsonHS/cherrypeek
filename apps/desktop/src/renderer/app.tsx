@@ -8,12 +8,14 @@ import type { RepositoryNavigation } from "../../../../packages/protocol/src/rep
 import type { HandoffRequest } from "./components/handoff-dialog.js";
 import { fetchFailedRequest, handoffFactsTarget } from "./lib/handoff-prompt.js";
 import { CreateBranchDialog, type BranchStart } from "./components/create-branch-dialog.js";
+import { DivergedSyncDialog } from "./components/diverged-sync-dialog.js";
 import { FastForwardMergeDialog, type FastForwardMergeTarget } from "./components/fast-forward-merge-dialog.js";
+import { ThreePaneMergeView, type ThreePaneMergeSession } from "./components/three-pane-merge-view.js";
 import { FetchFailureBanner, type FetchNoticeValue } from "./components/operation-banners.js";
 import { OperationFailureBanner, OperationNoticeBanner, OperationRefusal } from "./components/operation-outcomes.js";
 import { OperationsStore } from "./lib/operations-store.js";
 import { useOperations, type OperationsActions } from "./lib/use-operations.js";
-import { refTip, webRemote } from "./lib/operations.js";
+import { refTip, webRemote, type DivergedSyncTarget } from "./lib/operations.js";
 import type { SearchQuery, SearchTimeField } from "../../../../packages/protocol/src/generated/client-message.js";
 import { COMMIT_DETAIL_SCROLL_EVENT, CommitDetail } from "./components/commit-detail.js";
 import { CommitList } from "./components/commit-list.js";
@@ -24,8 +26,10 @@ import type { RecentState } from "./components/recent-repositories.js";
 import { StatusBar } from "./components/status-bar.js";
 import { FOCUS_SEARCH_EVENT, TopBar } from "./components/top-bar.js";
 import type { AppPage } from "./components/page-switch.js";
-import { PageSearchBox, SearchControls } from "./components/search-controls.js";
+import { PageSearchBox, SearchControls, ActiveSearchChips } from "./components/search-controls.js";
 import { StatsPage } from "./components/stats-page.js";
+import { batchFilterQuery, latestUpdateBatch, unseenBatchFromSession, zoomRangeForBatch, type UpdateBatchRecord } from "./lib/update-batch.js";
+import type { UnixRange } from "./lib/stats-range.js";
 import { WorkspacePage } from "./components/workspace-page.js";
 import { DiffFullContext, useDiffDisplayShortcuts } from "./components/diff-view.js";
 import { FilesPage, type FilesActions, type VersionOption } from "./components/files-page.js";
@@ -236,6 +240,13 @@ export function App(): React.JSX.Element {
   const [fetchFailure, setFetchFailure] = React.useState<{ message: string; prune: boolean; remote: string | null; atUnixMs: number; repoId: string } | null>(null);
   const [branchStart, setBranchStart] = React.useState<BranchStart | null>(null);
   const [ffMergeTarget, setFfMergeTarget] = React.useState<FastForwardMergeTarget | null>(null);
+  const [divergedSyncTarget, setDivergedSyncTarget] = React.useState<DivergedSyncTarget | null>(null);
+  const [threePaneMerge, setThreePaneMerge] = React.useState<ThreePaneMergeSession | null>(null);
+  const currentRepoId = view.session?.repoId ?? null;
+  React.useEffect(() => {
+    setDivergedSyncTarget(null);
+    setThreePaneMerge(null);
+  }, [currentRepoId]);
   const activityStatsSupported = ready && status.core.capabilities.includes("activityStats");
   const { recent, refresh: refreshRecent } = useRecentRepositories(ready, view.session);
   const [path, setPathState] = React.useState("");
@@ -462,18 +473,35 @@ export function App(): React.JSX.Element {
     setHandoffRequest(request);
     setHandoffOpen(true);
   }, []);
-  const loadHandoffFacts = React.useCallback(async (request: HandoffRequest, _intent: number): Promise<HandoffFacts | null> => {
-    if (!view.session) return null;
+  const loadHandoffFacts = React.useCallback(async (request: HandoffRequest, _intent: number, signal?: AbortSignal): Promise<HandoffFacts | null> => {
+    if (!view.session || signal?.aborted) return null;
     const target = handoffFactsTarget(request.target);
+    const rangeParams = request.target.kind === "commits"
+      ? {
+          ...(request.target.excludeTips?.length ? { rangeExcludeTips: request.target.excludeTips } : {}),
+          ...(request.target.headTips?.length ? { rangeHeadTips: request.target.headTips } : {}),
+          ...(request.target.oldestOid ? { rangeOldestOid: request.target.oldestOid } : {}),
+        }
+      : {};
     const params: GetHandoffFactsParams = {
       branchRef: target?.kind === "branch" ? target.ref : null,
       selectedOid: target?.kind === "commit" ? target.oid : null,
       operationWorktreeId: target?.kind === "worktree" && !target.stale ? target.id : null,
       staleWorktreeId: target?.kind === "worktree" && target.stale ? target.id : null,
+      ...rangeParams,
     };
-    const result = await settle(window.commitScope.getHandoffFacts(params));
-    if (!result.ok) throw new Error(result.error.message);
-    return result.value;
+    const maxAttempts = 20;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (signal?.aborted) return null;
+      const result = await settle(window.commitScope.getHandoffFacts(params));
+      if (result.ok) return result.value;
+      if (signal?.aborted) return null;
+      // Foreground reads (e.g. commit-detail sequence) can preempt passive handoff facts with BUSY/CANCELLED.
+      const retryableBusy = result.error.code === "BUSY" || result.error.code === "CANCELLED";
+      if (!retryableBusy || attempt === maxAttempts - 1) throw new Error(result.error.message);
+      await waitAbortable(250, signal);
+    }
+    return null;
   }, [view.session]);
   const returnToSearch = React.useCallback(async (queryOverride?: SearchQuery): Promise<boolean> => {
     const location = historyLocation;
@@ -901,6 +929,7 @@ export function App(): React.JSX.Element {
     store: operationsStore, sessionStore: store, view, supported: operationsSupported && !view.repository?.isBare,
     remotes: view.navigation?.remotes ?? [],
     pushRepository: window.commitScope.pushRepository,
+    previewMerge: window.commitScope.previewMerge,
     fetchAll: () => startFetch(false), fetching, refresh,
     afterChange: () => { void workspaceStore.readStatus(true); },
     dismissFetchNotice: () => setFetchNotice(null), openHandoff,
@@ -982,6 +1011,54 @@ export function App(): React.JSX.Element {
     if (next !== placeState.current.page) recordJump();
     setPage(next);
   }, [pageAllowed, recordJump]);
+  const [statsFocusZoom, setStatsFocusZoom] = React.useState<{ token: number; range: UnixRange } | null>(null);
+  const focusZoomSeq = React.useRef(0);
+  const latestBatch = React.useMemo(() => (
+    view.session ? latestUpdateBatch(view.session.repositoryKey, view.session.worktreeId) : null
+  ), [view.session, operationsView.notice]);
+  const unseenBatch = React.useMemo(() => unseenBatchFromSession({
+    session: view.session,
+    status: view.newSinceLastSeenStatus,
+    count: view.newSinceLastSeenCount,
+    minUnix: view.newSinceLastSeenMinUnix,
+    maxUnix: view.newSinceLastSeenMaxUnix,
+  }), [view.session, view.newSinceLastSeenStatus, view.newSinceLastSeenCount, view.newSinceLastSeenMinUnix, view.newSinceLastSeenMaxUnix]);
+  const availableBatches = React.useMemo(() => {
+    const list: UpdateBatchRecord[] = [];
+    if (latestBatch) list.push(latestBatch);
+    if (unseenBatch && !list.some(item => item.oldTips.join(",") === unseenBatch.oldTips.join(","))) {
+      list.push(unseenBatch);
+    }
+    return list;
+  }, [latestBatch, unseenBatch]);
+  const applyBatchFilter = React.useCallback((batch: UpdateBatchRecord) => {
+    changePage("commits");
+    updateSearchQuery(batchFilterQuery(displayedQuery, batch.oldTips));
+  }, [changePage, displayedQuery, updateSearchQuery]);
+  const openBatchStats = React.useCallback((batch: UpdateBatchRecord) => {
+    updateSearchQuery(batchFilterQuery(displayedQuery, batch.oldTips));
+    const zoom = zoomRangeForBatch(batch);
+    setStatsFocusZoom(zoom ? { token: ++focusZoomSeq.current, range: zoom } : null);
+    statsVisited.current = true;
+    changePage("stats");
+  }, [changePage, displayedQuery, updateSearchQuery]);
+  const openBatchHandoff = React.useCallback((batch: UpdateBatchRecord) => {
+    const loadedCommits = batch.kind === "unseen"
+      ? view.commits.filter(commit => commit.isNewSinceLastSeen).map(commit => ({ oid: commit.oid, summary: commit.summary }))
+      : [];
+    openHandoff({
+      scenario: "review-range",
+      target: {
+        kind: "commits",
+        commits: loadedCommits,
+        complete: false,
+        reason: "new",
+        excludeTips: batch.oldTips,
+        headTips: batch.newTips,
+        ...(batch.addedCount !== null ? { totalCount: batch.addedCount } : {}),
+      },
+    });
+  }, [openHandoff, view.commits]);
   React.useEffect(() => {
     if (page === "workspace" && workspaceUnavailable || page === "files" && !filesAvailable) setPage("commits");
   }, [page, workspaceUnavailable, filesAvailable]);
@@ -1164,7 +1241,7 @@ export function App(): React.JSX.Element {
   const versionOptions = React.useMemo(() => treeVersionOptions(view, scopeTreeVersion), [view.navigation, view.refs, scopeTreeVersion]);
   let pageSearch: React.JSX.Element | null = null;
   if (page === "commits" && sessionKey && coreCapabilities.includes("metadataSearch")) {
-    pageSearch = <SearchControls view={searchView} sessionKey={sessionKey} onQueryChange={updateSearchQuery}
+    pageSearch = <SearchControls view={searchView} sessionKey={sessionKey} batches={availableBatches} onQueryChange={updateSearchQuery}
       onComposition={finishSearchComposition} onLoadIdentities={loadSearchIdentities} onLoadPaths={loadSearchPaths} />;
   } else if (page === "workspace" && workspaceView.supported) {
     pageSearch = <PageSearchBox scope="改动的文件" label="按路径过滤改动的文件" placeholder="按路径过滤" value={workspaceFilter}
@@ -1423,6 +1500,7 @@ export function App(): React.JSX.Element {
         activityStats={activityStats?.key === activityKey ? activityStats.value : null} activityLoading={activityLoading} activityError={activityError}
         onLoadActivity={() => { activityLoadedSignature.current = null; setActivityError(null); scheduleActivity(0); }}
         onActivityAuthor={addActivityAuthor} onOpenHandoff={openHandoff} onCreateBranch={setBranchStart} onFastForwardMerge={operations ? setFfMergeTarget : undefined}
+        onResolveDiverged={operations ? setDivergedSyncTarget : undefined}
         page={page} onPageChange={changePage} workspace={workspaceBadge(workspaceIndicatorFor(workspaceView), view.repository, workspaceBranch)}
         workspaceBranch={workspaceBranch} filesAvailable={filesAvailable} pageSearch={pageSearch} />
       : <div className="window-toolbar window-toolbar-empty" aria-hidden="true" />}
@@ -1455,7 +1533,8 @@ export function App(): React.JSX.Element {
         void operations.pushBranch(meta.refName, { remote: meta.remote ?? null, setUpstream: meta.upstream === null });
       } : undefined}
       onHandoff={() => { const request = operations?.failureHandoff(); if (request) openHandoff(request); }} onClose={() => operationsStore.dismissFailure()} /> : null}
-    {operationsView.notice ? <OperationNoticeBanner message={operationsView.notice} onClose={() => operationsStore.dismissNotice()} /> : null}
+    {operationsView.notice ? <OperationNoticeBanner message={operationsView.notice} onClose={() => operationsStore.dismissNotice()}
+      onFilterBatch={applyBatchFilter} onStatsBatch={openBatchStats} onHandoffBatch={openBatchHandoff} /> : null}
     {view.repository
       ? <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Pages stay mounted while hidden so each keeps its own selection, filters and scroll position. */}
@@ -1474,6 +1553,8 @@ export function App(): React.JSX.Element {
             {locationReturn?.partial ? `返回已发现 ${locationReturn.matchedCount} 个结果` : `返回 ${locationReturn?.matchedCount ?? 0} 个结果`}
           </Button>
         </div> : null}
+        {searchView.active && !historyLocation ? <ActiveSearchChips query={displayedQuery} batches={availableBatches}
+          onQueryChange={updateSearchQuery} onOpenStats={() => { statsVisited.current = true; changePage("stats"); }} /> : null}
         <HistorySplitView narrow={narrowHistory} detailOpen={detailOpen} active={page === "commits"} onCloseDetail={closeDetail} sidebar={searchView.active
             ? <SearchResultList view={searchView} onSelect={activateDisplayedCommit} onAnchor={setSearchAnchor}
               onNext={loadSearchNext} onPrevious={loadSearchPrevious} onRetry={retrySearch} />
@@ -1485,7 +1566,7 @@ export function App(): React.JSX.Element {
             activityDays={historyActivity?.days ?? null}
             activityDaysPartial={historyActivity ? !historyActivity.coverage.complete : false}
             activityDaysTruncated={historyActivity?.daysTruncated ?? false}
-            onLocateHistoryDate={locateHistoryDate} onLocateHistoryTime={locateDateTimestamp} onScrubbingChange={setHistoryScrubbing} onJumpToNewest={jumpToNewest} onOpenHandoff={openHandoff} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
+            onLocateHistoryDate={locateHistoryDate} onLocateHistoryTime={locateDateTimestamp} onScrubbingChange={setHistoryScrubbing} onJumpToNewest={jumpToNewest} onOpenHandoff={openHandoff} onFilterBatch={applyBatchFilter} onStatsBatch={openBatchStats} onCancelHistoryDate={cancelHistoryDate} onRetryHistoryDate={retryHistoryDate}
             onPrefetchPreviousPage={() => { const cursor = store.getView().windowPreviousCursor; if (cursor) void store.readPage(cursor); }}
             onPrefetchNextPage={() => { const cursor = store.getView().windowNextCursor; if (cursor) void store.readPage(cursor); }}
             restorationAnchor={anchorBeforeRefresh.current}
@@ -1541,9 +1622,21 @@ export function App(): React.JSX.Element {
         <StatsPage api={window.commitScope} sessionKey={currentSessionKey ? `${currentSessionKey}:${JSON.stringify(view.session?.scope ?? null)}` : null} query={displayedQuery}
           capabilities={{ activity: coreCapabilities.includes("activityOverview"), changes: coreCapabilities.includes("changeStats"), notable: coreCapabilities.includes("notableStats"), evolution: coreCapabilities.includes("evolution") }}
           active={page === "stats"} indexKey={activityIndexKey} evolutionVersion={scopeTreeVersion} allBranches={view.session?.scope === "allBranches"}
+          batches={availableBatches} focusZoom={statsFocusZoom}
           onQueryChange={updateSearchQuery} onAuthor={addActivityAuthor} onShowCommits={() => changePage("commits")}
           onShowCommit={oid => { changePage("commits"); void showCommit(oid); }} />
       </div> : null}
+      {threePaneMerge && view.repository && operations ? (
+        <ThreePaneMergeView
+          session={threePaneMerge}
+          headOid={view.repository.headOid ?? null}
+          repository={view.repository}
+          busy={Boolean(operations.busy)}
+          onSubmit={params => operations.completeMerge(params)}
+          onHandoff={openHandoff}
+          onCancel={() => setThreePaneMerge(null)}
+        />
+      ) : null}
       </div>
       : <OpenScreen preview={view} actions={actions} recent={recent} />}
     <StatusBar status={status} preview={statusView}
@@ -1574,7 +1667,23 @@ export function App(): React.JSX.Element {
       hasHandoff={Boolean(operations?.refusalHandoff())} onClose={() => operationsStore.dismissRefusal()} onOpenWorkspace={() => changePage("workspace")}
       onReplaceUntracked={operations ? choice => { void operations.replaceUntrackedAndUpdate(choice); } : undefined}
       onFetch={actions.fetch ? () => { void actions.fetch?.start(false); } : undefined}
+      onResolveDiverged={operations ? setDivergedSyncTarget : undefined}
       onHandoff={() => { const request = operations?.refusalHandoff(); if (request) openHandoff(request); }} /> : null}
+    <DivergedSyncDialog
+      target={operations && !threePaneMerge ? divergedSyncTarget : null}
+      repository={view.repository ?? null}
+      headOid={view.repository?.headOid ?? null}
+      busy={Boolean(operations?.busy)}
+      previewMerge={params => operations ? operations.previewMerge(params) : Promise.resolve({ ok: false, error: { code: "PROTOCOL_ERROR", message: "操作不可用", retryable: false } })}
+      onConfirmClean={params => operations ? operations.completeMerge({ ...params, resolvedFiles: [] }) : Promise.resolve(false)}
+      onOpenThreePane={(target, preview) => {
+        setDivergedSyncTarget(null);
+        setThreePaneMerge({ target, preview });
+      }}
+      onOpenWorkspace={() => changePage("workspace")}
+      onHandoff={openHandoff}
+      onClose={() => setDivergedSyncTarget(null)}
+    />
     <CreateBranchDialog start={operations ? branchStart : null} onClose={() => setBranchStart(null)}
       busy={Boolean(operations?.busy)} onCreate={(name, startOid, switchAfter) => operations ? operations.createBranch(name, startOid, switchAfter) : Promise.resolve({ close: true })}
       existingBranches={(view.navigation?.refs ?? view.refs).filter(ref => ref.kind === "localBranch").map(ref => shortRefName(ref.name))} />
@@ -1655,4 +1764,20 @@ function describeScope(scope: RepositoryScope | null, navigation: RepositoryNavi
   if ("ref" in scope) return scope.ref;
   const worktree = navigation?.worktrees.find(item => item.id === scope.worktree);
   return worktree ? `worktree ${repositoryName(worktree.path)}` : "选中的 worktree";
+}
+
+/** Sleeps for `ms` milliseconds unless `signal` aborts first. */
+function waitAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

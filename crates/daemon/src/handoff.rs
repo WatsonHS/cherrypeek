@@ -5,14 +5,24 @@ use crate::{
     session,
 };
 use commitscope_core::{
-    ErrorCode, GetHandoffFactsParams, HandoffFacts, HandoffParentGroup, RefInfo, RefKind,
-    RepositoryNavigation, RepositoryScope,
+    ErrorCode, GetHandoffFactsParams, HandoffFacts, HandoffParentGroup, HandoffRangeSummary,
+    RefInfo, RefKind, RepositoryNavigation, RepositoryScope,
 };
-use std::{collections::BTreeSet, path::Path, sync::atomic::AtomicBool, time::Instant};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::Path,
+    sync::atomic::AtomicBool,
+    time::Instant,
+};
 
 const HANDOFF_COMMIT_LIMIT: usize = 50;
 const HANDOFF_GROUP_LIMIT: usize = 127;
 const HANDOFF_OVERLAP_LIMIT: usize = 20;
+const HANDOFF_RANGE_HEAD_LIMIT: usize = 80;
+const HANDOFF_RANGE_TAIL_LIMIT: usize = 20;
+const HANDOFF_RANGE_OID_LIMIT: usize = 250_000;
+const HANDOFF_RANGE_MAX_TIPS: usize = 2000;
+const OID_LINE_LIMIT: usize = 128;
 const REF_NAME_LIMIT: usize = 16 * 1024;
 const GIT_COUNT_LIMIT: usize = 4096;
 const PATH_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
@@ -134,9 +144,9 @@ pub fn get_handoff_facts(
         if !repository::history_boundary_limited(discovered) {
             let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(from_git)?;
             let repo_path = Path::new(&discovered.info.path);
-            if let Some((branch_ahead, base_behind)) =
-                read_ahead_behind(&git, repo_path, &base.oid, branch_tip, cancelled, deadline)?
-            {
+            if let Some((branch_ahead, base_behind)) = read_ahead_behind(
+                &git, repo_path, &base.oid, branch_tip, false, cancelled, deadline,
+            )? {
                 ahead = Some(branch_ahead);
                 behind = Some(base_behind);
             }
@@ -203,6 +213,7 @@ pub fn get_handoff_facts(
         }
         _ => (Vec::new(), false),
     };
+    let range_summary = read_range_summary(executable, discovered, params, cancelled, deadline)?;
 
     repository::verify_graph_fingerprint(discovered, cancelled, deadline).map_err(from_preview)?;
     Ok(HandoffFacts {
@@ -231,7 +242,179 @@ pub fn get_handoff_facts(
         checked_out_by,
         checked_out_by_complete,
         stale_worktree,
+        range_summary,
     })
+}
+
+fn push_commit_graph_disable(args: &mut Vec<std::ffi::OsString>, boundary_limited: bool) {
+    if boundary_limited {
+        args.push(string_arg("-c"));
+        args.push(string_arg("core.commitGraph=false"));
+    }
+}
+
+fn normalize_oids(oids: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = oids.iter().map(|oid| oid.to_ascii_lowercase()).collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn read_range_summary(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    params: &GetHandoffFactsParams,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<HandoffRangeSummary>, DetailError> {
+    if params.range_exclude_tips.is_empty() && params.range_oldest_oid.is_none() {
+        return Ok(None);
+    }
+    if params.range_exclude_tips.len() > HANDOFF_RANGE_MAX_TIPS
+        || params.range_head_tips.len() > HANDOFF_RANGE_MAX_TIPS
+    {
+        return Err(DetailError {
+            code: ErrorCode::InvalidRequest,
+            message: "Range tip list exceeds maximum length".into(),
+            retryable: false,
+        });
+    }
+    for oid in params
+        .range_exclude_tips
+        .iter()
+        .chain(&params.range_head_tips)
+        .chain(&params.range_oldest_oid)
+    {
+        validate_oid(oid, discovered.oid_length)?;
+    }
+
+    let mut check_oids = Vec::new();
+    for oid in params
+        .range_exclude_tips
+        .iter()
+        .chain(&params.range_head_tips)
+        .chain(&params.range_oldest_oid)
+    {
+        check_oids.push(oid.to_ascii_lowercase());
+    }
+    check_oids.sort();
+    check_oids.dedup();
+    repository::verify_commit_oids(executable, discovered, &check_oids, cancelled, deadline)
+        .map_err(from_preview)?;
+
+    let head_tips = if params.range_head_tips.is_empty() {
+        discovered.scope_tips.clone()
+    } else {
+        normalize_oids(&params.range_head_tips)
+    };
+    if head_tips.is_empty() {
+        return Ok(Some(HandoffRangeSummary {
+            total_count: 0,
+            newest_oid: None,
+            oldest_oid: None,
+            head_tips,
+            exclude_tips: Vec::new(),
+            head_commits: Vec::new(),
+            tail_commits: Vec::new(),
+        }));
+    }
+
+    let exclude_tips = if !params.range_exclude_tips.is_empty() {
+        normalize_oids(&params.range_exclude_tips)
+    } else if let Some(oldest_oid) = params.range_oldest_oid.as_deref() {
+        let target = oldest_oid.to_ascii_lowercase();
+        let summaries = repository::read_commit_summaries(
+            executable,
+            discovered,
+            std::slice::from_ref(&target),
+            cancelled,
+            deadline,
+        )
+        .map_err(from_preview)?;
+        let summary = summaries.into_iter().next().ok_or_else(|| DetailError {
+            code: ErrorCode::MissingObject,
+            message: "Commit OID was not found".into(),
+            retryable: false,
+        })?;
+        summary.parents
+    } else {
+        Vec::new()
+    };
+
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(from_git)?;
+    let cwd = Path::new(&discovered.info.path);
+    let boundary_limited = repository::history_boundary_limited(discovered);
+    let mut args = Vec::with_capacity(6 + head_tips.len() + exclude_tips.len());
+    push_commit_graph_disable(&mut args, boundary_limited);
+    args.push(string_arg("rev-list"));
+    args.push(string_arg("--topo-order"));
+    args.extend(head_tips.iter().map(string_arg));
+    if !exclude_tips.is_empty() {
+        args.push(string_arg("--not"));
+        args.extend(exclude_tips.iter().map(string_arg));
+    }
+    args.push(string_arg("--"));
+
+    let mut stream = git
+        .stream_lines(cwd, &args, OID_LINE_LIMIT)
+        .map_err(from_git)?;
+    let mut total_count = 0_u64;
+    let mut newest_oid: Option<String> = None;
+    let mut oldest_oid: Option<String> = None;
+    let mut head_oids: Vec<String> = Vec::with_capacity(HANDOFF_RANGE_HEAD_LIMIT);
+    let mut tail_oids: VecDeque<String> = VecDeque::with_capacity(HANDOFF_RANGE_TAIL_LIMIT);
+    while let Some(line) = stream.next_line(cancelled, deadline).map_err(from_git)? {
+        let line = line.strip_suffix(b"\r").unwrap_or(&line);
+        let oid = std::str::from_utf8(line)
+            .map_err(|_| DetailError {
+                code: ErrorCode::GitError,
+                message: "Git returned non-UTF-8 commit ID".into(),
+                retryable: false,
+            })?
+            .to_ascii_lowercase();
+        validate_oid(&oid, discovered.oid_length)?;
+        total_count += 1;
+        if total_count > HANDOFF_RANGE_OID_LIMIT as u64 {
+            return Err(DetailError {
+                code: ErrorCode::ResourceLimit,
+                message: "交接范围超过 250000 个提交，请缩小批次或时间范围".into(),
+                retryable: false,
+            });
+        }
+        if newest_oid.is_none() {
+            newest_oid = Some(oid.clone());
+        }
+        oldest_oid = Some(oid.clone());
+        if head_oids.len() < HANDOFF_RANGE_HEAD_LIMIT {
+            head_oids.push(oid);
+        } else {
+            if tail_oids.len() == HANDOFF_RANGE_TAIL_LIMIT {
+                tail_oids.pop_front();
+            }
+            tail_oids.push_back(oid);
+        }
+    }
+
+    let head_len = head_oids.len();
+    let mut combined = head_oids;
+    combined.extend(tail_oids);
+    let mut summaries =
+        repository::read_commit_summaries(executable, discovered, &combined, cancelled, deadline)
+            .map_err(from_preview)?;
+    let tail_commits = if summaries.len() > head_len {
+        summaries.split_off(head_len)
+    } else {
+        Vec::new()
+    };
+    Ok(Some(HandoffRangeSummary {
+        total_count,
+        newest_oid,
+        oldest_oid,
+        head_tips,
+        exclude_tips,
+        head_commits: summaries,
+        tail_commits,
+    }))
 }
 
 fn frozen_scope_branch_ref<'a>(
@@ -269,20 +452,22 @@ fn read_ahead_behind(
     repository_path: &Path,
     base_oid: &str,
     branch_oid: &str,
+    boundary_limited: bool,
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<Option<(u64, u64)>, DetailError> {
+    let mut args = Vec::with_capacity(7);
+    push_commit_graph_disable(&mut args, boundary_limited);
+    args.extend([
+        string_arg("rev-list"),
+        string_arg("--left-right"),
+        string_arg("--count"),
+        string_arg(format!("{base_oid}...{branch_oid}")),
+        string_arg("--"),
+    ]);
     let output = match git.run(
         repository_path,
-        &[
-            string_arg("-c"),
-            string_arg("core.commitGraph=false"),
-            string_arg("rev-list"),
-            string_arg("--left-right"),
-            string_arg("--count"),
-            string_arg(format!("{base_oid}...{branch_oid}")),
-            string_arg("--"),
-        ],
+        &args,
         None,
         GIT_COUNT_LIMIT,
         cancelled,
@@ -427,19 +612,21 @@ fn read_branch_commits(
     deadline: Instant,
 ) -> Result<Option<(Vec<commitscope_core::CommitSummary>, u64, bool)>, DetailError> {
     let repository_path = Path::new(&discovered.info.path);
+    let boundary_limited = repository::history_boundary_limited(discovered);
+    let mut count_args = Vec::with_capacity(8);
+    push_commit_graph_disable(&mut count_args, boundary_limited);
+    count_args.extend([
+        string_arg("rev-list"),
+        string_arg("--count"),
+        string_arg(branch_oid),
+        string_arg("--not"),
+        string_arg(base_oid),
+        string_arg("--"),
+    ]);
     let count_output = match run_git(
         git,
         repository_path,
-        &[
-            string_arg("-c"),
-            string_arg("core.commitGraph=false"),
-            string_arg("rev-list"),
-            string_arg("--count"),
-            string_arg(branch_oid),
-            string_arg("--not"),
-            string_arg(base_oid),
-            string_arg("--"),
-        ],
+        &count_args,
         GIT_COUNT_LIMIT,
         cancelled,
         deadline,
@@ -451,20 +638,21 @@ fn read_branch_commits(
     };
     let count = parse_u64(Some(trim_line(&count_output.stdout)))
         .ok_or_else(|| git_error("Git returned an invalid branch commit count"))?;
+    let mut list_args = Vec::with_capacity(9);
+    push_commit_graph_disable(&mut list_args, boundary_limited);
+    list_args.extend([
+        string_arg("rev-list"),
+        string_arg("--topo-order"),
+        string_arg(format!("--max-count={HANDOFF_COMMIT_LIMIT}")),
+        string_arg(branch_oid),
+        string_arg("--not"),
+        string_arg(base_oid),
+        string_arg("--"),
+    ]);
     let list_output = run_git(
         git,
         repository_path,
-        &[
-            string_arg("-c"),
-            string_arg("core.commitGraph=false"),
-            string_arg("rev-list"),
-            string_arg("--topo-order"),
-            string_arg(format!("--max-count={HANDOFF_COMMIT_LIMIT}")),
-            string_arg(branch_oid),
-            string_arg("--not"),
-            string_arg(base_oid),
-            string_arg("--"),
-        ],
+        &list_args,
         HANDOFF_COMMIT_LIMIT * discovered.oid_length.saturating_add(1),
         cancelled,
         deadline,
@@ -511,20 +699,22 @@ fn read_merge_parent_groups(
     let mut remaining = HANDOFF_COMMIT_LIMIT;
     let mut groups = Vec::with_capacity(commit.parents.len() - 1);
     let mut any_truncated = false;
+    let boundary_limited = repository::history_boundary_limited(&session.discovered);
     for (parent_index, parent_oid) in commit.parents.iter().enumerate().skip(1) {
+        let mut count_args = Vec::with_capacity(8);
+        push_commit_graph_disable(&mut count_args, boundary_limited);
+        count_args.extend([
+            string_arg("rev-list"),
+            string_arg("--count"),
+            string_arg(parent_oid),
+            string_arg("--not"),
+            string_arg(first_parent),
+            string_arg("--"),
+        ]);
         let count_output = run_git(
             &git,
             Path::new(&session.discovered.info.path),
-            &[
-                string_arg("-c"),
-                string_arg("core.commitGraph=false"),
-                string_arg("rev-list"),
-                string_arg("--count"),
-                string_arg(parent_oid),
-                string_arg("--not"),
-                string_arg(first_parent),
-                string_arg("--"),
-            ],
+            &count_args,
             GIT_COUNT_LIMIT,
             cancelled,
             deadline,
@@ -535,20 +725,21 @@ fn read_merge_parent_groups(
         let total_count = parse_u64(Some(trim_line(&count_output.stdout)))
             .ok_or_else(|| git_error("Git returned an invalid merge group count"))?;
         let page_limit = remaining.max(1);
+        let mut list_args = Vec::with_capacity(9);
+        push_commit_graph_disable(&mut list_args, boundary_limited);
+        list_args.extend([
+            string_arg("rev-list"),
+            string_arg("--topo-order"),
+            string_arg(format!("--max-count={page_limit}")),
+            string_arg(parent_oid),
+            string_arg("--not"),
+            string_arg(first_parent),
+            string_arg("--"),
+        ]);
         let list_output = run_git(
             &git,
             Path::new(&session.discovered.info.path),
-            &[
-                string_arg("-c"),
-                string_arg("core.commitGraph=false"),
-                string_arg("rev-list"),
-                string_arg("--topo-order"),
-                string_arg(format!("--max-count={page_limit}")),
-                string_arg(parent_oid),
-                string_arg("--not"),
-                string_arg(first_parent),
-                string_arg("--"),
-            ],
+            &list_args,
             page_limit.saturating_mul(session.discovered.oid_length + 1),
             cancelled,
             deadline,
@@ -871,6 +1062,9 @@ mod tests {
                 selected_oid: Some(branch_oid.clone()),
                 operation_worktree_id: None,
                 stale_worktree_id: None,
+                range_exclude_tips: Vec::new(),
+                range_head_tips: Vec::new(),
+                range_oldest_oid: None,
             },
             &cancelled,
             deadline,
@@ -906,6 +1100,121 @@ mod tests {
                 .map(|path| path.display.as_str()),
             Some("feature.txt")
         );
+    }
+
+    #[test]
+    fn range_summary_collects_full_count_head_and_tail_beyond_200_commits() {
+        let git = git_executable();
+        let fixture = FixtureDir::new();
+        let repo = fixture.0.join("large-range");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&git, &repo, &["init", "--quiet", "--initial-branch=main"]);
+        run_git(&git, &repo, &["config", "user.name", "Range Author"]);
+        run_git(
+            &git,
+            &repo,
+            &["config", "user.email", "range@example.invalid"],
+        );
+        fs::write(repo.join("base.txt"), "base\n").unwrap();
+        run_git(&git, &repo, &["add", "base.txt"]);
+        run_git(&git, &repo, &["commit", "--quiet", "-m", "base"]);
+        let base_oid = stdout_line(run_git(&git, &repo, &["rev-parse", "HEAD"]));
+
+        let mut import_script = String::new();
+        for index in 1..=220_i64 {
+            let ts = 1_700_100_000_i64 + index * 60;
+            let message = format!("commit {index}");
+            import_script.push_str(&format!(
+                "commit refs/heads/main\nauthor Range Author <range@example.invalid> {ts} +0000\ncommitter Range Author <range@example.invalid> {ts} +0000\ndata {}\n{}\n",
+                message.len(),
+                message
+            ));
+            if index == 1 {
+                import_script.push_str(&format!("from {base_oid}\n"));
+            }
+        }
+        let mut child = Command::new(&git)
+            .arg("-C")
+            .arg(&repo)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git fast-import");
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(import_script.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let head_oid = stdout_line(run_git(&git, &repo, &["rev-parse", "refs/heads/main"]));
+        let commit_21 = stdout_line(run_git(&git, &repo, &["rev-parse", "refs/heads/main~199"]));
+        let commit_20 = stdout_line(run_git(&git, &repo, &["rev-parse", "refs/heads/main~200"]));
+
+        let cancelled = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let discovered = repository::discover_repository(
+            &git,
+            repo.to_str().expect("UTF-8 repo path"),
+            &cancelled,
+            deadline,
+        )
+        .expect("discover large range repo");
+
+        let by_exclude = read_range_summary(
+            &git,
+            &discovered,
+            &GetHandoffFactsParams {
+                branch_ref: None,
+                selected_oid: None,
+                operation_worktree_id: None,
+                stale_worktree_id: None,
+                range_exclude_tips: vec![commit_20.clone()],
+                range_head_tips: vec![head_oid.clone()],
+                range_oldest_oid: None,
+            },
+            &cancelled,
+            deadline,
+        )
+        .expect("compute range summary via exclude tips")
+        .expect("range summary is present");
+
+        assert_eq!(by_exclude.total_count, 200);
+        assert_eq!(by_exclude.newest_oid.as_deref(), Some(head_oid.as_str()));
+        assert_eq!(by_exclude.oldest_oid.as_deref(), Some(commit_21.as_str()));
+        assert_eq!(by_exclude.head_commits.len(), 80);
+        assert_eq!(by_exclude.tail_commits.len(), 20);
+        assert_eq!(by_exclude.head_tips, vec![head_oid.clone()]);
+        assert_eq!(by_exclude.exclude_tips, vec![commit_20]);
+        assert!(
+            by_exclude.total_count
+                > (by_exclude.head_commits.len() + by_exclude.tail_commits.len()) as u64
+        );
+        assert_eq!(by_exclude.head_commits[0].summary, "commit 220");
+        assert_eq!(by_exclude.tail_commits[0].summary, "commit 40");
+        assert_eq!(by_exclude.tail_commits[19].summary, "commit 21");
+
+        let by_oldest = read_range_summary(
+            &git,
+            &discovered,
+            &GetHandoffFactsParams {
+                branch_ref: None,
+                selected_oid: None,
+                operation_worktree_id: None,
+                stale_worktree_id: None,
+                range_exclude_tips: Vec::new(),
+                range_head_tips: vec![head_oid],
+                range_oldest_oid: Some(commit_21),
+            },
+            &cancelled,
+            deadline,
+        )
+        .expect("compute range summary via oldest oid")
+        .expect("range summary is present");
+        assert_eq!(by_oldest.total_count, 200);
+        assert_eq!(by_oldest.tail_commits[19].summary, "commit 21");
     }
 
     fn git_executable() -> PathBuf {

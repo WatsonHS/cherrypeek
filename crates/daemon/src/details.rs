@@ -1690,7 +1690,7 @@ pub fn branches_containing(
 ) -> DetailResult<BranchesContainingResult> {
     validate_oid(&params.oid, session.discovered.oid_length)?;
     let normalized_oid = params.oid.to_ascii_lowercase();
-    repository::read_commit_metadata(
+    repository::verify_commit_oids(
         executable,
         &session.discovered,
         std::slice::from_ref(&normalized_oid),
@@ -1726,13 +1726,13 @@ pub fn branches_containing(
     let mut exceeded = false;
     if !by_tip.is_empty() {
         let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(from_git)?;
-        let mut args = vec![
-            string_arg("-c"),
-            string_arg("core.commitGraph=false"),
-            string_arg("rev-list"),
-            string_arg("--topo-order"),
-            string_arg(format!("--ancestry-path={normalized_oid}")),
-        ];
+        let mut args = Vec::new();
+        if repository::history_boundary_limited(&session.discovered) {
+            args.push(string_arg("-c"));
+            args.push(string_arg("core.commitGraph=false"));
+        }
+        args.push(string_arg("rev-list"));
+        args.push(string_arg(format!("--ancestry-path={normalized_oid}")));
         args.extend(by_tip.keys().map(string_arg));
         args.push(string_arg("--not"));
         args.push(string_arg(&normalized_oid));

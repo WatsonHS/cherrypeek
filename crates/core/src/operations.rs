@@ -71,6 +71,93 @@ pub struct PushRepositoryParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewMergeParams {
+    pub target_ref: String,
+    pub expected_target_oid: String,
+    pub source_ref: String,
+    pub expected_source_oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeUnsupportedReason {
+    CrissCross,
+    UnrelatedHistories,
+    StructuralConflict,
+    BinaryOrNonUtf8,
+    TooManyOrTooLarge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MergeDiffHunk {
+    pub base_start: u32,
+    pub base_count: u32,
+    pub side_start: u32,
+    pub side_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MergeConflictFile {
+    pub path: GitPath,
+    pub mode: String,
+    pub base_text: String,
+    pub ours_text: String,
+    pub theirs_text: String,
+    pub left_hunks: Vec<MergeDiffHunk>,
+    pub right_hunks: Vec<MergeDiffHunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum MergePreviewResult {
+    Blocked {
+        blockers: Vec<OperationBlocker>,
+    },
+    Clean {
+        merge_base_oid: String,
+        auto_merged_count: u32,
+        can_single_commit_rebase: bool,
+        single_commit_summary: Option<String>,
+        default_message: String,
+    },
+    Conflicted {
+        merge_base_oid: String,
+        auto_merged_count: u32,
+        #[schemars(length(max = 10))]
+        files: Vec<MergeConflictFile>,
+        default_message: String,
+    },
+    Unsupported {
+        reason: MergeUnsupportedReason,
+        message: String,
+        conflict_paths: Vec<GitPath>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeSyncMode {
+    MergeCommit,
+    SingleCommitRebase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedMergeFile {
+    pub path_hex: String,
+    pub mode: String,
+    pub contents: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "outcome",
     rename_all = "camelCase",
@@ -149,6 +236,18 @@ pub enum RepositoryOperation {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_head_oid: Option<String>,
+    },
+    CompleteMerge {
+        target_ref: String,
+        expected_target_oid: String,
+        source_ref: String,
+        expected_source_oid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_head_oid: Option<String>,
+        mode: MergeSyncMode,
+        message: String,
+        resolved_files: Vec<ResolvedMergeFile>,
+        switch_to_target: bool,
     },
 }
 
@@ -254,6 +353,7 @@ pub struct UpdatedRef {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+#[allow(clippy::large_enum_variant)]
 pub enum OperationRun {
     Rejected {
         blockers: Vec<OperationBlocker>,
@@ -265,6 +365,12 @@ pub enum OperationRun {
         untracked: Option<UntrackedOutcome>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         committed_oid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added_min_unix: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        added_max_unix: Option<i64>,
     },
 }
 

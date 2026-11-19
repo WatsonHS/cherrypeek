@@ -20,7 +20,7 @@ export interface HandoffDialogProps {
   onOpenChange(open: boolean): void;
   request: HandoffRequest | null;
   sessionKey: string | null;
-  onLoadFacts(request: HandoffRequest, intent: number): Promise<HandoffFacts | null>;
+  onLoadFacts(request: HandoffRequest, intent: number, signal?: AbortSignal): Promise<HandoffFacts | null>;
   onCancelFacts(): Promise<void>;
   onCopyText(text: string): Promise<void>;
 }
@@ -72,16 +72,18 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
     // Requests built from what the renderer already knows (a failed operation) need no facts from the core.
     if (!handoffNeedsFacts(request)) { setFacts(null); setLoadError(null); setLoading(false); return; }
     const intent = ++intentRef.current;
+    const abort = new AbortController();
     let current = true;
     setFacts(null);
     setLoadError(null);
     setLoading(true);
-    void loadRef.current(request, intent).then(
+    void loadRef.current(request, intent, abort.signal).then(
       nextFacts => { if (current && intentRef.current === intent) setFacts(nextFacts); },
       error => { if (current && intentRef.current === intent) setLoadError(error instanceof Error ? error.message : String(error)); },
     ).finally(() => { if (current && intentRef.current === intent) setLoading(false); });
     return () => {
       current = false;
+      abort.abort();
       intentRef.current += 1;
       void cancelRef.current().catch(() => undefined);
     };
@@ -120,7 +122,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
   if (!open || !request) return null;
   const generatedText = built && "text" in built ? built.text : "";
   const prompt = editedText ?? generatedText;
-  const tooLong = new TextEncoder().encode(prompt).byteLength > 64 * 1024;
+  const tooLong = new TextEncoder().encode(prompt).byteLength > 256 * 1024;
   const blocker = blockingReason(request, facts);
   const composingNow = composing || composingRef.current;
   const needsFacts = handoffNeedsFacts(request);
@@ -131,7 +133,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
       : facts ? subjectRows(request.target, facts, request.scenario) : null;
   const copyDisabled = loading || (needsFacts && !facts) || Boolean(blocker) || composingNow || tooLong || !prompt || Boolean(built && "error" in built);
   const title = HANDOFF_SCENARIO_TITLES[request.scenario];
-  const count = request.target.kind === "commits" ? request.target.commits.length : null;
+  const count = request.target.kind === "commits" ? (facts?.rangeSummary?.totalCount ?? request.target.totalCount ?? request.target.commits.length) : null;
 
   const beginComposition = () => { composingRef.current = true; setComposing(true); setCopyState("idle"); };
   const endComposition = () => { composingRef.current = false; setComposing(false); };
@@ -152,7 +154,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
         <div className="min-w-0 flex-1">
           <p className="m-0 text-[11.5px] font-medium text-fg3">交给 Agent</p>
           <h2 id="handoff-title" className="m-0 mt-0.5 text-base font-semibold">{title}{count !== null ? ` · ${count} 个` : ""}</h2>
-          <p data-testid="handoff-summary" className="m-0 mt-1.5 text-[13px] leading-5 text-fg2">{handoffSummary(request)}</p>
+          <p data-testid="handoff-summary" className="m-0 mt-1.5 text-[13px] leading-5 text-fg2">{handoffSummary(request, facts)}</p>
         </div>
         <Button variant="ghost" size="sm" aria-label="关闭交给 Agent" data-testid="handoff-close" onClick={() => onOpenChange(false)}>关闭</Button>
       </header>
@@ -186,7 +188,7 @@ export function HandoffDialog({ open, onOpenChange, request, sessionKey, onLoadF
             onChange={event => { setEditedText(event.target.value); setCopyState("idle"); }}
             onCompositionStart={beginComposition} onCompositionEnd={endComposition}
             className="min-h-[240px] resize-y rounded-lg border border-line2 bg-bg p-3 font-mono text-xs leading-relaxed text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" /> : null}
-          {tooLong ? <p role="alert" data-testid="handoff-limit-error" className="m-0 text-xs text-bad">修改后的 prompt 超过 64 KiB，不能复制。</p> : null}
+          {tooLong ? <p role="alert" data-testid="handoff-limit-error" className="m-0 text-xs text-bad">修改后的 prompt 超过 256 KiB，不能复制。</p> : null}
         </div>
       </div>
 
@@ -229,6 +231,7 @@ function operationRows(target: Extract<HandoffTarget, { kind: "operation" }>): [
     workspaceUnstage: "取消暂存",
     workspaceDiscard: "丢弃改动",
     workspaceCommit: "提交改动",
+    completeMerge: "分叉同步 / 合并",
   };
   const rows: [string, string][] = [];
   if (target.operation === "fetch") rows.push(["操作", "fetch（没有成功，远端引用可能已部分更新）"]);
@@ -290,12 +293,23 @@ function shortOid(oid: string): string {
 /** Readable rows naming what the task is about. Repository text appears here as plain text, never as markup. */
 function subjectRows(target: HandoffTarget, facts: HandoffPromptFacts, scenario: HandoffRequest["scenario"]): [string, string][] {
   const rows: [string, string][] = [];
-  if (target.kind === "commits" && target.commits.length) {
-    const newest = target.commits[0]!;
-    const oldest = target.commits.at(-1)!;
-    rows.push(["提交", `${target.commits.length} 个${target.complete ? "" : "（已加载部分）"}`]);
-    rows.push(["最新", `${shortOid(newest.oid)}  ${newest.summary}`]);
-    if (oldest.oid !== newest.oid) rows.push(["最早", `${shortOid(oldest.oid)}  ${oldest.summary}`]);
+  if (target.kind === "commits") {
+    const summary = facts.rangeSummary;
+    if (summary && summary.totalCount > 0) {
+      const newest = summary.headCommits[0];
+      const oldest = summary.tailCommits.at(-1) ?? summary.headCommits.at(-1);
+      rows.push(["提交", `${summary.totalCount} 个`]);
+      if (newest) rows.push(["最新", `${shortOid(newest.oid)}  ${newest.summary}`]);
+      else if (summary.newestOid) rows.push(["最新", shortOid(summary.newestOid)]);
+      if (oldest && oldest.oid !== newest?.oid) rows.push(["最早", `${shortOid(oldest.oid)}  ${oldest.summary}`]);
+      else if (summary.oldestOid && summary.oldestOid !== summary.newestOid) rows.push(["最早", shortOid(summary.oldestOid)]);
+    } else if (target.commits.length) {
+      const newest = target.commits[0]!;
+      const oldest = target.commits.at(-1)!;
+      rows.push(["提交", `${target.commits.length} 个${target.complete ? "" : "（已加载部分）"}`]);
+      rows.push(["最新", `${shortOid(newest.oid)}  ${newest.summary}`]);
+      if (oldest.oid !== newest.oid) rows.push(["最早", `${shortOid(oldest.oid)}  ${oldest.summary}`]);
+    }
   } else if (facts.selectedCommit && scenario !== "cleanup" && scenario !== "stale-worktree") {
     rows.push(["提交", `${shortOid(facts.selectedCommit.oid)}  ${facts.selectedCommit.summary}`]);
     if (facts.selectedCommit.parents.length >= 2) rows.push(["父提交", `${facts.selectedCommit.parents.length} 个`]);

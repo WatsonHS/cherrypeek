@@ -406,3 +406,103 @@ test("pushRepository shares the operation slot and supports cancelRepositoryOper
   await assert.rejects(pushing2, error => error.code === "CANCELLED");
   controller.dispose();
 });
+
+test("M8 previewMerge and completeMerge validation enforce bounds and support mergePreview channel", async () => {
+  const { validPreviewMergeParams, validOperationParams } = transportModule;
+  const HEX_FILE = Buffer.from("src/app.ts").toString("hex");
+  const HEX_OTHER = Buffer.from("src/other.ts").toString("hex");
+
+  assert.equal(validPreviewMergeParams({
+    targetRef: "refs/heads/main",
+    expectedTargetOid: OID,
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: OID2,
+  }), true);
+  for (const bad of [
+    { targetRef: "refs/remotes/origin/main", expectedTargetOid: OID, sourceRef: "refs/heads/main", expectedSourceOid: OID2 },
+    { targetRef: "refs/heads/main", expectedTargetOid: OID, sourceRef: "refs/heads/main", expectedSourceOid: OID2 },
+    { targetRef: "refs/heads/main", expectedTargetOid: "bad", sourceRef: "refs/heads/feat", expectedSourceOid: OID2 },
+    { targetRef: "refs/heads/main", expectedTargetOid: OID, sourceRef: "refs/heads/feat", expectedSourceOid: OID2, extra: true },
+  ]) {
+    assert.equal(validPreviewMergeParams(bad), false, JSON.stringify(bad));
+  }
+
+  for (const good of [
+    {
+      kind: "completeMerge",
+      targetRef: "refs/heads/main",
+      expectedTargetOid: OID,
+      sourceRef: "refs/remotes/origin/main",
+      expectedSourceOid: OID2,
+      expectedHeadOid: OID,
+      mode: "singleCommitRebase",
+      message: "feat: linear rebase",
+      resolvedFiles: [],
+      switchToTarget: false,
+    },
+    {
+      kind: "completeMerge",
+      targetRef: "refs/heads/main",
+      expectedTargetOid: OID,
+      sourceRef: "refs/heads/feat",
+      expectedSourceOid: OID2,
+      mode: "mergeCommit",
+      message: "Merge branch 'feat' into main",
+      resolvedFiles: [{ pathHex: HEX_FILE, mode: "100644", contents: "resolved\n" }],
+      switchToTarget: true,
+    },
+  ]) {
+    assert.equal(validOperationParams({ operation: good }), true, JSON.stringify(good));
+  }
+
+  const baseComplete = {
+    kind: "completeMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: OID,
+    sourceRef: "refs/heads/feat",
+    expectedSourceOid: OID2,
+    expectedHeadOid: OID,
+    mode: "mergeCommit",
+    message: "Merge feat",
+    resolvedFiles: [],
+    switchToTarget: false,
+  };
+  for (const bad of [
+    { ...baseComplete, mode: "singleCommitRebase", resolvedFiles: [{ pathHex: HEX_FILE, mode: "100644", contents: "x" }] },
+    { ...baseComplete, message: "   " },
+    { ...baseComplete, message: "ok\0nul" },
+    { ...baseComplete, resolvedFiles: [{ pathHex: HEX_FILE, mode: "120000", contents: "symlink" }] },
+    { ...baseComplete, resolvedFiles: [{ pathHex: HEX_FILE, mode: "100644", contents: "a\0b" }] },
+    { ...baseComplete, resolvedFiles: [{ pathHex: HEX_FILE, mode: "100644", contents: "a" }, { pathHex: HEX_FILE, mode: "100644", contents: "b" }] },
+    { ...baseComplete, resolvedFiles: [{ pathHex: HEX_FILE, mode: "100644", contents: "a".repeat(300 * 1024) }, { pathHex: HEX_OTHER, mode: "100644", contents: "b".repeat(250 * 1024) }] },
+    { ...baseComplete, resolvedFiles: Array.from({ length: 11 }, (_, idx) => ({ pathHex: Buffer.from(`f${idx}.txt`).toString("hex"), mode: "100644", contents: "x" })) },
+  ]) {
+    assert.equal(validOperationParams({ operation: bad }), false, JSON.stringify(bad));
+  }
+
+  const core = makeCore();
+  const controller = await openController(core);
+  await assert.rejects(controller.previewMerge({ targetRef: "main", expectedTargetOid: OID, sourceRef: "refs/heads/feat", expectedSourceOid: OID2 }), error => error.code === "INVALID_REQUEST");
+  assert.equal(core.requests.length, 0);
+
+  const previewing = controller.previewMerge({
+    targetRef: "refs/heads/main",
+    expectedTargetOid: OID,
+    sourceRef: "refs/heads/feat",
+    expectedSourceOid: OID2,
+  });
+  const req = await waitFor(() => core.requests[0]);
+  assert.equal(req.method, "previewMerge");
+  const expected = {
+    outcome: "clean",
+    mergeBaseOid: OID,
+    autoMergedCount: 1,
+    canSingleCommitRebase: true,
+    singleCommitSummary: "feat: single",
+    defaultMessage: "Merge branch 'feat' into main",
+  };
+  chunk(req, { section: "mergePreview", result: expected });
+  finish(req);
+  assert.deepEqual(await previewing, expected);
+  controller.dispose();
+});

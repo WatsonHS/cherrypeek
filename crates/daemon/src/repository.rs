@@ -86,34 +86,10 @@ pub fn discover_repository(
     let path = normalize_repository_path(input_path)?;
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
 
-    let bare_result = run_git_status(
-        &git,
-        &path,
-        &["rev-parse", "--is-bare-repository"],
-        None,
-        4096,
-        cancelled,
-        deadline,
-    )?;
-    if !bare_result.status.success() {
-        if String::from_utf8_lossy(&bare_result.stderr).contains("not a git repository") {
-            return Err(preview_error(
-                ErrorCode::NotARepository,
-                "The selected directory is not a Git repository",
-                false,
-            ));
-        }
-        return Err(git_exit_error(&bare_result));
-    }
-    let bare = parse_bool(&strip_one_lf(bare_result.stdout)?)?;
-    let git_dir = canonical_git_path(git_path(&git, &path, "--git-dir", cancelled, deadline)?)?;
-    let common_dir = canonical_git_path(git_path(
-        &git,
-        &path,
-        "--git-common-dir",
-        cancelled,
-        deadline,
-    )?)?;
+    let (bare, git_dir_raw, common_dir_raw, is_shallow, object_format) =
+        discover_repository_probe(&git, &path, cancelled, deadline)?;
+    let git_dir = canonical_git_path(git_dir_raw)?;
+    let common_dir = canonical_git_path(common_dir_raw)?;
     let worktree_path = if bare {
         None
     } else {
@@ -125,8 +101,6 @@ pub fn discover_repository(
             deadline,
         )?)?)
     };
-    let is_shallow = git_bool(&git, &path, "--is-shallow-repository", cancelled, deadline)?;
-    let object_format = git_string(&git, &path, "--show-object-format", cancelled, deadline)?;
     let oid_length = match object_format.as_str() {
         "sha1" => 40,
         "sha256" => 64,
@@ -145,6 +119,7 @@ pub fn discover_repository(
         &path,
         head_reference.as_deref(),
         oid_length,
+        true,
         cancelled,
         deadline,
     )? {
@@ -238,6 +213,7 @@ pub fn discover_repository(
                     &path,
                     current_reference.as_deref(),
                     oid_length,
+                    false,
                     cancelled,
                     deadline,
                 ) {
@@ -514,6 +490,88 @@ fn normalize_repository_path(input: &str) -> Result<PathBuf, PreviewError> {
     Ok(canonical)
 }
 
+fn discover_repository_probe(
+    git: &ReadOnlyGit,
+    path: &Path,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(bool, String, String, bool, String), PreviewError> {
+    let probe = run_git_status(
+        git,
+        path,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--is-bare-repository",
+            "--git-dir",
+            "--git-common-dir",
+            "--is-shallow-repository",
+            "--show-object-format",
+        ],
+        None,
+        16 * 1024,
+        cancelled,
+        deadline,
+    )?;
+    if !probe.status.success() {
+        if String::from_utf8_lossy(&probe.stderr).contains("not a git repository") {
+            return Err(preview_error(
+                ErrorCode::NotARepository,
+                "The selected directory is not a Git repository",
+                false,
+            ));
+        }
+        return Err(git_exit_error(&probe));
+    }
+    let stripped = strip_one_lf(probe.stdout)?;
+    let lines: Vec<&[u8]> = stripped.split(|byte| *byte == b'\n').collect();
+    if lines.len() == 5 {
+        let bare = parse_bool(lines[0])?;
+        let git_dir = validate_probe_path(lines[1])?;
+        let common_dir = validate_probe_path(lines[2])?;
+        let is_shallow = parse_bool(lines[3])?;
+        let object_format = String::from_utf8(lines[4].to_vec()).map_err(|_| {
+            preview_error(
+                ErrorCode::GitError,
+                "Git returned non-UTF-8 repository metadata",
+                false,
+            )
+        })?;
+        return Ok((bare, git_dir, common_dir, is_shallow, object_format));
+    }
+    let bare = git_bool(git, path, "--is-bare-repository", cancelled, deadline)?;
+    let git_dir = git_path(git, path, "--git-dir", cancelled, deadline)?;
+    let common_dir = git_path(git, path, "--git-common-dir", cancelled, deadline)?;
+    let is_shallow = git_bool(git, path, "--is-shallow-repository", cancelled, deadline)?;
+    let object_format = git_string(git, path, "--show-object-format", cancelled, deadline)?;
+    Ok((bare, git_dir, common_dir, is_shallow, object_format))
+}
+
+fn validate_probe_path(bytes: &[u8]) -> Result<String, PreviewError> {
+    if bytes.contains(&0) {
+        return Err(preview_error(
+            ErrorCode::UnsupportedRepository,
+            "Repository path contains an unsupported NUL byte",
+            false,
+        ));
+    }
+    let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+        preview_error(
+            ErrorCode::UnsupportedRepository,
+            "Repository path cannot be represented as UTF-8",
+            false,
+        )
+    })?;
+    if !Path::new(&value).is_absolute() {
+        return Err(preview_error(
+            ErrorCode::GitError,
+            "Git returned a non-absolute repository path",
+            false,
+        ));
+    }
+    Ok(value)
+}
+
 fn git_bool(
     git: &ReadOnlyGit,
     path: &Path,
@@ -646,6 +704,7 @@ fn resolve_head(
     path: &Path,
     head_reference: Option<&str>,
     oid_length: usize,
+    verify_object: bool,
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<HeadState, PreviewError> {
@@ -668,21 +727,23 @@ fn resolve_head(
             )
         })?;
         validate_oid(&oid, oid_length)?;
-        let object = run_git_status(
-            git,
-            path,
-            &["cat-file", "-e", "HEAD^{commit}"],
-            None,
-            4096,
-            cancelled,
-            deadline,
-        )?;
-        if !object.status.success() {
-            return Err(preview_error(
-                ErrorCode::MissingObject,
-                "HEAD commit object is unavailable",
-                false,
-            ));
+        if verify_object {
+            let object = run_git_status(
+                git,
+                path,
+                &["cat-file", "-e", "HEAD^{commit}"],
+                None,
+                4096,
+                cancelled,
+                deadline,
+            )?;
+            if !object.status.success() {
+                return Err(preview_error(
+                    ErrorCode::MissingObject,
+                    "HEAD commit object is unavailable",
+                    false,
+                ));
+            }
         }
         return Ok(HeadState::Commit(oid));
     }
@@ -874,6 +935,66 @@ pub fn read_commit_summaries(
     .into_iter()
     .map(|parsed| parsed.summary)
     .collect())
+}
+
+pub(crate) fn verify_commit_oids(
+    executable: &Path,
+    discovered: &DiscoveredRepository,
+    oids: &[String],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), PreviewError> {
+    if oids.is_empty() {
+        return Ok(());
+    }
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
+    let mut batch_input = String::with_capacity(oids.len() * (discovered.oid_length + 1));
+    for oid in oids {
+        batch_input.push_str(oid);
+        batch_input.push('\n');
+    }
+    let output = run_git(
+        &git,
+        Path::new(&discovered.info.path),
+        &["cat-file", "--batch-check"],
+        Some(batch_input.as_bytes()),
+        1024 * 1024,
+        cancelled,
+        deadline,
+    )?;
+    let stdout_text = std::str::from_utf8(&output.stdout).map_err(|_| {
+        preview_error(
+            ErrorCode::MissingObject,
+            "Commit verification returned invalid output",
+            false,
+        )
+    })?;
+    let lines: Vec<&str> = stdout_text.lines().collect();
+    if lines.len() != oids.len() {
+        return Err(preview_error(
+            ErrorCode::MissingObject,
+            "Commit OID does not exist or is not a commit",
+            false,
+        ));
+    }
+    for (expected, line) in oids.iter().zip(lines) {
+        let mut parts = line.split_ascii_whitespace();
+        let oid = parts.next();
+        let kind = parts.next();
+        let size = parts.next();
+        if !oid.is_some_and(|value| value.eq_ignore_ascii_case(expected))
+            || kind != Some("commit")
+            || size.is_none()
+            || parts.next().is_some()
+        {
+            return Err(preview_error(
+                ErrorCode::MissingObject,
+                "Commit OID does not exist or is not a commit",
+                false,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn read_commit_metadata(

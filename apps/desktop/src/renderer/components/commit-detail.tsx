@@ -132,8 +132,13 @@ export function CommitDetail({ preview, detail, onClose, onRetryDetails, onRetry
           <div className="ml-auto flex shrink-0 items-center gap-2 pt-0.5" data-testid="commit-actions">
             {onLocateInHistory ? <Button variant="outline" size="sm" data-testid="locate-in-history" onClick={onLocateInHistory} title="在完整历史里定位这个结果（⌘L）；定位后 ⌘[ 回到搜索结果">在历史中定位</Button> : null}
             {onOpenHandoff ? <CommitHandoffMenu oid={commit.oid} isMerge={isMerge} onOpenHandoff={onOpenHandoff}
-              toNewest={!commitsOverride && index > 0
-                ? { commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })), complete: preview.windowPreviousCursor === null }
+              toNewest={!commitsOverride && !oldDetailContext && index >= 0 && !(preview.windowPreviousCursor === null && index === 0)
+                ? {
+                    commits: commits.slice(0, index + 1).map(item => ({ oid: item.oid, summary: item.summary })),
+                    complete: preview.windowPreviousCursor === null,
+                    oldestOid: commit.oid,
+                    headTips: preview.session?.tips,
+                  }
                 : null} /> : null}
             <CopyOidButton oid={commit.oid} />
             <ActionMenu label="更多操作" menuLabel="提交操作" testId="commit-more" items={[

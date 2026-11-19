@@ -1,6 +1,15 @@
-import type { BranchSync, OperationBlocker, OperationRun, PushResult, RepositoryOperation } from "../../../../../packages/protocol/src/repository-session.js";
+import type {
+  BranchSync,
+  MergeSyncMode,
+  OperationBlocker,
+  OperationRun,
+  PushResult,
+  RepositoryOperation,
+  ResolvedMergeFile,
+} from "../../../../../packages/protocol/src/repository-session.js";
 import type { RefInfo, RemoteInfo, RepositoryInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import { momentLabel, shortOid, shortRefName } from "./format.js";
+import type { UpdateBatchRecord } from "./update-batch.js";
 
 /*
  * Pure parts of the basic Git operations (M5 / M7): building operations from the snapshot the window shows,
@@ -18,7 +27,8 @@ export type OperationStep =
   | "workspaceStage"
   | "workspaceUnstage"
   | "workspaceDiscard"
-  | "workspaceCommit";
+  | "workspaceCommit"
+  | "completeMerge";
 
 /** What the user asked for, kept next to the operation so a refusal or failure can name it. */
 export interface OperationMeta {
@@ -106,13 +116,14 @@ type UpdateResult = Extract<OperationRun, { outcome: "done" }>;
 export interface UpdateNotice {
   summary: string;
   untracked: UpdateResult["untracked"];
+  batch?: UpdateBatchRecord;
 }
 
-export function updateDoneNotice(name: string, { untracked }: UpdateResult): UpdateNotice {
+export function updateDoneNotice(name: string, { untracked }: UpdateResult, batch?: UpdateBatchRecord): UpdateNotice {
   let summary = `${name} 已快进到上游`;
   if (untracked?.backedUpCount) summary += ` · 已备份 ${untracked.backedUpCount} 个文件`;
   if (untracked?.discardedCount) summary += ` · 已丢弃 ${untracked.discardedCount} 个本地副本`;
-  return { summary, untracked };
+  return { summary, untracked, ...(batch ? { batch } : {}) };
 }
 
 /** Whether fast-forwarding is offered: plainly behind, and not checked out in some other worktree. */
@@ -351,4 +362,108 @@ export function workspaceCommitMeta(headReference: string | null, headOid: strin
 
 export function workspaceCommitDoneNotice(committedOid: string | null | undefined): string {
   return committedOid ? `已创建提交 ${shortOid(committedOid)}` : "已创建提交";
+}
+
+export interface DivergedSyncTarget {
+  targetRef: string;
+  expectedTargetOid: string;
+  sourceRef: string;
+  expectedSourceOid: string;
+  switchToTarget: boolean;
+  canPushAfter: boolean;
+  defaultPushAfter: boolean;
+  pushRemote: string | null;
+}
+
+export function completeMergeOperation(params: {
+  targetRef: string;
+  expectedTargetOid: string;
+  sourceRef: string;
+  expectedSourceOid: string;
+  expectedHeadOid: string | null;
+  mode: MergeSyncMode;
+  message: string;
+  resolvedFiles: ResolvedMergeFile[];
+  switchToTarget: boolean;
+}): RepositoryOperation {
+  return {
+    kind: "completeMerge",
+    targetRef: params.targetRef,
+    expectedTargetOid: params.expectedTargetOid,
+    sourceRef: params.sourceRef,
+    expectedSourceOid: params.expectedSourceOid,
+    expectedHeadOid: params.expectedHeadOid,
+    mode: params.mode,
+    message: params.message,
+    resolvedFiles: params.resolvedFiles,
+    switchToTarget: params.switchToTarget,
+  };
+}
+
+export function completeMergeMeta(
+  targetRef: string,
+  targetOid: string,
+  sourceRef: string,
+  sourceOid: string,
+  checkedOutBy: string[] = [],
+): OperationMeta {
+  return {
+    step: "completeMerge",
+    refName: targetRef,
+    name: shortRefName(targetRef),
+    oid: targetOid,
+    upstream: { refName: sourceRef, oid: sourceOid },
+    checkedOutBy,
+    targetRefName: targetRef,
+    targetName: shortRefName(targetRef),
+  };
+}
+
+export function mergeSyncDoneNotice(
+  targetRef: string,
+  sourceRef: string,
+  mode: MergeSyncMode,
+  switched: boolean,
+): string {
+  const target = shortRefName(targetRef);
+  const source = shortRefName(sourceRef);
+  const verb = mode === "singleCommitRebase" ? `已将 ${target} 单提交变基到 ${source}` : `已将 ${source} 合并到 ${target}`;
+  return switched ? `${verb}，并切换到 ${target}` : verb;
+}
+
+export function divergedSyncTargetFromRefusal(
+  meta: OperationMeta,
+  blockers: readonly OperationBlocker[],
+  operation?: RepositoryOperation,
+): DivergedSyncTarget | null {
+  if (!blockers.some(blocker => blocker.kind === "diverged") || !meta.upstream) return null;
+  if (meta.step === "update" || meta.step === "push") {
+    const canPushAfter = meta.upstream.refName.startsWith("refs/remotes/");
+    const inferredRemote = canPushAfter
+      ? (meta.upstream.refName.slice("refs/remotes/".length).split("/", 1)[0] ?? null)
+      : null;
+    return {
+      targetRef: meta.refName,
+      expectedTargetOid: meta.oid,
+      sourceRef: meta.upstream.refName,
+      expectedSourceOid: meta.upstream.oid,
+      switchToTarget: false,
+      canPushAfter,
+      defaultPushAfter: meta.step === "push" && canPushAfter,
+      pushRemote: meta.remote ?? inferredRemote,
+    };
+  }
+  if (meta.step === "mergeInto") {
+    return {
+      targetRef: meta.upstream.refName,
+      expectedTargetOid: meta.upstream.oid,
+      sourceRef: meta.refName,
+      expectedSourceOid: meta.oid,
+      switchToTarget: operation?.kind === "fastForwardMerge" ? operation.switchToTarget : false,
+      canPushAfter: false,
+      defaultPushAfter: false,
+      pushRemote: null,
+    };
+  }
+  return null;
 }

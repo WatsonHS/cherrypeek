@@ -44,9 +44,16 @@ try {
   assert.equal(initial.offset, 0);
   assert.equal(initial.count, 200);
 
-  // The pinned date opens a calendar; Esc and outside clicks close it.
+  // The slider: at scrollTop=0 the current thumb starts right at the top pad (no blank future gap).
   const slider = page.getByTestId("history-time-slider-track");
   await slider.waitFor({ state: "visible" });
+  const thumb = page.getByTestId("history-time-current");
+  await thumb.waitFor({ state: "visible" });
+  const initialTrackBox = await slider.boundingBox();
+  const initialThumbBox = await thumb.boundingBox();
+  assert.ok(initialTrackBox && initialThumbBox);
+  assert.ok((initialThumbBox.y + initialThumbBox.height / 2) - initialTrackBox.y <= 10,
+    `at newest commit, thumb starts at top pad (${initialThumbBox.y + initialThumbBox.height / 2} vs track top ${initialTrackBox.y})`);
   const trigger = page.getByTestId("history-date-trigger");
   const popover = page.getByTestId("history-date-popover");
   assert.equal(await trigger.getAttribute("data-day"), localDay(fixture.rows[0].timestamp), "the pinned date names the newest day");
@@ -110,6 +117,15 @@ try {
       && element.querySelector('[data-testid="commit-row"]')?.getAttribute("data-oid") === oid;
   }, fixture.rows[0].oid, { timeout: 20_000 });
   await page.waitForFunction(() => !document.querySelector('[data-testid="history-newest"]'), null, { timeout: 5_000 });
+  await page.waitForFunction(() => {
+    const listEl = document.querySelector('[role="listbox"][aria-label="提交"]');
+    const track = document.querySelector('[data-testid="history-time-slider-track"]');
+    const current = document.querySelector('[data-testid="history-time-current"]');
+    if (!listEl || !track || !current) return false;
+    const trackBox = track.getBoundingClientRect();
+    const currentBox = current.getBoundingClientRect();
+    return listEl.scrollTop === 0 && (currentBox.y + currentBox.height / 2) - trackBox.y <= 10;
+  }, null, { timeout: 5_000 });
   assert.equal(await trigger.getAttribute("data-day"), localDay(fixture.rows[0].timestamp));
 
   // The slider: hovering names a moment; dragging and releasing jumps to the latest commit before it.
@@ -119,7 +135,36 @@ try {
   const bubble = page.getByTestId("history-time-bubble");
   await bubble.waitFor({ state: "visible" });
   assert.match(await bubble.innerText(), /前后/);
+  const hoveredTrackBox = await slider.boundingBox();
+  assert.ok(hoveredTrackBox && hoveredTrackBox.width <= 20, `hovering keeps interactive track narrow (${hoveredTrackBox?.width}px)`);
   await page.screenshot({ path: join(screenshotDirectory, "slider-hover.png") });
+
+  // Moving 40px left of the 16px rail enters the commit list (even under visual labels) and wheel scrolls the list normally.
+  await page.mouse.move(sliderBox.x - 40, sliderBox.y + sliderBox.height * 0.5);
+  await bubble.waitFor({ state: "hidden" });
+  await page.mouse.wheel(0, 600);
+  await page.waitForFunction(() => {
+    const listEl = document.querySelector('[role="listbox"][aria-label="提交"]');
+    const track = document.querySelector('[data-testid="history-time-slider-track"]');
+    const current = document.querySelector('[data-testid="history-time-current"]');
+    if (!listEl || !track || !current) return false;
+    const trackBox = track.getBoundingClientRect();
+    const currentBox = current.getBoundingClientRect();
+    return listEl.scrollTop > 100 && (currentBox.y + currentBox.height / 2) - trackBox.y > 14;
+  }, null, { timeout: 5_000 });
+  await list.evaluate(element => { element.scrollTop = 0; });
+  await page.waitForFunction(() => {
+    const listEl = document.querySelector('[role="listbox"][aria-label="提交"]');
+    const track = document.querySelector('[data-testid="history-time-slider-track"]');
+    const current = document.querySelector('[data-testid="history-time-current"]');
+    if (!listEl || !track || !current) return false;
+    const trackBox = track.getBoundingClientRect();
+    const currentBox = current.getBoundingClientRect();
+    return listEl.scrollTop === 0 && (currentBox.y + currentBox.height / 2) - trackBox.y <= 10;
+  }, null, { timeout: 5_000 });
+
+  await page.mouse.move(x, sliderBox.y + sliderBox.height * 0.5);
+  await bubble.waitFor({ state: "visible" });
   await page.mouse.down();
   await page.mouse.move(x, sliderBox.y + sliderBox.height * 0.62, { steps: 8 });
   await page.mouse.up();
@@ -139,7 +184,7 @@ try {
   await page.waitForFunction(oid => document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === oid,
     keyboardTarget.oid, { timeout: 20_000 });
 
-  // Home in the list goes back to the newest commit.
+  // Home in the list goes back to the newest commit and returns the thumb to the top pad.
   await list.focus();
   await page.keyboard.press("Home");
   await page.waitForFunction(oid => {
@@ -147,6 +192,14 @@ try {
     return element && Number(element.dataset.loadedOffset) === 0
       && document.querySelector('[data-testid="commit-row"][aria-selected="true"]')?.getAttribute("data-oid") === oid;
   }, fixture.rows[0].oid, { timeout: 20_000 });
+  await page.waitForFunction(() => {
+    const track = document.querySelector('[data-testid="history-time-slider-track"]');
+    const current = document.querySelector('[data-testid="history-time-current"]');
+    if (!track || !current) return false;
+    const trackBox = track.getBoundingClientRect();
+    const currentBox = current.getBoundingClientRect();
+    return (currentBox.y + currentBox.height / 2) - trackBox.y <= 10;
+  }, null, { timeout: 5_000 });
   assert.deepEqual(await snapshotTree(repository), before, "date navigation, the slider and continued scrolling are read-only");
 
   await app.close();
@@ -171,8 +224,9 @@ async function createDateFixture(path) {
   git(path, "config", "maintenance.auto", "false");
 
   const count = 450;
-  const newestNoonUtc = Date.UTC(2027, 0, 1, 4, 0, 0) / 1000;
-  const timestamps = Array.from({ length: count }, (_, index) => newestNoonUtc - index * 86_400);
+  // Early-morning newest commit (01:06 local time) ensures no future midnight blank gap sits above it.
+  const newestLocalUtc = Math.floor(new Date(2027, 0, 1, 1, 6, 0).getTime() / 1000);
+  const timestamps = Array.from({ length: count }, (_, index) => newestLocalUtc - index * 86_400);
   const chosenRank = 320;
   timestamps[350] = timestamps[chosenRank] + 3_600;
   const input = [];

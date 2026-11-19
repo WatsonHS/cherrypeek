@@ -4,7 +4,8 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use commitscope_core::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::Path,
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
@@ -77,6 +78,29 @@ fn lower_thread_priority() -> std::io::Result<()> {
     // Leave normal priority rather than lowering interactive/index/operation work.
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) fn release_unused_heap_memory() {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t)
+        -> libc::size_t;
+    }
+    // SAFETY: passing NULL relieves pressure across all malloc zones without invalidating live heap allocations.
+    unsafe {
+        let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn release_unused_heap_memory() {
+    // SAFETY: malloc_trim(0) only returns unused free heap pages to the OS.
+    unsafe {
+        let _ = libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+pub(crate) fn release_unused_heap_memory() {}
 
 #[cfg(all(
     test,
@@ -265,6 +289,7 @@ fn commit_type(summary: &str) -> String {
     }
 }
 pub fn activity_overview(
+    executable: Option<&Path>,
     session: &RepositorySession,
     params: &GetActivityOverviewParams,
     cancelled: &AtomicBool,
@@ -276,10 +301,14 @@ pub fn activity_overview(
         .parse::<Tz>()
         .map_err(|_| error(ErrorCode::InvalidRequest, "时区无效"))?;
     let grid = bucket_grid(&params.range, tz, params.bucket)?;
-    crate::search::with_stats_rows(
+    let include_sessions = params.range.end_unix - params.range.start_unix <= 86400;
+    let boundary_limited = crate::repository::history_boundary_limited(&session.discovered);
+    let result = crate::search::with_stats_rows(
+        executable,
         &SessionStore::from_env(),
         session,
         &params.query,
+        true,
         cancelled,
         deadline,
         |_, snapshot, rows| {
@@ -292,7 +321,7 @@ pub fn activity_overview(
             let mut week_hour = vec![vec![0; 24]; 7];
             let mut types = BTreeMap::<String, u64>::new();
             let (mut merge_count, mut revert_count, mut fixup_count) = (0, 0, 0);
-            let mut selected = HashMap::new();
+            let mut selected_count = 0_u64;
             let mut events = Vec::new();
             let previous_start = params
                 .range
@@ -313,8 +342,10 @@ pub fn activity_overview(
                 if *t < params.range.start_unix || *t >= params.range.end_unix {
                     continue;
                 }
-                selected.insert(c.oid.as_str(), *t);
-                events.push((*t, format!("{} <{}>", c.author.name, c.author.email)));
+                selected_count += 1;
+                if include_sessions {
+                    events.push((*t, format!("{} <{}>", c.author.name, c.author.email)));
+                }
                 *days.entry(date.date_naive()).or_default() += 1;
                 *authors
                     .entry((c.author.name.clone(), c.author.email.clone()))
@@ -337,7 +368,7 @@ pub fn activity_overview(
                 }
             }
             let totals = ActivityTotals {
-                commits: selected.len() as u64,
+                commits: selected_count,
                 active_days: days.len() as u64,
                 authors: authors.len() as u64,
             };
@@ -379,15 +410,37 @@ pub fn activity_overview(
             });
             let authors_truncated = authors.len() > 500;
             authors.truncate(500);
-            let matching_times: HashMap<&str, i64> = rows
-                .iter()
-                .filter(|(_, _, matched)| *matched)
-                .map(|(c, t, _)| (c.oid.as_str(), *t))
-                .collect();
-            let parents: HashMap<&str, &[String]> = rows
-                .iter()
-                .map(|(c, _, _)| (c.oid.as_str(), c.parents.as_slice()))
-                .collect();
+            let mut oid_to_id: HashMap<&str, u32> = HashMap::with_capacity(rows.len() + 256);
+            for (idx, (c, _, _)) in rows.iter().enumerate() {
+                oid_to_id.insert(c.oid.as_str(), idx as u32);
+            }
+            let mut in_rows = vec![true; rows.len()];
+            let mut is_selected = vec![false; rows.len()];
+            let mut match_time = vec![None::<i64>; rows.len()];
+            for (idx, (_, t, matched)) in rows.iter().enumerate() {
+                if *matched {
+                    match_time[idx] = Some(*t);
+                    if *t >= params.range.start_unix && *t < params.range.end_unix {
+                        is_selected[idx] = true;
+                    }
+                }
+            }
+            let mut offsets = Vec::with_capacity(rows.len() + 1);
+            let mut edges = Vec::with_capacity(rows.len());
+            offsets.push(0_u32);
+            for (c, _, _) in &rows {
+                for p in &c.parents {
+                    let next_id = oid_to_id.len() as u32;
+                    let pid = *oid_to_id.entry(p.as_str()).or_insert_with(|| {
+                        in_rows.push(false);
+                        is_selected.push(false);
+                        match_time.push(None);
+                        next_id
+                    });
+                    edges.push(pid);
+                }
+                offsets.push(edges.len() as u32);
+            }
             let refs: Vec<_> = session
                 .discovered
                 .refs
@@ -395,35 +448,57 @@ pub fn activity_overview(
                 .filter(|r| r.kind == RefKind::LocalBranch)
                 .collect();
             let branches_truncated = refs.len() > 200;
-            let mut branches = Vec::new();
+            let branch_tips: Vec<_> = refs.into_iter().take(200).collect();
+            let mut branch_tip_ids = Vec::with_capacity(branch_tips.len());
+            for r in &branch_tips {
+                let next_id = oid_to_id.len() as u32;
+                let tip_id = *oid_to_id.entry(r.oid.as_str()).or_insert_with(|| {
+                    in_rows.push(false);
+                    is_selected.push(false);
+                    match_time.push(None);
+                    next_id
+                });
+                branch_tip_ids.push(tip_id);
+            }
+            let mut seen_stamp = vec![0_u32; in_rows.len()];
+            let mut pending = Vec::<u32>::new();
+            let mut branches = Vec::with_capacity(branch_tips.len());
             let mut visits = 0usize;
-            for r in refs.into_iter().take(200) {
-                let mut pending = vec![r.oid.as_str()];
-                let mut seen = HashSet::new();
+            for (branch_idx, (r, tip_id)) in branch_tips.into_iter().zip(branch_tip_ids).enumerate()
+            {
+                active(cancelled, deadline)?;
+                let stamp = (branch_idx + 1) as u32;
+                pending.clear();
+                pending.push(tip_id);
                 let mut count = 0;
                 let mut last = None;
-                let mut complete =
-                    !crate::repository::history_boundary_limited(&session.discovered);
-                while let Some(oid) = pending.pop() {
-                    active(cancelled, deadline)?;
-                    if !seen.insert(oid) {
+                let mut complete = !boundary_limited;
+                while let Some(u) = pending.pop() {
+                    let uid = u as usize;
+                    if seen_stamp[uid] == stamp {
                         continue;
                     }
+                    seen_stamp[uid] = stamp;
                     visits += 1;
+                    if visits & 4095 == 0 {
+                        active(cancelled, deadline)?;
+                    }
                     if visits > 5_000_000 {
                         return Err(error(
                             ErrorCode::ResourceLimit,
                             "分支可达性计算超过上限，请缩小范围",
                         ));
                     }
-                    if selected.contains_key(oid) {
+                    if is_selected[uid] {
                         count += 1;
                     }
-                    if let Some(t) = matching_times.get(oid) {
-                        last = Some(last.map_or(*t, |v: i64| v.max(*t)));
+                    if let Some(t) = match_time[uid] {
+                        last = Some(last.map_or(t, |v: i64| v.max(t)));
                     }
-                    if let Some(ps) = parents.get(oid) {
-                        pending.extend(ps.iter().map(String::as_str));
+                    if in_rows[uid] {
+                        let start = offsets[uid] as usize;
+                        let end = offsets[uid + 1] as usize;
+                        pending.extend_from_slice(&edges[start..end]);
                     } else {
                         complete = false;
                     }
@@ -437,7 +512,7 @@ pub fn activity_overview(
             }
             events.sort();
             let mut sessions: Vec<ActivitySession> = Vec::new();
-            if params.range.end_unix - params.range.start_unix <= 86400 {
+            if include_sessions {
                 for (t, author) in events {
                     if let Some(s) = sessions.last_mut().filter(|s| t - (s.end_unix - 1) <= 600) {
                         s.end_unix = t + 1;
@@ -493,5 +568,7 @@ pub fn activity_overview(
                 sessions_truncated,
             })
         },
-    )
+    );
+    release_unused_heap_memory();
+    result
 }

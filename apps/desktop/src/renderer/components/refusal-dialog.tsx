@@ -23,6 +23,7 @@ export interface RefusalDialogProps {
   onOpenTerminal?(): void;
   discard?: { label: string; onSelect(): void };
   alternative?: { label: string; onSelect(): void };
+  resolveDiverged?: { label: string; onSelect(): void };
   onHandoff?(): void;
 }
 
@@ -31,7 +32,7 @@ export interface RefusalDialogProps {
  * reason as facts, says the repository is untouched, and offers the terminal or a hand-off to an agent.
  * Fully driven by props; every string comes from the caller and is rendered as plain text.
  */
-export function RefusalDialog({ title, explanation, safeLine = "没有执行任何操作，仓库未被改动", lists = [], footnote, onClose, closeLabel = "关闭", focusClose = false, onOpenWorkspace, onOpenTerminal, alternative, discard, onHandoff }: RefusalDialogProps): React.JSX.Element {
+export function RefusalDialog({ title, explanation, safeLine = "没有执行任何操作，仓库未被改动", lists = [], footnote, onClose, closeLabel = "关闭", focusClose = false, onOpenWorkspace, onOpenTerminal, alternative, discard, resolveDiverged, onHandoff }: RefusalDialogProps): React.JSX.Element {
   const composingRef = React.useRef(false);
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -71,6 +72,7 @@ export function RefusalDialog({ title, explanation, safeLine = "没有执行任�
         {onOpenTerminal ? <Button variant="outline" onClick={onOpenTerminal} data-testid="refusal-terminal">在终端打开</Button> : null}
         {discard ? <Button variant="outline" className="text-bad hover:text-bad" onClick={discard.onSelect} data-testid="refusal-discard">{discard.label}</Button> : null}
         {alternative ? <Button variant="outline" onClick={alternative.onSelect} data-testid="refusal-alternative">{alternative.label}</Button> : null}
+        {resolveDiverged ? <Button variant="soft" onClick={resolveDiverged.onSelect} data-testid="refusal-resolve-diverged">{resolveDiverged.label}</Button> : null}
         {onHandoff ? <Button onClick={onHandoff} data-testid="refusal-handoff">交给 Agent…</Button> : null}
       </div>
     </section>

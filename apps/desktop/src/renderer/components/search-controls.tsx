@@ -3,7 +3,17 @@ import { ListFilter, Search, X } from "lucide-react";
 import type { SearchIdentity, SearchPathEntry, SearchTimeField } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { SearchPathFilter, SearchQuery } from "../../../../../packages/protocol/src/generated/client-message.js";
 import type { SearchIdentityState, SearchView } from "../lib/metadata-search-store.js";
-import { inputDateRange, localDateInput, presetDateRange } from "../lib/search-date.js";
+import {
+  formatSearchTimeRange,
+  hasSubDayTime,
+  inputDateRange,
+  inputDateTimeRange,
+  localDateInput,
+  localDateTimeInput,
+  presetDateRange,
+  presetRelativeHours,
+} from "../lib/search-date.js";
+import type { UpdateBatchRecord } from "../lib/update-batch.js";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
 
@@ -45,15 +55,17 @@ export function PageSearchBox({ scope, label, placeholder, value, onChange, titl
   </div>;
 }
 
-export function SearchControls({ view, sessionKey, onQueryChange, onComposition, onLoadIdentities, onLoadPaths }: {
+export function SearchControls({ view, sessionKey, batches = [], onQueryChange, onComposition, onLoadIdentities, onLoadPaths }: {
   view: SearchView;
   sessionKey: string;
+  batches?: UpdateBatchRecord[];
   onQueryChange(query: SearchQuery, composing?: boolean): void;
   onComposition(composing: boolean): void;
   onLoadIdentities(field: SearchTimeField, text: string): void;
   onLoadPaths(text: string): void;
 }): React.JSX.Element {
   const [filterOpen, setFilterOpen] = React.useState(false);
+  const [batchVisible, setBatchVisible] = React.useState((view.query.excludeTips?.length ?? 0) > 0);
   const [authorVisible, setAuthorVisible] = React.useState(view.query.authors.length > 0);
   const [committerVisible, setCommitterVisible] = React.useState(view.query.committers.length > 0);
   const [hashVisible, setHashVisible] = React.useState(Boolean(view.query.oidPrefix));
@@ -64,11 +76,17 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
   const composingRef = React.useRef(false);
   const query = view.query;
   const update = (patch: Partial<SearchQuery>) => onQueryChange({ ...query, ...patch });
+  const removeBatch = () => {
+    const { excludeTips: _dropped, ...rest } = query;
+    onQueryChange(rest);
+  };
   const removeTime = () => update({ fromTimestamp: null, toTimestamp: null, timeField: "committer" });
   const clear = () => {
-    setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false); setPathVisible(false);
-    onQueryChange({ ...query, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
+    setBatchVisible(false); setAuthorVisible(false); setCommitterVisible(false); setHashVisible(false); setTimeVisible(false); setPathVisible(false);
+    const { excludeTips: _dropped, ...rest } = query;
+    onQueryChange({ ...rest, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
   };
+  const activeBatchCount = query.excludeTips?.length ?? 0;
   return <div className="topbar-search-controls flex min-w-0 flex-[0_1_300px] items-center gap-1">
     <label className="flex h-[34px] min-w-0 flex-1 items-center gap-[7px] rounded-lg bg-sunken pr-2 pl-2.5 text-fg3" title="搜索完整提交消息；作者、OID、日期和路径在右侧筛选里（⌘F）">
       <Search className="size-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
@@ -97,18 +115,23 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
           <select data-testid="search-add-condition" aria-label="添加筛选条件" value={condition} onChange={event => {
             const value = event.currentTarget.value;
             setCondition("");
-            if (value === "author") setAuthorVisible(true);
+            if (value === "batch") setBatchVisible(true);
+            else if (value === "author") setAuthorVisible(true);
             else if (value === "committer") setCommitterVisible(true);
             else if (value === "hash") setHashVisible(true);
             else if (value === "time") setTimeVisible(true);
             else if (value === "author-time") { setTimeVisible(true); update({ timeField: "author" }); }
             else if (value === "path") setPathVisible(true);
           }} className="h-7 rounded-md border border-line bg-bg px-2 text-xs text-fg">
-            <option value="">选择条件…</option><option value="author">Author</option><option value="committer">Committer</option>
+            <option value="">选择条件…</option>
+            {batches.length ? <option value="batch">新增批次</option> : null}
+            <option value="author">Author</option><option value="committer">Committer</option>
             <option value="path">路径</option>
             <option value="hash">OID 前缀</option><option value="time">日期范围</option><option value="author-time">按 Author 时间</option>
           </select>
         </label>
+        {batchVisible || activeBatchCount > 0 ? <div className="relative"><BatchFilter batches={batches} query={query} onSelect={tips => update({ excludeTips: tips })} onClear={removeBatch} />
+          <RemoveCondition onClick={() => { setBatchVisible(false); removeBatch(); }} /></div> : null}
         {authorVisible || query.authors.length ? <div className="relative"><IdentityPicker field="author" sessionKey={sessionKey} selected={query.authors} state={view.authorIdentities} onSearch={onLoadIdentities}
           onToggle={identity => update({ authors: toggleIdentity(query.authors, identity) })} />
           <RemoveCondition onClick={() => { setAuthorVisible(false); update({ authors: [] }); }} /></div> : null}
@@ -128,6 +151,33 @@ export function SearchControls({ view, sessionKey, onQueryChange, onComposition,
       </PopoverContent>
     </Popover>
   </div>;
+}
+
+function BatchFilter({ batches, query, onSelect, onClear }: {
+  batches: UpdateBatchRecord[];
+  query: SearchQuery;
+  onSelect(tips: string[]): void;
+  onClear(): void;
+}): React.JSX.Element {
+  const activeKey = (query.excludeTips ?? []).join(",");
+  const matchedKnown = batches.some(batch => batch.oldTips.join(",") === activeKey);
+  return <section className="flex flex-col gap-1.5" data-testid="search-filter-batch">
+    <div className="flex items-center justify-between pr-6"><span className="text-xs text-fg2">新增批次</span>
+      {activeKey ? <button type="button" className="text-[11px] text-fg3 hover:text-fg" onClick={onClear}>移除批次</button> : null}</div>
+    {batches.map(batch => {
+      const checked = batch.oldTips.join(",") === activeKey;
+      return <label key={batch.id} className="flex cursor-pointer items-center gap-2 rounded-md border border-line bg-bg px-2 py-1.5 text-xs hover:bg-hover">
+        <input type="checkbox" checked={checked} onChange={() => checked ? onClear() : onSelect([...batch.oldTips])} />
+        <span className="min-w-0 flex-1 truncate">{batch.label} · {batch.branchName}</span>
+        {batch.addedCount !== null ? <span className="shrink-0 text-[11px] text-fg3 tabular-nums">+{batch.addedCount}</span> : null}
+      </label>;
+    })}
+    {activeKey && !matchedKnown ? <label className="flex items-center gap-2 rounded-md border border-line bg-bg px-2 py-1.5 text-xs">
+      <input type="checkbox" checked onChange={onClear} />
+      <span className="min-w-0 flex-1 truncate">当前批次筛选（{query.excludeTips?.length ?? 0} 个基准 tip）</span>
+    </label> : null}
+    {!batches.length && !activeKey ? <span className="text-[11px] text-fg3">暂无最近的更新或未读批次。</span> : null}
+  </section>;
 }
 
 function PathFilter({ query, suggestions, sessionKey, onLoad, onApply, onRemove }: {
@@ -266,50 +316,200 @@ function DateFilter({ query, onChange, onRemove }: {
   onChange(patch: Partial<SearchQuery>): void;
   onRemove(): void;
 }): React.JSX.Element {
-  const inputFor = (seconds: number | null) => seconds === null ? "" : localDateInput(new Date(seconds * 1_000));
-  const [from, setFrom] = React.useState(() => inputFor(query.fromTimestamp));
-  const [to, setTo] = React.useState(() => inputFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
+  const dayFor = (seconds: number | null) => seconds === null ? "" : localDateInput(new Date(seconds * 1_000));
+  const dateTimeFor = (seconds: number | null) => seconds === null ? "" : localDateTimeInput(new Date(seconds * 1_000));
+  const [precise, setPrecise] = React.useState(() => hasSubDayTime(query.fromTimestamp, query.toTimestamp));
+  const [fromDay, setFromDay] = React.useState(() => dayFor(query.fromTimestamp));
+  const [toDay, setToDay] = React.useState(() => dayFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
+  const [fromDateTime, setFromDateTime] = React.useState(() => dateTimeFor(query.fromTimestamp));
+  const [toDateTime, setToDateTime] = React.useState(() => dateTimeFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
   const [error, setError] = React.useState<string | null>(null);
   React.useEffect(() => {
-    setFrom(inputFor(query.fromTimestamp));
-    setTo(inputFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
+    setFromDay(dayFor(query.fromTimestamp));
+    setToDay(dayFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
+    setFromDateTime(dateTimeFor(query.fromTimestamp));
+    setToDateTime(dateTimeFor(query.toTimestamp === null ? null : query.toTimestamp - 1));
+    if (hasSubDayTime(query.fromTimestamp, query.toTimestamp)) setPrecise(true);
   }, [query.fromTimestamp, query.toTimestamp]);
   const active = query.fromTimestamp !== null || query.toTimestamp !== null;
   const timezone = query.timeZone;
+  const currentTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const applyDates = () => {
-    const range = inputDateRange(from, to);
+    if (precise) {
+      const range = inputDateTimeRange(fromDateTime, toDateTime);
+      if (!range) { setError("请选择有效的起止时间，且开始时间不能晚于结束时间。"); return; }
+      setError(null);
+      onChange({ ...range, timeZone: currentTz() });
+      return;
+    }
+    const range = inputDateRange(fromDay, toDay);
     if (!range) { setError("请选择有效的起止日期，且开始日期不能晚于结束日期。"); return; }
     setError(null);
-    onChange({ ...range, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" });
+    onChange({ ...range, timeZone: currentTz() });
   };
-  const preset = (which: "today" | "7days" | "30days") => {
+  const presetDay = (which: "today" | "7days" | "30days") => {
     const now = new Date();
     const range = presetDateRange(which, now);
-    setFrom(localDateInput(which === "today" ? now : new Date(range.fromTimestamp! * 1_000)));
-    setTo(localDateInput(now));
+    setPrecise(false);
+    setFromDay(localDateInput(which === "today" ? now : new Date(range.fromTimestamp! * 1_000)));
+    setToDay(localDateInput(now));
     setError(null);
-    onChange({ ...range, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" });
+    onChange({ ...range, timeZone: currentTz() });
+  };
+  const presetHours = (hours: number) => {
+    const now = new Date();
+    const range = presetRelativeHours(hours, now);
+    setPrecise(true);
+    setFromDateTime(localDateTimeInput(new Date(range.fromTimestamp! * 1_000)));
+    setToDateTime(localDateTimeInput(new Date((range.toTimestamp! - 1) * 1_000)));
+    setError(null);
+    onChange({ ...range, timeZone: currentTz() });
   };
   return <section className="flex flex-col gap-1.5" data-testid="search-filter-time">
-    <div className="flex items-center justify-between"><span className="text-xs text-fg2">日期范围</span>
-      {active ? <button type="button" className="text-[11px] text-fg3 hover:text-fg" onClick={onRemove}>移除日期</button> : null}</div>
+    <div className="flex items-center justify-between pr-6"><span className="text-xs text-fg2">日期时间范围</span>
+      <div className="flex items-center gap-1.5">
+        <div role="group" aria-label="时间精度" className="inline-flex rounded-md border border-line bg-bg p-0.5 text-[11px]">
+          <button type="button" data-testid="search-time-mode-day" aria-pressed={!precise}
+            onClick={() => { setPrecise(false); setError(null); }}
+            className={`rounded px-1.5 py-0.5 ${!precise ? "bg-accent-soft font-medium text-accent-fg" : "text-fg3 hover:text-fg"}`}>按天</button>
+          <button type="button" data-testid="search-time-mode-precise" aria-pressed={precise}
+            onClick={() => {
+              setPrecise(true);
+              if (!fromDateTime) setFromDateTime(fromDay ? `${fromDay}T00:00` : `${localDateInput()}T00:00`);
+              if (!toDateTime) setToDateTime(toDay ? `${toDay}T23:59` : localDateTimeInput());
+              setError(null);
+            }}
+            className={`rounded px-1.5 py-0.5 ${precise ? "bg-accent-soft font-medium text-accent-fg" : "text-fg3 hover:text-fg"}`}>精确到时分</button>
+        </div>
+        {active ? <button type="button" className="text-[11px] text-fg3 hover:text-fg" onClick={onRemove}>移除日期</button> : null}
+      </div>
+    </div>
+    <div className="flex flex-wrap gap-1.5">
+      {([1, 3, 6, 12] as const).map(hours => <Button key={hours} variant="outline" size="sm" className="h-7 px-2 text-[11px]"
+        data-testid={`search-time-preset-${hours}h`} onClick={() => presetHours(hours)}>近 {hours} 小时</Button>)}
+    </div>
     <div className="flex gap-1.5">{(["today", "7days", "30days"] as const).map((value, index) => <Button key={value} variant="outline" size="sm" className="h-7 px-2 text-[11px]"
-      onClick={() => preset(value)}>{["今天", "近 7 天", "近 30 天"][index]}</Button>)}</div>
-    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
-      <input type="date" aria-label="开始日期" value={from} onChange={event => setFrom(event.currentTarget.value)}
+      onClick={() => presetDay(value)}>{["今天", "近 7 天", "近 30 天"][index]}</Button>)}</div>
+    {precise ? <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
+      <input type="datetime-local" aria-label="开始时间" data-testid="search-datetime-from" value={fromDateTime} onChange={event => setFromDateTime(event.currentTarget.value)}
+        className="h-8 min-w-0 rounded-md border border-line bg-bg px-1.5 text-[11.5px] text-fg" />
+      <span className="text-xs text-fg3">至</span>
+      <input type="datetime-local" aria-label="结束时间" data-testid="search-datetime-to" value={toDateTime} onChange={event => setToDateTime(event.currentTarget.value)}
+        className="h-8 min-w-0 rounded-md border border-line bg-bg px-1.5 text-[11.5px] text-fg" />
+    </div> : <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
+      <input type="date" aria-label="开始日期" value={fromDay} onChange={event => setFromDay(event.currentTarget.value)}
         className="h-8 min-w-0 rounded-md border border-line bg-bg px-1.5 text-xs text-fg" />
       <span className="text-xs text-fg3">至</span>
-      <input type="date" aria-label="结束日期（含当天）" value={to} onChange={event => setTo(event.currentTarget.value)}
+      <input type="date" aria-label="结束日期（含当天）" value={toDay} onChange={event => setToDay(event.currentTarget.value)}
         className="h-8 min-w-0 rounded-md border border-line bg-bg px-1.5 text-xs text-fg" />
-    </div>
-    <Button variant="outline" size="sm" className="h-7 self-start px-2 text-[11px]" onClick={applyDates}>应用日期范围</Button>
+    </div>}
+    <Button variant="outline" size="sm" className="h-7 self-start px-2 text-[11px]" data-testid="search-time-apply" onClick={applyDates}>{precise ? "应用时间范围" : "应用日期范围"}</Button>
     {error ? <span role="alert" className="text-[11px] text-bad">{error}</span> : null}
-    {active ? <span className="text-[10.5px] text-fg3">本地日历区间 · {timezone}</span> : null}
+    {active ? <span className="text-[10.5px] text-fg3">{precise ? "精确到本地时分" : "本地日历区间"} · {timezone}</span> : null}
     <label className="flex items-center gap-2 text-xs text-fg2"><span className="min-w-0 flex-1">按哪个身份时间排序和筛选</span>
       <select value={query.timeField} onChange={event => onChange({ timeField: event.currentTarget.value as SearchTimeField })}
         className="h-7 rounded-md border border-line bg-bg px-1.5 text-xs text-fg"><option value="committer">Committer</option><option value="author">Author</option></select>
     </label>
   </section>;
+}
+
+export function ActiveSearchChips({ query, batches = [], onQueryChange, onOpenStats }: {
+  query: SearchQuery;
+  batches?: UpdateBatchRecord[];
+  onQueryChange(next: SearchQuery): void;
+  onOpenStats?(): void;
+}): React.JSX.Element | null {
+  const clearAll = () => {
+    const { excludeTips: _dropped, ...rest } = query;
+    onQueryChange({ ...rest, message: "", authors: [], committers: [], oidPrefix: "", fromTimestamp: null, toTimestamp: null, timeField: "committer", path: null });
+  };
+  const chips: { key: string; label: string; testId: string; onRemove(): void }[] = [];
+  if (query.excludeTips?.length) {
+    const key = query.excludeTips.join(",");
+    const matched = batches.find(batch => batch.oldTips.join(",") === key);
+    const label = matched
+      ? `批次：${matched.label}${matched.addedCount !== null ? ` (+${matched.addedCount})` : ""}`
+      : `批次：排除 ${query.excludeTips.length} 个基准 tip`;
+    chips.push({
+      key: "batch",
+      label,
+      testId: "chip-batch",
+      onRemove: () => {
+        const { excludeTips: _dropped, ...rest } = query;
+        onQueryChange(rest);
+      },
+    });
+  }
+  const timeText = formatSearchTimeRange(query.fromTimestamp, query.toTimestamp);
+  if (timeText) {
+    chips.push({
+      key: "time",
+      label: `时间：${timeText}${query.timeField === "author" ? " · Author时间" : ""}`,
+      testId: "chip-time",
+      onRemove: () => onQueryChange({ ...query, fromTimestamp: null, toTimestamp: null, timeField: "committer" }),
+    });
+  } else if (query.timeField === "author") {
+    chips.push({
+      key: "time-field",
+      label: "时间字段：Author",
+      testId: "chip-time-field",
+      onRemove: () => onQueryChange({ ...query, timeField: "committer" }),
+    });
+  }
+  for (const author of query.authors) {
+    chips.push({
+      key: `author:${identityKey(author)}`,
+      label: `Author：${author.name || author.email}`,
+      testId: "chip-author",
+      onRemove: () => onQueryChange({ ...query, authors: toggleIdentity(query.authors, author) }),
+    });
+  }
+  for (const committer of query.committers) {
+    chips.push({
+      key: `committer:${identityKey(committer)}`,
+      label: `Committer：${committer.name || committer.email}`,
+      testId: "chip-committer",
+      onRemove: () => onQueryChange({ ...query, committers: toggleIdentity(query.committers, committer) }),
+    });
+  }
+  if (query.path) {
+    chips.push({
+      key: "path",
+      label: `路径：${decodePathHex(query.path.rawHex) || "."}`,
+      testId: "chip-path",
+      onRemove: () => onQueryChange({ ...query, path: null }),
+    });
+  }
+  if (query.oidPrefix) {
+    chips.push({
+      key: "oid",
+      label: `OID：${query.oidPrefix}`,
+      testId: "chip-oid",
+      onRemove: () => onQueryChange({ ...query, oidPrefix: "" }),
+    });
+  }
+  if (query.message) {
+    chips.push({
+      key: "message",
+      label: `消息：${query.message}`,
+      testId: "chip-message",
+      onRemove: () => onQueryChange({ ...query, message: "" }),
+    });
+  }
+  if (chips.length === 0) return null;
+  return <div data-testid="active-search-chips" className="flex flex-wrap items-center gap-1.5 border-b border-line bg-bg px-4 py-1.5 text-xs">
+    {chips.map(chip => <span key={chip.key} data-testid={chip.testId}
+      className="inline-flex max-w-[320px] items-center gap-1 rounded-md border border-line2 bg-panel px-2 py-0.5 text-[11.5px] text-fg2">
+      <span className="truncate">{chip.label}</span>
+      <button type="button" aria-label={`移除${chip.label}`} className="rounded p-0.5 text-fg3 hover:bg-hover hover:text-fg" onClick={chip.onRemove}>
+        <X className="size-3" />
+      </button>
+    </span>)}
+    <span className="ml-auto flex shrink-0 items-center gap-1.5">
+      {onOpenStats ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="search-open-stats" onClick={onOpenStats}>在统计页查看</Button> : null}
+      <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]" data-testid="search-clear-all" onClick={clearAll}>清空全部</Button>
+    </span>
+  </div>;
 }
 
 function RemoveCondition({ onClick }: { onClick(): void }): React.JSX.Element {

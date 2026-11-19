@@ -1006,3 +1006,204 @@ test("M7 workspaceStage, Unstage (with renames and unborn HEAD), Discard, draftC
   assert.equal((await unbornClient.call("runOperation", { operation: { kind: "workspaceUnstage", pathsHex: [firstHex], all: false } })).chunks[0].data.result.outcome, "done");
   assert.equal(await git(unbornDir, ["ls-files", "--stage", "first.txt"]), "");
 });
+
+test("M8 previewMerge is zero-write across clean and conflicted branches and supports rebase/merge completeMerge", async t => {
+  // 1. Clean diverged branch with distinct author metadata -> preview is zero-write and singleCommitRebase preserves author.
+  const f1 = await fixture(t, "m8-clean-rebase");
+  await writeFile(join(f1.repo, "local.txt"), "local work\n");
+  await git(f1.repo, ["add", "--", "local.txt"]);
+  await git(f1.repo, ["commit", "-qm", "feat: preserve author\n\nBody details preserved."], {
+    env: {
+      GIT_AUTHOR_NAME: "Special Author",
+      GIT_AUTHOR_EMAIL: "special@example.test",
+      GIT_AUTHOR_DATE: "1700001234 +0800",
+      GIT_COMMITTER_NAME: "Default Committer",
+      GIT_COMMITTER_EMAIL: "committer@example.test",
+    },
+  });
+  const localOid = await git(f1.repo, ["rev-parse", "refs/heads/main"]);
+  const upstreamOid = f1.second;
+
+  const snapBeforeClean = await snapshotTree(f1.repo);
+  const cleanPreview = (
+    await f1.client.call("previewMerge", {
+      targetRef: "refs/heads/main",
+      expectedTargetOid: localOid,
+      sourceRef: "refs/remotes/origin/main",
+      expectedSourceOid: upstreamOid,
+    })
+  ).chunks[0].data.result;
+  assert.deepEqual(await snapshotTree(f1.repo), snapBeforeClean, "clean previewMerge writes zero bytes to repo");
+  assert.equal(cleanPreview.outcome, "clean");
+  assert.equal(cleanPreview.canSingleCommitRebase, true);
+  assert.equal(cleanPreview.singleCommitSummary, "feat: preserve author");
+
+  const rebaseOp = {
+    kind: "completeMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: localOid,
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: upstreamOid,
+    expectedHeadOid: localOid,
+    mode: "singleCommitRebase",
+    message: "feat: preserve author",
+    resolvedFiles: [],
+    switchToTarget: false,
+  };
+  assert.equal((await f1.call("checkOperation", rebaseOp)).allowed, true);
+  const rebaseRun = await f1.call("runOperation", rebaseOp);
+  assert.equal(rebaseRun.outcome, "done");
+  assert.equal(await git(f1.repo, ["rev-parse", "HEAD^"]), upstreamOid);
+  assert.equal(
+    await git(f1.repo, ["show", "-s", "--format=%an|%ae|%ad|%B", "--date=raw", "HEAD"]),
+    "Special Author|special@example.test|1700001234 +0800|feat: preserve author\n\nBody details preserved.",
+  );
+  assert.equal(await git(f1.repo, ["status", "--porcelain"]), "");
+
+  // 2. Clean diverged mergeCommit matches an independent Git merge oracle and fails closed when tracked worktree is dirty.
+  const f2 = await fixture(t, "m8-clean-merge-commit");
+  const local2 = await commit(f2.repo, "local2.txt", "local 2\n");
+  await writeFile(join(f2.repo, "local2.txt"), "dirty tracked edit\n");
+  const blockedPreview = (
+    await f2.client.call("previewMerge", {
+      targetRef: "refs/heads/main",
+      expectedTargetOid: local2,
+      sourceRef: "refs/remotes/origin/main",
+      expectedSourceOid: f2.second,
+    })
+  ).chunks[0].data.result;
+  assert.equal(blockedPreview.outcome, "blocked");
+  assert.equal(blockedPreview.blockers[0].kind, "dirty");
+
+  await writeFile(join(f2.repo, "local2.txt"), "local 2\n");
+  const oracle = join(f2.base, "oracle");
+  await git(f2.base, ["clone", "-q", f2.repo, oracle]);
+  await git(oracle, ["merge", "--no-ff", "-m", "Merge origin/main", f2.second], { env: identity });
+  const mergeOp = {
+    kind: "completeMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: local2,
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: f2.second,
+    expectedHeadOid: local2,
+    mode: "mergeCommit",
+    message: "Merge origin/main",
+    resolvedFiles: [],
+    switchToTarget: false,
+  };
+  assert.equal((await f2.call("runOperation", mergeOp)).outcome, "done");
+  assert.equal(await git(f2.repo, ["rev-parse", "HEAD^{tree}"]), await git(oracle, ["rev-parse", "HEAD^{tree}"]));
+  assert.equal(await git(f2.repo, ["rev-parse", "HEAD^1"]), local2);
+  assert.equal(await git(f2.repo, ["rev-parse", "HEAD^2"]), f2.second);
+
+  // 3. Conflicted content + add/add: preview zero-write, atomic commit, no MERGE_HEAD.
+  const f3 = await fixture(t, "m8-conflicted");
+  await writeFile(join(f3.remote, "shared.txt"), "top\nremote\nbottom\n");
+  await writeFile(join(f3.remote, "both.txt"), "both remote\n");
+  await git(f3.remote, ["add", "."]);
+  await git(f3.remote, ["commit", "-qm", "remote conflict side"], { env: identity });
+  const remoteConf = await git(f3.remote, ["rev-parse", "HEAD"]);
+  await git(f3.repo, ["fetch", "-q"]);
+  await writeFile(join(f3.repo, "shared.txt"), "top\nlocal\nbottom\n");
+  await writeFile(join(f3.repo, "both.txt"), "both local\n");
+  await git(f3.repo, ["add", "."]);
+  await git(f3.repo, ["commit", "-qm", "local conflict side"], { env: identity });
+  const localConf = await git(f3.repo, ["rev-parse", "HEAD"]);
+
+  const snapBeforeConf = await snapshotTree(f3.repo);
+  const confPreview = (
+    await f3.client.call("previewMerge", {
+      targetRef: "refs/heads/main",
+      expectedTargetOid: localConf,
+      sourceRef: "refs/remotes/origin/main",
+      expectedSourceOid: remoteConf,
+    })
+  ).chunks[0].data.result;
+  assert.deepEqual(await snapshotTree(f3.repo), snapBeforeConf, "conflicted previewMerge writes zero bytes to repo");
+  assert.equal(confPreview.outcome, "conflicted");
+  assert.deepEqual(confPreview.files.map(file => file.path.display), ["both.txt", "shared.txt"]);
+
+  const confMergeOp = {
+    kind: "completeMerge",
+    targetRef: "refs/heads/main",
+    expectedTargetOid: localConf,
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: remoteConf,
+    expectedHeadOid: localConf,
+    mode: "mergeCommit",
+    message: "Resolve both conflicts",
+    resolvedFiles: [
+      { pathHex: Buffer.from("both.txt").toString("hex"), mode: "100644", contents: "both local\nboth remote\n" },
+      { pathHex: Buffer.from("shared.txt").toString("hex"), mode: "100644", contents: "top\nlocal\nremote\nbottom\n" },
+    ],
+    switchToTarget: false,
+  };
+  assert.equal((await f3.call("checkOperation", confMergeOp)).allowed, true);
+  assert.equal((await f3.call("runOperation", confMergeOp)).outcome, "done");
+  assert.equal(await git(f3.repo, ["status", "--porcelain"]), "");
+  await assert.rejects(stat(join(f3.repo, ".git/MERGE_HEAD")));
+  assert.equal(await readFile(join(f3.repo, "shared.txt"), "utf8"), "top\nlocal\nremote\nbottom\n");
+  assert.equal(await readFile(join(f3.repo, "both.txt"), "utf8"), "both local\nboth remote\n");
+
+  // 4. Unsupported conflict kinds: structuralConflict, binaryOrNonUtf8, and crissCross.
+  const f4 = await fixture(t, "m8-unsupported");
+  await git(f4.repo, ["checkout", "-qb", "struct-a", f4.first]);
+  await git(f4.repo, ["rm", "-q", "a.txt"]);
+  await git(f4.repo, ["commit", "-qm", "delete a.txt"], { env: identity });
+  const delOid = await git(f4.repo, ["rev-parse", "refs/heads/struct-a"]);
+  const structRes = (
+    await f4.client.call("previewMerge", {
+      targetRef: "refs/heads/struct-a",
+      expectedTargetOid: delOid,
+      sourceRef: "refs/remotes/origin/main",
+      expectedSourceOid: f4.second,
+    })
+  ).chunks[0].data.result;
+  assert.equal(structRes.outcome, "unsupported");
+  assert.equal(structRes.reason, "structuralConflict");
+
+  await git(f4.repo, ["checkout", "-qb", "bin-a", f4.first]);
+  await writeFile(join(f4.repo, "bin.dat"), Buffer.from([0x00, 0x01, 0x02, 0xff]));
+  await git(f4.repo, ["add", "--", "bin.dat"]);
+  await git(f4.repo, ["commit", "-qm", "bin a"], { env: identity });
+  const binAOid = await git(f4.repo, ["rev-parse", "refs/heads/bin-a"]);
+  await git(f4.repo, ["checkout", "-qb", "bin-b", f4.first]);
+  await writeFile(join(f4.repo, "bin.dat"), Buffer.from([0x00, 0x03, 0x04, 0xff]));
+  await git(f4.repo, ["add", "--", "bin.dat"]);
+  await git(f4.repo, ["commit", "-qm", "bin b"], { env: identity });
+  const binBOid = await git(f4.repo, ["rev-parse", "refs/heads/bin-b"]);
+  const binRes = (
+    await f4.client.call("previewMerge", {
+      targetRef: "refs/heads/bin-a",
+      expectedTargetOid: binAOid,
+      sourceRef: "refs/heads/bin-b",
+      expectedSourceOid: binBOid,
+    })
+  ).chunks[0].data.result;
+  assert.equal(binRes.outcome, "unsupported");
+  assert.equal(binRes.reason, "binaryOrNonUtf8");
+
+  // Criss-cross two common ancestors: b1 and b2 fork from base, then c1 merges both parents and c2 swaps merge parents.
+  await git(f4.repo, ["checkout", "-qb", "cc-1", f4.first]);
+  await commit(f4.repo, "cc1.txt", "1\n");
+  const ccB1 = await git(f4.repo, ["rev-parse", "HEAD"]);
+  await git(f4.repo, ["checkout", "-qb", "cc-2", f4.first]);
+  await commit(f4.repo, "cc2.txt", "2\n");
+  const ccB2 = await git(f4.repo, ["rev-parse", "HEAD"]);
+  await git(f4.repo, ["checkout", "-q", "cc-1"]);
+  await git(f4.repo, ["merge", "-q", "--no-ff", "-m", "m1", ccB2], { env: identity });
+  const ccTip1 = await git(f4.repo, ["rev-parse", "HEAD"]);
+  await git(f4.repo, ["checkout", "-q", "cc-2"]);
+  await git(f4.repo, ["merge", "-q", "--no-ff", "-m", "m2", ccB1], { env: identity });
+  const ccTip2 = await git(f4.repo, ["rev-parse", "HEAD"]);
+  const ccRes = (
+    await f4.client.call("previewMerge", {
+      targetRef: "refs/heads/cc-1",
+      expectedTargetOid: ccTip1,
+      sourceRef: "refs/heads/cc-2",
+      expectedSourceOid: ccTip2,
+    })
+  ).chunks[0].data.result;
+  assert.equal(ccRes.outcome, "unsupported");
+  assert.equal(ccRes.reason, "crissCross");
+});

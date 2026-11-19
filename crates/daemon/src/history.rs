@@ -18,6 +18,8 @@ use std::{
 const CACHE_PAGE_LIMIT: usize = 8;
 const CACHE_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const OID_LINE_LIMIT: usize = 80;
+const TIMESTAMP_OID_LINE_LIMIT: usize = 128;
+const MAX_NEW_MARKER_SCAN: u64 = 250_000;
 const TOPOLOGY_LINE_LIMIT: usize = 9 * 1024;
 const DATE_INDEX_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const DATE_INDEX_LINE_GROWTH: usize = 64 * 1024;
@@ -54,6 +56,8 @@ struct Query {
     baseline: Baseline,
     marker_status: NewSinceLastSeenStatus,
     total_new_count: Option<u64>,
+    new_min_unix: Option<i64>,
+    new_max_unix: Option<i64>,
     prefix_offset: u32,
     prefix_count: u64,
     prefix_open: bool,
@@ -77,6 +81,8 @@ struct LayoutWork {
 struct MarkerState {
     status: NewSinceLastSeenStatus,
     total_new_count: Option<u64>,
+    new_min_unix: Option<i64>,
+    new_max_unix: Option<i64>,
     prefix_offset: u32,
     prefix_count: u64,
     prefix_open: bool,
@@ -258,6 +264,9 @@ pub struct HistoryPage {
     pub next_cursor: Option<String>,
     pub new_since_last_seen_status: NewSinceLastSeenStatus,
     pub last_seen_divider_oid: Option<String>,
+    pub new_since_last_seen_count: Option<u64>,
+    pub new_since_last_seen_min_unix: Option<i64>,
+    pub new_since_last_seen_max_unix: Option<i64>,
 }
 
 impl Default for HistoryState {
@@ -797,6 +806,16 @@ fn locate_oid_offset(
     Err(scope_unavailable())
 }
 
+pub(crate) fn push_commit_graph_arg(
+    args: &mut Vec<std::ffi::OsString>,
+    discovered: &DiscoveredRepository,
+) {
+    if repository::history_boundary_limited(discovered) {
+        args.push(string_arg("-c"));
+        args.push(string_arg("core.commitGraph=false"));
+    }
+}
+
 fn locate_date_target(
     executable: &Path,
     discovered: &DiscoveredRepository,
@@ -809,14 +828,14 @@ fn locate_date_target(
         return Err(no_commits_before_date());
     }
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
-    let mut args = vec![
-        string_arg("-c"),
-        string_arg("core.commitGraph=false"),
+    let mut args = Vec::with_capacity(6 + discovered.scope_tips.len());
+    push_commit_graph_arg(&mut args, discovered);
+    args.extend([
         string_arg("rev-list"),
         string_arg("--timestamp"),
         string_arg("--parents"),
         string_arg("--topo-order"),
-    ];
+    ]);
     args.extend(discovered.scope_tips.iter().map(string_arg));
     args.push(string_arg("--"));
     let mut stream = git
@@ -939,6 +958,8 @@ impl Query {
             baseline,
             marker_status,
             total_new_count: None,
+            new_min_unix: None,
+            new_max_unix: None,
             prefix_offset: 0,
             prefix_count: 0,
             prefix_open: true,
@@ -972,6 +993,8 @@ impl Query {
         MarkerState {
             status: self.marker_status,
             total_new_count: self.total_new_count,
+            new_min_unix: self.new_min_unix,
+            new_max_unix: self.new_max_unix,
             prefix_offset: self.prefix_offset,
             prefix_count: self.prefix_count,
             prefix_open: self.prefix_open,
@@ -982,6 +1005,8 @@ impl Query {
     fn restore_marker_state(&mut self, state: MarkerState) {
         self.marker_status = state.status;
         self.total_new_count = state.total_new_count;
+        self.new_min_unix = state.new_min_unix;
+        self.new_max_unix = state.new_max_unix;
         self.prefix_offset = state.prefix_offset;
         self.prefix_count = state.prefix_count;
         self.prefix_open = state.prefix_open;
@@ -1021,7 +1046,12 @@ fn mark_page(
                 request_deadline.min(Instant::now() + std::time::Duration::from_secs(2));
             let classification = if previous.tips.is_empty() {
                 Some(vec![true; page.commits.len()])
-            } else if current_tips == previous_tips || query.total_new_count == Some(0) {
+            } else if current_tips == previous_tips {
+                query.total_new_count = Some(0);
+                query.new_min_unix = None;
+                query.new_max_unix = None;
+                Some(vec![false; page.commits.len()])
+            } else if query.total_new_count == Some(0) {
                 Some(vec![false; page.commits.len()])
             } else if page.commits.is_empty() {
                 Some(Vec::new())
@@ -1032,6 +1062,8 @@ fn mark_page(
                     &page.commits,
                     &previous.tips,
                     &mut query.total_new_count,
+                    &mut query.new_min_unix,
+                    &mut query.new_max_unix,
                     cancelled,
                     request_deadline,
                     marker_deadline,
@@ -1064,6 +1096,8 @@ fn marker_classification(
     commits: &[HistoryCommit],
     old_tips: &[String],
     total_new_count: &mut Option<u64>,
+    new_min_unix: &mut Option<i64>,
+    new_max_unix: &mut Option<i64>,
     cancelled: &AtomicBool,
     request_deadline: Instant,
     marker_deadline: Instant,
@@ -1078,52 +1112,82 @@ fn marker_classification(
     let cwd = Path::new(&discovered.info.path);
     let mut flags = vec![false; commits.len()];
     if total_new_count.is_none() {
-        let mut args = vec![
-            string_arg("-c"),
-            string_arg("core.commitGraph=false"),
-            string_arg("rev-list"),
-            string_arg("--count"),
-        ];
+        let mut args = Vec::with_capacity(6 + discovered.scope_tips.len() + old_tips.len());
+        push_commit_graph_arg(&mut args, discovered);
+        args.push(string_arg("rev-list"));
+        args.push(string_arg("--timestamp"));
         args.extend(discovered.scope_tips.iter().map(string_arg));
         args.push(string_arg("--not"));
         args.extend(old_tips.iter().map(string_arg));
         args.push(string_arg("--"));
-        let count = match git.run(cwd, &args, None, 128, cancelled, marker_deadline) {
-            Ok(output) if output.status.success() => output,
+        let mut count_stream = match git.stream_lines(cwd, &args, TIMESTAMP_OID_LINE_LIMIT) {
+            Ok(stream) => stream,
             Err(GitFailure::Cancelled) => return Err(repository::cancelled_error()),
-            Err(GitFailure::Timeout) if Instant::now() >= request_deadline => {
+            Err(_) => return Ok(None),
+        };
+        let mut count = 0_u64;
+        let mut min_ts: Option<i64> = None;
+        let mut max_ts: Option<i64> = None;
+        loop {
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(repository::cancelled_error());
+            }
+            if Instant::now() >= request_deadline {
                 return Err(repository::timeout_error());
             }
-            _ => return Ok(None),
-        };
-        if Instant::now() >= request_deadline {
-            return Err(repository::timeout_error());
+            if Instant::now() >= marker_deadline {
+                return Ok(None);
+            }
+            match count_stream.next_line(cancelled, marker_deadline) {
+                Ok(Some(line)) => {
+                    let Some(sep) = line.iter().position(|byte| *byte == b' ') else {
+                        return Ok(None);
+                    };
+                    let Ok(ts_str) = std::str::from_utf8(&line[..sep]) else {
+                        return Ok(None);
+                    };
+                    let Ok(ts) = ts_str.parse::<i64>() else {
+                        return Ok(None);
+                    };
+                    let oid_bytes = &line[sep + 1..];
+                    if oid_bytes.len() != discovered.oid_length
+                        || !oid_bytes.iter().all(u8::is_ascii_hexdigit)
+                    {
+                        return Ok(None);
+                    }
+                    count += 1;
+                    if count > MAX_NEW_MARKER_SCAN {
+                        return Ok(None);
+                    }
+                    min_ts = Some(min_ts.map_or(ts, |current| current.min(ts)));
+                    max_ts = Some(max_ts.map_or(ts, |current| current.max(ts)));
+                }
+                Ok(None) => break,
+                Err(GitFailure::Cancelled) => return Err(repository::cancelled_error()),
+                Err(GitFailure::Timeout) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err(repository::cancelled_error());
+                    }
+                    if Instant::now() >= request_deadline {
+                        return Err(repository::timeout_error());
+                    }
+                    return Ok(None);
+                }
+                Err(_) => return Ok(None),
+            }
         }
-        if Instant::now() >= marker_deadline {
-            return Ok(None);
-        }
-        let Ok(value) = std::str::from_utf8(&count.stdout) else {
-            return Ok(None);
-        };
-        let value = value.strip_suffix('\n').unwrap_or(value);
-        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Ok(None);
-        }
-        let Ok(value) = value.parse::<u64>() else {
-            return Ok(None);
-        };
-        *total_new_count = Some(value);
+        *total_new_count = Some(count);
+        *new_min_unix = min_ts;
+        *new_max_unix = max_ts;
     }
     if *total_new_count == Some(0) {
         return Ok(Some(flags));
     }
 
     let mut candidate_indexes = HashSet::with_capacity(commits.len());
-    let mut args = vec![
-        string_arg("-c"),
-        string_arg("core.commitGraph=false"),
-        string_arg("rev-list"),
-    ];
+    let mut args = Vec::with_capacity(4 + old_tips.len());
+    push_commit_graph_arg(&mut args, discovered);
+    args.push(string_arg("rev-list"));
     for commit in commits {
         candidate_indexes.insert(commit.commit.oid.as_str());
     }
@@ -1214,6 +1278,9 @@ fn clear_markers(query: &mut Query, page: &mut Page) {
         }
     }
     query.divider_oid = None;
+    query.total_new_count = None;
+    query.new_min_unix = None;
+    query.new_max_unix = None;
 }
 
 fn read_page_from_stream(
@@ -1645,13 +1712,13 @@ fn start_stream(
     discovered: &DiscoveredRepository,
 ) -> Result<GitLineStream, PreviewError> {
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_failure)?;
-    let mut args = vec![
-        string_arg("-c"),
-        string_arg("core.commitGraph=false"),
+    let mut args = Vec::with_capacity(6 + discovered.scope_tips.len());
+    push_commit_graph_arg(&mut args, discovered);
+    args.extend([
         string_arg("rev-list"),
         string_arg("--topo-order"),
         string_arg("--parents"),
-    ];
+    ]);
     args.extend(discovered.scope_tips.iter().map(string_arg));
     args.push(string_arg("--"));
     git.stream_lines_buffered(
@@ -1679,6 +1746,16 @@ fn make_page(query: &Query, page: &Page) -> HistoryPage {
             page.offset.saturating_add(page.commits.len() as u32)
         )
     });
+    let (new_since_last_seen_count, new_since_last_seen_min_unix, new_since_last_seen_max_unix) =
+        if query.marker_status == NewSinceLastSeenStatus::Ready {
+            (
+                query.total_new_count,
+                query.new_min_unix,
+                query.new_max_unix,
+            )
+        } else {
+            (None, None, None)
+        };
     HistoryPage {
         commits: page.commits.clone(),
         offset: page.offset,
@@ -1689,6 +1766,9 @@ fn make_page(query: &Query, page: &Page) -> HistoryPage {
         next_cursor,
         new_since_last_seen_status: query.marker_status,
         last_seen_divider_oid: query.divider_oid.clone(),
+        new_since_last_seen_count,
+        new_since_last_seen_min_unix,
+        new_since_last_seen_max_unix,
     }
 }
 
@@ -2790,5 +2870,60 @@ mod tests {
                 .all(|commit| !commit.is_new_since_last_seen)
         );
         assert_eq!(page.last_seen_divider_oid, None);
+    }
+
+    #[test]
+    fn new_since_last_seen_reports_exact_count_and_unix_bounds_beyond_200_commits() {
+        let (_repo, path) = make_repo(2);
+        let old_tip = run_git(&path, &["rev-parse", "HEAD"]);
+        let branch = run_git(&path, &["symbolic-ref", "HEAD"]);
+        let mut import_script = String::new();
+        let base_ts = 1_700_000_000_i64;
+        for index in 1..=205_i64 {
+            let ts = base_ts + index * 60;
+            let message = format!("batch commit {index}");
+            import_script.push_str(&format!(
+                "commit {branch}\nauthor Fast Author <fast@example.test> {ts} +0000\ncommitter Fast Author <fast@example.test> {ts} +0000\ndata {}\n{}\n",
+                message.len(),
+                message
+            ));
+            if index == 1 {
+                import_script.push_str(&format!("from {old_tip}\n"));
+            }
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git fast-import");
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(import_script.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let discovered = discover(&path);
+        let state = HistoryState::new();
+        state.set_baseline(Baseline {
+            previous_view: Some(LastViewedSnapshot {
+                tips: vec![old_tip],
+                viewed_at_unix_ms: 1,
+            }),
+            status: StoreStatus::Ok,
+        });
+        let page = read_page(&state, &discovered, None, 50).expect("read first 50 commits");
+        assert_eq!(
+            page.new_since_last_seen_status,
+            NewSinceLastSeenStatus::Ready
+        );
+        assert_eq!(page.last_seen_divider_oid, None);
+        assert_eq!(page.new_since_last_seen_count, Some(205));
+        assert_eq!(page.new_since_last_seen_min_unix, Some(base_ts + 60));
+        assert_eq!(page.new_since_last_seen_max_unix, Some(base_ts + 205 * 60));
     }
 }

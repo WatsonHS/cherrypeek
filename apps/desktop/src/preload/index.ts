@@ -87,6 +87,7 @@ const api: CommitScopeApi = {
   pushRepository: params => ipcRenderer.invoke("commitscope:operations:push", params),
   cancelRepositoryOperation: () => ipcRenderer.invoke("commitscope:operations:cancel"),
   getBranchSync: params => ipcRenderer.invoke("commitscope:operations:branch-sync", params),
+  previewMerge: params => ipcRenderer.invoke("commitscope:operations:preview-merge", params),
   checkOperation: operation => ipcRenderer.invoke("commitscope:operations:check", operation),
   runOperation: operation => ipcRenderer.invoke("commitscope:operations:run", operation),
   openRemotePage: target => ipcRenderer.invoke("commitscope:remote:open-page", target),

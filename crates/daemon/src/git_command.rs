@@ -117,6 +117,20 @@ impl ReadOnlyGit {
         cancelled: &AtomicBool,
         deadline: Instant,
     ) -> Result<CommandOutput, GitFailure> {
+        self.run_with_env(cwd, args, &[], input, stdout_limit, cancelled, deadline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with_env(
+        &self,
+        cwd: &Path,
+        args: &[OsString],
+        extra_env: &[(&OsStr, &OsStr)],
+        input: Option<&[u8]>,
+        stdout_limit: usize,
+        cancelled: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<CommandOutput, GitFailure> {
         if cancelled.load(Ordering::Acquire) {
             return Err(GitFailure::Cancelled);
         }
@@ -125,6 +139,9 @@ impl ReadOnlyGit {
         }
 
         let mut command = self.command(cwd, args, input.is_some());
+        for &(key, value) in extra_env {
+            command.env(key, value);
+        }
 
         let child = command
             .spawn()

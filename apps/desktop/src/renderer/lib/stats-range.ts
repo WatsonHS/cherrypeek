@@ -1,4 +1,5 @@
 import type { StatsBucket } from "../../../../../packages/protocol/src/generated/client-message.js";
+import { parseLocalDateTime } from "./search-date.js";
 
 /*
  * Time range and bucket rules of the statistics page. All day arithmetic goes through local calendar
@@ -6,11 +7,17 @@ import type { StatsBucket } from "../../../../../packages/protocol/src/generated
  * local midnight. Ranges are half-open [startUnix, endUnix) in Unix seconds.
  */
 
-export type RangePreset = "1h" | "6h" | "today" | "7d" | "30d" | "90d" | "custom";
+export type RangePreset = "1h" | "3h" | "6h" | "12h" | "today" | "7d" | "30d" | "90d" | "custom";
 export type BucketChoice = "auto" | StatsBucket;
 
 export interface UnixRange { startUnix: number; endUnix: number }
-export interface CustomDays { from: string; to: string }
+export interface CustomDays {
+  from: string;
+  to: string;
+  precise?: boolean;
+  fromDateTime?: string;
+  toDateTime?: string;
+}
 
 export const MAX_RANGE_DAYS = 3660;
 export const MAX_BUCKETS = 3660;
@@ -30,12 +37,20 @@ export function parseDay(value: string): Date | null {
 
 /** The range of a preset at `now`, or null for an invalid custom range. Day-based presets end at the next local midnight. */
 export function presetRange(preset: RangePreset, now: Date, custom?: CustomDays): UnixRange | null {
-  if (preset === "1h" || preset === "6h") {
+  if (preset === "1h" || preset === "3h" || preset === "6h" || preset === "12h") {
     // Rounded up to the minute so repeated reads inside a minute ask for the same range.
+    const hours = preset === "1h" ? 1 : preset === "3h" ? 3 : preset === "6h" ? 6 : 12;
     const end = Math.ceil(now.getTime() / 60_000) * 60;
-    return { startUnix: end - (preset === "1h" ? 3_600 : 21_600), endUnix: end };
+    return { startUnix: end - hours * 3_600, endUnix: end };
   }
   if (preset === "custom") {
+    if (custom?.precise) {
+      const from = custom.fromDateTime ? parseLocalDateTime(custom.fromDateTime) : null;
+      const to = custom.toDateTime ? parseLocalDateTime(custom.toDateTime) : null;
+      if (!from || !to || from.getTime() > to.getTime()) return null;
+      const range = { startUnix: unix(from), endUnix: unix(to) + 60 };
+      return rangeDays(range) > MAX_RANGE_DAYS ? null : range;
+    }
     const from = custom ? parseDay(custom.from) : null;
     const to = custom ? parseDay(custom.to) : null;
     if (!from || !to || from.getTime() > to.getTime()) return null;

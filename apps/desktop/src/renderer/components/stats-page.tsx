@@ -6,6 +6,7 @@ import { bucketDisabledReason, bucketUnitLabel } from "../lib/stats-range.js";
 import type { BucketChoice, RangePreset, UnixRange } from "../lib/stats-range.js";
 import { StatsStore } from "../lib/stats-store.js";
 import type { StatsApi, StatsCapabilities, StatsSection } from "../lib/stats-store.js";
+import { batchFilterQuery, zoomRangeForBatch, type UpdateBatchRecord } from "../lib/update-batch.js";
 import { cn } from "../lib/utils.js";
 import { PlaceholderBox } from "./placeholder.js";
 import { ActivitySection } from "./stats-activity.js";
@@ -21,8 +22,9 @@ const SECTIONS: readonly { id: StatsSection; label: string }[] = [
   { id: "activity", label: "活动" }, { id: "changes", label: "改动" }, { id: "notable", label: "关注" }, { id: "evolution", label: "演化" },
 ];
 const RANGES: readonly { id: RangePreset; label: string }[] = [
-  { id: "1h", label: "1 小时" }, { id: "6h", label: "6 小时" }, { id: "today", label: "今天" }, { id: "7d", label: "7 天" },
-  { id: "30d", label: "30 天" }, { id: "90d", label: "90 天" }, { id: "custom", label: "自定义…" },
+  { id: "1h", label: "1 小时" }, { id: "3h", label: "3 小时" }, { id: "6h", label: "6 小时" }, { id: "12h", label: "12 小时" },
+  { id: "today", label: "今天" }, { id: "7d", label: "7 天" }, { id: "30d", label: "30 天" }, { id: "90d", label: "90 天" },
+  { id: "custom", label: "自定义…" },
 ];
 const BUCKETS: readonly StatsBucket[] = ["tenMinutes", "hour", "day", "week", "month"];
 const PLACEHOLDERS: Record<Exclude<StatsSection, "evolution">, { task: string; title: string }> = {
@@ -70,6 +72,8 @@ export interface StatsPageProps {
   /** The tree the evolution analysis reads: the head of the browsing scope. */
   evolutionVersion: { commit: string; label: string } | null;
   allBranches: boolean;
+  batches?: UpdateBatchRecord[];
+  focusZoom?: { token: number; range: UnixRange } | null;
   onQueryChange(query: SearchQuery): void;
   onAuthor(identity: SearchIdentity): void;
   /** Called after a click changed the filters, to move to the commits page. */
@@ -80,10 +84,13 @@ export interface StatsPageProps {
 
 const TIME_FIELDS = { author: "Author 时间", committer: "Committer 时间" } as const;
 
-export function StatsPage({ api, sessionKey, query, capabilities, active, indexKey, evolutionVersion, allBranches, onQueryChange, onAuthor, onShowCommits, onShowCommit }: StatsPageProps): React.JSX.Element {
+export function StatsPage({ api, sessionKey, query, capabilities, active, indexKey, evolutionVersion, allBranches, batches = [], focusZoom = null, onQueryChange, onAuthor, onShowCommits, onShowCommit }: StatsPageProps): React.JSX.Element {
   const store = React.useMemo(() => new StatsStore(api), [api]);
   const view = React.useSyncExternalStore(store.subscribe, store.getView);
   React.useEffect(() => () => store.dispose(), [store]);
+  React.useEffect(() => {
+    if (focusZoom) store.zoomRange(focusZoom.range);
+  }, [store, focusZoom?.token]);
   const commit = evolutionVersion?.commit ?? null;
   const [windowVisible, setWindowVisible] = React.useState(() => document.visibilityState === "visible");
   React.useEffect(() => {
@@ -129,6 +136,23 @@ export function StatsPage({ api, sessionKey, query, capabilities, active, indexK
   const commitsLoader = React.useCallback((source: "changes" | "notable") => (selection: Parameters<StatsStore["commitsPage"]>[1], offset: number) => store.commitsPage(source, selection, offset), [store]);
   const changesCommits = React.useMemo(() => commitsLoader("changes"), [commitsLoader]);
   const notableCommits = React.useMemo(() => commitsLoader("notable"), [commitsLoader]);
+  const primaryBatch = batches[0] ?? null;
+  const batchFilterActive = (query.excludeTips?.length ?? 0) > 0;
+  const matchedBatch = batchFilterActive
+    ? batches.find(batch => batch.oldTips.join(",") === query.excludeTips?.join(",")) ?? null
+    : null;
+  const toggleBatchFilter = () => {
+    if (batchFilterActive) {
+      const { excludeTips: _dropped, ...rest } = query;
+      onQueryChange(rest);
+      store.clearZoom();
+      return;
+    }
+    if (!primaryBatch) return;
+    onQueryChange(batchFilterQuery(query, primaryBatch.oldTips));
+    const zoom = zoomRangeForBatch(primaryBatch);
+    if (zoom) store.zoomRange(zoom);
+  };
 
   return <div data-testid="stats-page" className="flex min-h-0 flex-1 flex-col">
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-6 py-2">
@@ -136,14 +160,45 @@ export function StatsPage({ api, sessionKey, query, capabilities, active, indexK
       <Divider />
       {section === "evolution" ? <span className="text-xs text-fg3">选一个目录或文件，估算后再开始分析</span> : <>
         <Segmented<RangePreset> label="时间范围" value={view.preset} options={RANGES} onChange={next => store.setPreset(next)} />
-        {view.preset === "custom" ? <span className="flex items-center gap-1.5 text-xs text-fg3">
-          <input type="date" aria-label="开始日期" value={view.custom.from} max={view.custom.to || undefined} onChange={event => store.setCustom({ ...view.custom, from: event.target.value })}
-            className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12.5px] text-fg" />
-          至
-          <input type="date" aria-label="结束日期（含当天）" value={view.custom.to} min={view.custom.from || undefined} onChange={event => store.setCustom({ ...view.custom, to: event.target.value })}
-            className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12.5px] text-fg" />
+        {view.preset === "custom" ? <span className="flex flex-wrap items-center gap-1.5 text-xs text-fg3">
+          <span role="group" aria-label="自定义时间精度" className="inline-flex rounded-lg border border-line2 bg-panel p-0.5 text-[11px]">
+            <button type="button" data-testid="stats-custom-mode-day" aria-pressed={!view.custom.precise}
+              onClick={() => store.setCustom({ from: view.custom.from, to: view.custom.to, precise: false })}
+              className={`rounded px-1.5 py-0.5 ${!view.custom.precise ? "bg-accent-soft font-medium text-accent-fg" : "text-fg3 hover:text-fg"}`}>按天</button>
+            <button type="button" data-testid="stats-custom-mode-precise" aria-pressed={Boolean(view.custom.precise)}
+              onClick={() => store.setCustom({
+                ...view.custom,
+                precise: true,
+                fromDateTime: view.custom.fromDateTime ?? `${view.custom.from}T00:00`,
+                toDateTime: view.custom.toDateTime ?? `${view.custom.to}T23:59`,
+              })}
+              className={`rounded px-1.5 py-0.5 ${view.custom.precise ? "bg-accent-soft font-medium text-accent-fg" : "text-fg3 hover:text-fg"}`}>精确到时分</button>
+          </span>
+          {view.custom.precise ? <>
+            <input type="datetime-local" aria-label="开始时间" data-testid="stats-custom-datetime-from"
+              value={view.custom.fromDateTime ?? `${view.custom.from}T00:00`} max={view.custom.toDateTime || undefined}
+              onChange={event => store.setCustom({ ...view.custom, precise: true, fromDateTime: event.currentTarget.value })}
+              className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12px] text-fg" />
+            至
+            <input type="datetime-local" aria-label="结束时间" data-testid="stats-custom-datetime-to"
+              value={view.custom.toDateTime ?? `${view.custom.to}T23:59`} min={view.custom.fromDateTime || undefined}
+              onChange={event => store.setCustom({ ...view.custom, precise: true, toDateTime: event.currentTarget.value })}
+              className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12px] text-fg" />
+          </> : <>
+            <input type="date" aria-label="开始日期" value={view.custom.from} max={view.custom.to || undefined} onChange={event => store.setCustom({ ...view.custom, from: event.target.value })}
+              className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12.5px] text-fg" />
+            至
+            <input type="date" aria-label="结束日期（含当天）" value={view.custom.to} min={view.custom.from || undefined} onChange={event => store.setCustom({ ...view.custom, to: event.target.value })}
+              className="h-7 rounded-lg border border-line2 bg-panel px-2 text-[12.5px] text-fg" />
+          </>}
         </span> : null}
         <BucketMenu range={view.range} choice={view.bucketChoice} resolved={view.bucket} onChange={next => store.setBucket(next)} />
+        {(primaryBatch || batchFilterActive) ? <Button variant={batchFilterActive ? "soft" : "outline"} size="sm" data-testid="stats-batch-toggle"
+          aria-pressed={batchFilterActive} onClick={toggleBatchFilter} className="h-7 px-2.5 text-[12px]">
+          {batchFilterActive
+            ? `仅看批次：${matchedBatch ? matchedBatch.label : "已启用"}${matchedBatch?.addedCount ? ` (+${matchedBatch.addedCount})` : ""} ×`
+            : `只看${primaryBatch!.label}${primaryBatch!.addedCount ? ` (+${primaryBatch!.addedCount})` : ""}`}
+        </Button> : null}
         <span className="flex h-7 items-center rounded-lg border border-line2 bg-panel px-2.5 text-[12.5px] text-fg2" title="时间字段随提交页的筛选">{TIME_FIELDS[query.timeField]}</span>
         {view.zoomedRange ? <span className="flex items-center gap-1.5">
           <span data-testid="stats-zoom-badge" className="inline-flex h-7 items-center rounded-lg bg-accent-soft px-2.5 text-xs font-medium text-accent-fg tabular-nums">
@@ -151,7 +206,7 @@ export function StatsPage({ api, sessionKey, query, capabilities, active, indexK
           </span>
           <Button variant="outline" size="sm" data-testid="stats-zoom-reset" onClick={() => store.clearZoom()}>恢复原范围</Button>
         </span> : null}
-        {view.range === null ? <span role="alert" className="text-xs text-bad">日期范围无效：开始日期不能晚于结束日期，最长 3660 天。</span> : null}
+        {view.range === null ? <span role="alert" className="text-xs text-bad">{view.custom.precise ? "时间范围无效：开始时间不能晚于结束时间，最长 3660 天。" : "日期范围无效：开始日期不能晚于结束日期，最长 3660 天。"}</span> : null}
       </>}
       <span className="min-w-0 flex-1" />
       <span data-testid="stats-coverage" className="text-xs text-fg3">范围随提交页 · {coverageText}</span>

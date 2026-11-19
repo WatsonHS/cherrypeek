@@ -1,5 +1,5 @@
 import * as React from "react";
-import { dayStartSeconds, localDay, relativeDay, windowSpanFor, type TimeTrackInputDay } from "../lib/time-track.js";
+import { dayStartSeconds, followProgressFor, localDay, relativeDay, timeTrackBounds, windowSpanFor, type TimeTrackInputDay } from "../lib/time-track.js";
 import { cn } from "../lib/utils.js";
 
 export type HistoryTimeSliderDay = TimeTrackInputDay;
@@ -13,8 +13,8 @@ const MIN_SPAN = DAY / 4;
 const EDGE = 28;
 const PAN_RATE = 0.8;
 const DRAG_JUMP_INTERVAL = 120;
-/** The moment being read sits this far down the window while it follows the list. */
-const FOLLOW_AT = 0.3;
+/** The moment being read sits this far down the window when keyboard navigation recenters it. */
+const KEYBOARD_FOLLOW_AT = 0.3;
 /** After the pointer leaves, the window waits this long before following the list again. */
 const RESUME_FOLLOW = 1200;
 const OPEN_WIDTH = 140;
@@ -28,16 +28,25 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
  * window to newer or older time. The wheel moves the window; ⌘/Ctrl + wheel zooms it.
  * Jumps land on the latest commit before the moment.
  */
-export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, sessionKey, onChooseTime, onScrubbingChange }: {
+export function HistoryTimeSlider({
+  days, partial, viewportSeconds, loading, sessionKey, onChooseTime, onScrubbingChange,
+  newestSeconds = null, oldestSeconds = null, followProgress = null, atTop = false, atBottom = false, listScrollRevision = 0,
+}: {
   days: HistoryTimeSliderDay[];
   /** The days miss older history: statistics are incomplete, or kept only the newest days. */
   partial: false | "counting" | "truncated";
-  /** Committer time of the commit at the top of the list, Unix seconds. */
+  /** Committer time of the commit being read, Unix seconds. */
   viewportSeconds: number | null;
   loading: boolean;
   sessionKey: string | null;
   onChooseTime(beforeSeconds: number): Promise<boolean>;
   onScrubbingChange?(scrubbing: boolean): void;
+  newestSeconds?: number | null;
+  oldestSeconds?: number | null;
+  followProgress?: number | null;
+  atTop?: boolean;
+  atBottom?: boolean;
+  listScrollRevision?: number;
 }): React.JSX.Element | null {
   const rootRef = React.useRef<HTMLDivElement>(null);
   const [height, setHeight] = React.useState(0);
@@ -114,26 +123,32 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
     for (const entry of days) if (/^\d{4}-\d{2}-\d{2}$/.test(entry.day)) map.set(entry.day, (map.get(entry.day) ?? 0) + Math.max(0, entry.count ?? 1));
     return map;
   }, [days]);
-  const bounds = React.useMemo(() => {
-    const sorted = [...counts.keys()].filter(day => counts.get(day)! > 0).sort();
-    if (!sorted.length) return null;
-    const newestStart = dayStartSeconds(sorted.at(-1)!);
-    const now = Math.floor(Date.now() / 1000);
-    return { oldest: dayStartSeconds(sorted[0]!), top: Math.min(newestStart + DAY, Math.max(now, newestStart + 3600)) };
-  }, [counts]);
   const dayList = React.useMemo(() => [...counts.entries()].filter(([, count]) => count > 0)
     .map(([day, count]) => ({ start: dayStartSeconds(day), count })).sort((a, b) => a.start - b.start), [counts]);
+  const bounds = React.useMemo(() => timeTrackBounds(dayList, { newestSeconds, oldestSeconds }), [dayList, newestSeconds, oldestSeconds]);
 
   const usable = Math.max(1, height - PAD * 2);
-  const history = bounds ? bounds.top - bounds.oldest : DAY;
+  const rawHistory = bounds ? Math.max(0, bounds.top - bounds.oldest) : DAY;
+  const zeroSpanHistory = rawHistory === 0;
+  const history = zeroSpanHistory ? 60 : rawHistory;
+  const minSpan = Math.min(MIN_SPAN, history);
   const anchor = viewportSeconds ?? bounds?.top ?? 0;
   const anchorHour = Math.floor(anchor / 3600);
   const target = usable * COMMITS_PER_PIXEL;
   const automaticSpan = React.useMemo(() => windowSpanFor(dayList, anchorHour * 3600, target), [dayList, anchorHour, target]);
   const chosenSpan = heldSpan ?? manualSpan ?? automaticSpan;
-  const effectiveSpan = Math.min(Math.max(chosenSpan, MIN_SPAN), Math.max(MIN_SPAN, history));
-  const clampEnd = (end: number) => bounds ? Math.min(bounds.top, Math.max(bounds.oldest + effectiveSpan, end)) : end;
-  const followEnd = viewportSeconds === null ? bounds?.top ?? 0 : viewportSeconds + effectiveSpan * FOLLOW_AT;
+  const effectiveSpan = Math.min(Math.max(chosenSpan, minSpan), history);
+  const clampEnd = (candidate: number) => !bounds
+    ? candidate
+    : zeroSpanHistory
+      ? bounds.top
+      : Math.min(bounds.top, Math.max(bounds.oldest + effectiveSpan, candidate));
+  const progress = atTop ? 0 : atBottom ? 1 : followProgress !== null
+    ? Math.min(1, Math.max(0, followProgress))
+    : bounds
+      ? followProgressFor(dayList, bounds, anchor, { atTop, atBottom })
+      : 0;
+  const followEnd = viewportSeconds === null ? bounds?.top ?? 0 : viewportSeconds + effectiveSpan * progress;
   const end = clampEnd(heldEnd ?? followEnd);
   const start = end - effectiveSpan;
   const timeAt = (y: number) => Math.min(end, Math.max(start, end - (y - PAD) / usable * effectiveSpan));
@@ -202,26 +217,37 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       setManualSpan(null);
     }, RESUME_FOLLOW);
   };
+  const lastListScrollRevision = React.useRef(listScrollRevision);
+  React.useEffect(() => {
+    if (listScrollRevision === lastListScrollRevision.current) return;
+    lastListScrollRevision.current = listScrollRevision;
+    if (dragging || pointerY !== null || keyboard !== null) return;
+    if (resumeTimer.current) clearTimeout(resumeTimer.current);
+    resumeTimer.current = null;
+    setHeldEnd(null);
+    setHeldSpan(null);
+    setManualSpan(null);
+  }, [listScrollRevision, dragging, pointerY, keyboard]);
   const localY = (clientY: number) => Math.min(height, Math.max(0, clientY - (rootRef.current?.getBoundingClientRect().top ?? 0)));
 
   // Dragging into an edge moves the window while the pointer stays there.
-  const latest = React.useRef({ pointerY, dragging, end, effectiveSpan, height, usable, history, clampEnd });
-  latest.current = { ...latest.current, dragging, end, effectiveSpan, height, usable, history, clampEnd };
+  const latest = React.useRef({ pointerY, dragging, end, effectiveSpan, height, usable, history, minSpan, clampEnd });
+  latest.current = { ...latest.current, dragging, end, effectiveSpan, height, usable, history, minSpan, clampEnd };
   if (!dragging) latest.current.pointerY = pointerY;
   const pan = React.useCallback((previous: number) => {
     panFrame.current = requestAnimationFrame(now => {
-      const { pointerY: y, dragging: active, end: currentEnd, effectiveSpan: windowSpan, height: total } = latest.current;
+      const { pointerY: y, dragging: active, end: currentEnd, effectiveSpan: windowSpan, height: total, usable: currentUsable, clampEnd: clamp } = latest.current;
       if (!active || y === null) return;
       const into = y < PAD + EDGE ? (PAD + EDGE - y) / EDGE : y > total - PAD - EDGE ? -(y - (total - PAD - EDGE)) / EDGE : 0;
       if (into !== 0) {
         const dt = Math.min(0.05, (now - previous) / 1000);
-        const nextEnd = clampEnd(currentEnd + Math.sign(into) * Math.min(1, Math.abs(into)) * PAN_RATE * windowSpan * dt);
+        const nextEnd = clamp(currentEnd + Math.sign(into) * Math.min(1, Math.abs(into)) * PAN_RATE * windowSpan * dt);
         setHeldEnd(nextEnd);
-        scheduleDragJump(Math.min(nextEnd, Math.max(nextEnd - windowSpan, nextEnd - (y - PAD) / usable * windowSpan)));
+        scheduleDragJump(Math.min(nextEnd, Math.max(nextEnd - windowSpan, nextEnd - (y - PAD) / currentUsable * windowSpan)));
       }
       pan(now);
     });
-  }, [usable, bounds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   React.useEffect(() => {
     const element = rootRef.current;
@@ -233,10 +259,10 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       const y = Math.min(model.height, Math.max(0, event.clientY - element.getBoundingClientRect().top));
       if (event.ctrlKey || event.metaKey) {
         const pivot = model.end - (y - PAD) / model.usable * model.effectiveSpan;
-        const nextSpan = Math.min(Math.max(MIN_SPAN, model.history), Math.max(MIN_SPAN, model.effectiveSpan * Math.exp(event.deltaY * 0.0025)));
+        const nextSpan = Math.min(model.history, Math.max(model.minSpan, model.effectiveSpan * Math.exp(event.deltaY * 0.0025)));
         setManualSpan(nextSpan);
         setHeldSpan(nextSpan);
-        setHeldEnd(pivot + (y - PAD) / model.usable * nextSpan);
+        setHeldEnd(model.clampEnd(pivot + (y - PAD) / model.usable * nextSpan));
       } else {
         setHeldEnd(model.clampEnd(model.end - event.deltaY / model.usable * model.effectiveSpan));
       }
@@ -254,7 +280,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
     else if (event.key === "End" && bounds) next = bounds.oldest;
     else if (event.key === "+" || event.key === "=" || event.key === "-") {
       event.preventDefault();
-      const nextSpan = Math.max(MIN_SPAN, effectiveSpan * (event.key === "-" ? 2 : 0.5));
+      const nextSpan = Math.min(history, Math.max(minSpan, effectiveSpan * (event.key === "-" ? 2 : 0.5)));
       setManualSpan(nextSpan);
       setHeldSpan(nextSpan);
       return;
@@ -276,7 +302,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
     const moment = Math.min(bounds.top, Math.max(bounds.oldest, next));
     setKeyboard(moment);
     // Keep the keyboard moment inside the window.
-    if (moment > end - effectiveSpan * 0.1 || moment < start + effectiveSpan * 0.1) setHeldEnd(clampEnd(moment + effectiveSpan * FOLLOW_AT));
+    if (moment > end - effectiveSpan * 0.1 || moment < start + effectiveSpan * 0.1) setHeldEnd(clampEnd(moment + effectiveSpan * KEYBOARD_FOLLOW_AT));
     else hold();
   };
 
@@ -289,7 +315,11 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
   const open = pointerY !== null || dragging || keyboard !== null;
   const activeMoment = keyboard ?? (pointerY !== null ? timeAt(pointerY) : null);
   const activeY = activeMoment === null ? null : yAt(activeMoment);
-  const currentY = viewportSeconds === null ? null : yAt(Math.min(end, Math.max(start, viewportSeconds)));
+  const currentY = viewportSeconds === null
+    ? null
+    : zeroSpanHistory && heldEnd === null
+      ? PAD + progress * usable
+      : yAt(Math.min(end, Math.max(start, viewportSeconds)));
   const currentOutside = viewportSeconds !== null && (viewportSeconds > end || viewportSeconds < start);
   const nearEdge = dragging && pointerY !== null && (pointerY < PAD + EDGE || pointerY > height - PAD - EDGE);
   const [when, where] = activeMoment === null ? ["", ""] : describe(activeMoment, counts, today, dayHeight >= 90);
@@ -303,8 +333,7 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
       aria-valuemin={Math.round(bounds.oldest)} aria-valuemax={Math.round(bounds.top)} aria-valuenow={Math.round(activeMoment ?? viewportSeconds ?? end)}
       aria-valuetext={activeMoment === null ? "按时间浏览历史" : `${when}，${where}`} aria-busy={pending}
       data-testid="history-time-slider-track"
-      className="absolute inset-y-0 right-0 cursor-ns-resize rounded-sm outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]"
-      style={{ width: open ? OPEN_WIDTH : 16 }}
+      className="absolute inset-y-0 right-0 w-4 cursor-ns-resize rounded-sm outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--accent)]"
       onPointerEnter={hold}
       onPointerMove={event => {
         const y = localY(event.clientY);
@@ -355,8 +384,10 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
         run(timeAt(y));
         if (!inFlight.current) finishScrub();
         const box = rootRef.current?.getBoundingClientRect();
-        const inside = box && event.clientX >= box.right - OPEN_WIDTH && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
-        if (!inside) {
+        const inside = Boolean(box && event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom);
+        if (inside) {
+          setPointerY(y);
+        } else {
           setPointerY(null);
           releaseLater();
         }
@@ -395,13 +426,13 @@ export function HistoryTimeSlider({ days, partial, viewportSeconds, loading, ses
 
 /** Day, hour and label marks; redrawn only when the window or its open state changes. */
 const SliderMarks = React.memo(function SliderMarks({ rows, open, dayHeight }: { rows: DayRow[]; open: boolean; dayHeight: number }): React.JSX.Element {
-  return <>
+  return <div aria-hidden="true" className="pointer-events-none absolute inset-0">
     {rows.map(row => <React.Fragment key={row.day}>
       {row.top >= PAD - 0.5 && (row.labelled || dayHeight >= 4) ? <span aria-hidden="true" data-testid="history-time-day" data-day={row.day}
         className={cn("absolute right-[4px] h-px", row.labelled ? "w-[7px] bg-fg3/70" : "w-[5px] bg-fg3/35")} style={{ top: row.top }} /> : null}
-      {open && row.labelled ? <span aria-hidden="true" data-testid="history-time-label"
+      {open && row.labelTop !== null ? <span aria-hidden="true" data-testid="history-time-label"
         className={cn("absolute right-4 whitespace-nowrap text-[11px] leading-4", row.count ? "text-fg2" : "text-fg3/60")}
-        style={{ top: Math.max(2, row.top + 1) }}>
+        style={{ top: row.labelTop }}>
         <span className={row.isToday ? "font-semibold text-accent-fg" : "font-medium"}>{row.label}</span>
         {row.count ? <span className="text-fg3"> · {row.count.toLocaleString("zh-CN")}</span> : null}
       </span> : null}
@@ -409,12 +440,13 @@ const SliderMarks = React.memo(function SliderMarks({ rows, open, dayHeight }: {
         {open && hour.label ? <span className="absolute right-3 -translate-y-1/2 text-[10px] text-fg3/70">{hour.label}</span> : null}
       </span>)}
     </React.Fragment>)}
-  </>;
+  </div>;
 });
 
 interface DayRow {
   day: string;
   top: number;
+  labelTop: number | null;
   count: number;
   label: string;
   labelled: boolean;
@@ -444,8 +476,30 @@ function dayRows(start: number, end: number, counts: Map<string, number>, today:
     const periodDays = every === "day" ? 1 : every === "week" ? 7 : new Date(Number(day.slice(0, 4)), Number(day.slice(5, 7)), 0).getDate();
     let count = 0;
     for (let offset = 0; offset < (labelled ? periodDays : 1); offset += 1) count += counts.get(localDay(startOfDay + offset * DAY + DAY / 2)) ?? 0;
-    rows.push({ day, top, count, label: dayLabel(day, today, every), labelled, isToday: day === today, hours });
+    rows.push({ day, top, labelTop: null, count, label: dayLabel(day, today, every), labelled, isToday: day === today, hours });
     if (rows.length > 400) break;
+  }
+  const bottomLimit = PAD + usable + 4;
+  let lastLabelBottom = -Infinity;
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (!row.labelled) continue;
+    const desiredTop = Math.max(2, row.top + 1);
+    const placedTop = Math.max(desiredTop, lastLabelBottom);
+    let nextBoundary = PAD + usable;
+    for (let next = index + 1; next < rows.length; next += 1) {
+      if (rows[next]!.labelled) {
+        nextBoundary = rows[next]!.top;
+        break;
+      }
+    }
+    const hasRoom = placedTop + 14 <= bottomLimit && (placedTop === desiredTop
+      ? nextBoundary - placedTop >= 14 || index === 0
+      : nextBoundary - placedTop >= 14);
+    if (hasRoom) {
+      row.labelTop = placedTop;
+      lastLabelBottom = placedTop + 15;
+    }
   }
   return rows;
 }

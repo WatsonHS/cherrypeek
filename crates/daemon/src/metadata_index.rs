@@ -22,7 +22,9 @@ use std::{
 
 const APPLICATION_ID: i32 = 0x43534958;
 const SCHEMA_VERSION: i32 = 2;
-const CHANGE_SCHEMA: &str = "ALTER TABLE commits ADD COLUMN changes_complete INTEGER NOT NULL DEFAULT 0; CREATE TABLE commit_changes(oid TEXT NOT NULL REFERENCES commits(oid) ON DELETE CASCADE, ordinal INTEGER NOT NULL, path BLOB NOT NULL, old_path BLOB, status TEXT NOT NULL, additions INTEGER, deletions INTEGER, binary INTEGER NOT NULL, PRIMARY KEY(oid,ordinal)); CREATE TABLE commit_path_changes(oid TEXT NOT NULL REFERENCES commits(oid) ON DELETE CASCADE, path BLOB NOT NULL, PRIMARY KEY(oid,path));";
+const FTS_QUOTA_THRESHOLD: u64 = 4 * 1024 * 1024;
+const CHANGE_SCHEMA: &str = "ALTER TABLE commits ADD COLUMN changes_complete INTEGER NOT NULL DEFAULT 0; CREATE TABLE commit_changes(oid TEXT NOT NULL REFERENCES commits(oid) ON DELETE CASCADE, ordinal INTEGER NOT NULL, path BLOB NOT NULL, old_path BLOB, status TEXT NOT NULL, additions INTEGER, deletions INTEGER, binary INTEGER NOT NULL, PRIMARY KEY(oid,ordinal)) WITHOUT ROWID; CREATE TABLE commit_path_changes(oid TEXT NOT NULL REFERENCES commits(oid) ON DELETE CASCADE, path BLOB NOT NULL, PRIMARY KEY(path,oid)) WITHOUT ROWID;";
+const MESSAGE_FTS_SCHEMA: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS commit_message_fts USING fts5(folded_message, content='', columnsize=0, tokenize='trigram case_sensitive 1'); CREATE TABLE IF NOT EXISTS index_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;";
 const DEFAULT_QUOTA: u64 = 2 * 1024 * 1024 * 1024;
 /// How long an index write keeps trying while readers (activity stats, search) hold the database.
 const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(60);
@@ -30,6 +32,17 @@ const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(60);
 const BUSY_RETRY_PAUSE: Duration = Duration::from_millis(200);
 const MIN_QUOTA: u64 = 256 * 1024;
 const MAX_BATCH: usize = 64;
+const LARGE_METADATA_BATCH: usize = 1024;
+
+fn metadata_batch_size() -> usize {
+    if std::env::var_os("COMMITSCOPE_INDEX_GATE_FILE").is_some()
+        || std::env::var_os("COMMITSCOPE_INDEX_BLOCK_BATCH_AFTER").is_some()
+    {
+        MAX_BATCH
+    } else {
+        LARGE_METADATA_BATCH
+    }
+}
 const KNOWN_SIDECARS: [&str; 3] = ["-journal", "-wal", "-shm"];
 type CachedStatus = Option<(
     String,
@@ -837,7 +850,17 @@ pub(crate) fn with_readonly_search_snapshot<T>(
         .pragma_update(None, "query_only", "ON")
         .map_err(map_search_sql_error)?;
     connection
-        .pragma_update(None, "cache_size", -1024_i64)
+        .pragma_update(None, "cache_size", -16384_i64)
+        .map_err(map_search_sql_error)?;
+    connection
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(map_search_sql_error)?;
+    connection
+        .pragma_update(
+            None,
+            "mmap_size",
+            crate::change_index::host_backfill_tuning().sqlite_reader_mmap_bytes,
+        )
         .map_err(map_search_sql_error)?;
     let transaction = connection
         .unchecked_transaction()
@@ -1013,7 +1036,7 @@ pub fn run_index(
         &idle_gate,
         &progress,
     );
-    match result {
+    let final_status = match result {
         Ok(status) => status,
         Err(error) => {
             let replaced = error.message.contains("was replaced while open");
@@ -1070,7 +1093,12 @@ pub fn run_index(
             }
             status
         }
+    };
+    if let Ok(index) = IndexStore::open(store, &session, quota) {
+        index.shrink_memory();
     }
+    crate::stats::release_unused_heap_memory();
+    final_status
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1121,19 +1149,17 @@ fn run_index_inner(
     }
 
     let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
-    let mut args = vec![
-        string_arg("-c"),
-        string_arg("core.commitGraph=false"),
-        string_arg("rev-list"),
-        string_arg("--topo-order"),
-    ];
+    let mut args = Vec::new();
+    crate::history::push_commit_graph_arg(&mut args, &session.discovered);
+    args.extend([string_arg("rev-list"), string_arg("--topo-order")]);
     args.extend(tips.iter().map(string_arg));
     let mut stream = git
         .stream_lines(Path::new(&session.info.repository.path), &args, 128)
         .map_err(map_git_error)?;
     let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    let batch_limit = metadata_batch_size();
     let mut ordinal = 0_u64;
-    let mut batch = Vec::<String>::with_capacity(MAX_BATCH);
+    let mut batch = Vec::<String>::with_capacity(batch_limit);
     let mut checkpoint_last = None;
     let expected_checkpoint = index.checkpoint(&snapshot_key)?;
     loop {
@@ -1149,9 +1175,11 @@ fn run_index_inner(
                 message: "Metadata index task stopped by request".into(),
             });
         }
-        idle_gate();
-        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
-            continue;
+        if ordinal.is_multiple_of(MAX_BATCH as u64) {
+            idle_gate();
+            if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+                continue;
+            }
         }
         let line = stream
             .next_line(cancelled, deadline)
@@ -1177,7 +1205,7 @@ fn run_index_inner(
         }
         batch.push(oid);
         ordinal += 1;
-        if batch.len() == MAX_BATCH {
+        if batch.len() == batch_limit {
             idle_gate();
             if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
                 continue;
@@ -1244,6 +1272,7 @@ fn run_index_inner(
         Instant::now() + Duration::from_secs(15),
     )
     .map_err(map_repository_error)?;
+    ensure_message_fts(&index, quota, cancelled, paused, idle_gate)?;
     backfill_changes(
         &index,
         session,
@@ -1275,14 +1304,37 @@ fn index_batch(
         Instant::now() + Duration::from_secs(15),
     )
     .map_err(map_repository_error)?;
-    let parsed = repository::read_commit_metadata(
+    let parsed = match repository::read_commit_metadata(
         executable,
         &session.discovered,
         oids,
         cancelled,
         Instant::now() + Duration::from_secs(60),
-    )
-    .map_err(map_repository_error)?;
+    ) {
+        Ok(parsed) => parsed,
+        Err(error) if error.code == ErrorCode::ResourceLimit && oids.len() > 1 => {
+            let mid = oids.len() / 2;
+            index_batch(
+                index,
+                session,
+                snapshot_key,
+                &oids[..mid],
+                executable,
+                cancelled,
+                quota,
+            )?;
+            return index_batch(
+                index,
+                session,
+                snapshot_key,
+                &oids[mid..],
+                executable,
+                cancelled,
+                quota,
+            );
+        }
+        Err(error) => return Err(map_repository_error(error)),
+    };
     if cancelled.load(Ordering::Acquire) {
         return Err(IndexError {
             code: ErrorCode::Cancelled,
@@ -1338,7 +1390,11 @@ impl IndexStore {
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(map_sql_error)?;
         connection
-            .pragma_update(None, "cache_size", -2048_i64)
+            .pragma_update(
+                None,
+                "cache_size",
+                crate::change_index::host_backfill_tuning().sqlite_writer_cache_kib,
+            )
             .map_err(map_sql_error)?;
         index.validate_existing(&connection)?;
         index.configure(&connection)?;
@@ -1379,7 +1435,10 @@ impl IndexStore {
             .pragma_update(None, "journal_mode", "DELETE")
             .map_err(map_sql_error)?;
         connection
-            .pragma_update(None, "synchronous", "FULL")
+            .pragma_update(None, "synchronous", "NORMAL")
+            .map_err(map_sql_error)?;
+        connection
+            .pragma_update(None, "temp_store", "MEMORY")
             .map_err(map_sql_error)?;
         let page_size: i64 = connection
             .pragma_query_value(None, "page_size", |row| row.get(0))
@@ -1412,8 +1471,22 @@ impl IndexStore {
                 });
             }
             let tx = connection.unchecked_transaction().map_err(map_sql_error)?;
-            tx.execute_batch("CREATE TABLE commits(oid TEXT PRIMARY KEY, parents_json TEXT NOT NULL, summary TEXT NOT NULL, summary_truncated INTEGER NOT NULL, message TEXT NOT NULL, author_name TEXT NOT NULL, author_email TEXT NOT NULL, author_timestamp TEXT NOT NULL, author_offset TEXT NOT NULL, committer_name TEXT NOT NULL, committer_email TEXT NOT NULL, committer_timestamp TEXT NOT NULL, committer_offset TEXT NOT NULL, text_lossy INTEGER NOT NULL); CREATE TABLE snapshots(snapshot_key TEXT PRIMARY KEY, tips_json TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, last_used_unix_ms INTEGER NOT NULL, last_oid TEXT); CREATE TABLE snapshot_commits(snapshot_key TEXT NOT NULL REFERENCES snapshots(snapshot_key) ON DELETE CASCADE, ordinal INTEGER NOT NULL, oid TEXT NOT NULL REFERENCES commits(oid), PRIMARY KEY(snapshot_key, ordinal), UNIQUE(snapshot_key, oid)); CREATE INDEX snapshot_commits_oid ON snapshot_commits(snapshot_key, oid);").map_err(map_sql_error)?;
+            tx.execute_batch("CREATE TABLE commits(oid TEXT PRIMARY KEY, parents_json TEXT NOT NULL, summary TEXT NOT NULL, summary_truncated INTEGER NOT NULL, message TEXT NOT NULL, author_name TEXT NOT NULL, author_email TEXT NOT NULL, author_timestamp TEXT NOT NULL, author_offset TEXT NOT NULL, committer_name TEXT NOT NULL, committer_email TEXT NOT NULL, committer_timestamp TEXT NOT NULL, committer_offset TEXT NOT NULL, text_lossy INTEGER NOT NULL); CREATE TABLE snapshots(snapshot_key TEXT PRIMARY KEY, tips_json TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, last_used_unix_ms INTEGER NOT NULL, last_oid TEXT); CREATE TABLE snapshot_commits(snapshot_key TEXT NOT NULL REFERENCES snapshots(snapshot_key) ON DELETE CASCADE, ordinal INTEGER NOT NULL, oid TEXT NOT NULL REFERENCES commits(oid), PRIMARY KEY(snapshot_key, ordinal)) WITHOUT ROWID; CREATE UNIQUE INDEX snapshot_commits_oid ON snapshot_commits(snapshot_key, oid);").map_err(map_sql_error)?;
             tx.execute_batch(CHANGE_SCHEMA).map_err(map_sql_error)?;
+            if self.quota >= FTS_QUOTA_THRESHOLD {
+                tx.execute_batch(MESSAGE_FTS_SCHEMA)
+                    .map_err(map_sql_error)?;
+                tx.execute(
+                    "INSERT INTO commit_message_fts(commit_message_fts, rank) VALUES('automerge', 8)",
+                    [],
+                )
+                .map_err(map_sql_error)?;
+                tx.execute(
+                    "INSERT INTO index_meta(key, value) VALUES('message_fts_rowid', 0)",
+                    [],
+                )
+                .map_err(map_sql_error)?;
+            }
             tx.pragma_update(None, "application_id", APPLICATION_ID)
                 .map_err(map_sql_error)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -1422,6 +1495,10 @@ impl IndexStore {
         } else if version == 1 && app_id == APPLICATION_ID {
             let tx = connection.unchecked_transaction().map_err(map_sql_error)?;
             tx.execute_batch(CHANGE_SCHEMA).map_err(map_sql_error)?;
+            if self.quota >= FTS_QUOTA_THRESHOLD {
+                tx.execute_batch(MESSAGE_FTS_SCHEMA)
+                    .map_err(map_sql_error)?;
+            }
             tx.execute_batch("UPDATE snapshots SET complete=0,state=CASE WHEN state='complete' THEN 'running' ELSE state END").map_err(map_sql_error)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(map_sql_error)?;
@@ -1433,8 +1510,34 @@ impl IndexStore {
                     "Metadata index schema version is unsupported; rebuild this repository index"
                         .into(),
             });
+        } else {
+            let needs_path_index: i64 = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='commit_path_changes' AND sql NOT LIKE '%PRIMARY KEY(path,oid)%')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(map_sql_error)?;
+            if needs_path_index != 0 {
+                connection
+                    .execute_batch(
+                        "CREATE INDEX IF NOT EXISTS commit_path_changes_by_path ON commit_path_changes(path, oid);",
+                    )
+                    .map_err(map_sql_error)?;
+            }
+            if self.quota >= FTS_QUOTA_THRESHOLD {
+                connection
+                    .execute_batch(MESSAGE_FTS_SCHEMA)
+                    .map_err(map_sql_error)?;
+            }
         }
         Ok(())
+    }
+
+    fn shrink_memory(&self) {
+        if let Ok(connection) = self.connection() {
+            let _ = connection.execute_batch("PRAGMA shrink_memory;");
+        }
     }
 
     fn validate_existing(&self, connection: &Connection) -> Result<(), IndexError> {
@@ -1593,18 +1696,44 @@ impl IndexStore {
                 |row| row.get(0),
             )
             .map_err(map_sql_error)?;
-        for parsed in commits {
-            let commit = &parsed.summary;
-            tx.execute("INSERT OR IGNORE INTO commits(oid,parents_json,summary,summary_truncated,message,author_name,author_email,author_timestamp,author_offset,committer_name,committer_email,committer_timestamp,committer_offset,text_lossy) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)", params![commit.oid,serde_json::to_string(&commit.parents).map_err(|_| corrupt("Could not encode commit parents"))?,commit.summary,commit.summary_truncated,parsed.message,commit.author.name,commit.author.email,commit.author.timestamp,commit.author.offset,commit.committer.name,commit.committer.email,commit.committer.timestamp,commit.committer.offset,commit.text_lossy]).map_err(map_sql_error)?;
-            tx.execute(
+        let mut commit_stmt = tx
+            .prepare_cached("INSERT OR IGNORE INTO commits(oid,parents_json,summary,summary_truncated,message,author_name,author_email,author_timestamp,author_offset,committer_name,committer_email,committer_timestamp,committer_offset,text_lossy) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)")
+            .map_err(map_sql_error)?;
+        let mut snapshot_commit_stmt = tx
+            .prepare_cached(
                 "INSERT OR IGNORE INTO snapshot_commits(snapshot_key,ordinal,oid) VALUES(?1,?2,?3)",
-                params![key, ordinal, commit.oid],
             )
             .map_err(map_sql_error)?;
+        for parsed in commits {
+            let commit = &parsed.summary;
+            commit_stmt
+                .execute(params![
+                    commit.oid,
+                    serde_json::to_string(&commit.parents)
+                        .map_err(|_| corrupt("Could not encode commit parents"))?,
+                    commit.summary,
+                    commit.summary_truncated,
+                    parsed.message,
+                    commit.author.name,
+                    commit.author.email,
+                    commit.author.timestamp,
+                    commit.author.offset,
+                    commit.committer.name,
+                    commit.committer.email,
+                    commit.committer.timestamp,
+                    commit.committer.offset,
+                    commit.text_lossy
+                ])
+                .map_err(map_sql_error)?;
+            snapshot_commit_stmt
+                .execute(params![key, ordinal, commit.oid])
+                .map_err(map_sql_error)?;
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or_else(|| corrupt("Metadata index ordinal overflow"))?;
         }
+        drop(commit_stmt);
+        drop(snapshot_commit_stmt);
         tx.execute(
             "UPDATE snapshots SET processed=?2,last_oid=?3,state='running' WHERE snapshot_key=?1",
             params![
@@ -1963,143 +2092,127 @@ fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+type CommitChangeRow = (
+    crate::change_index::CommitForChanges,
+    Vec<commitscope_core::ChangedFile>,
+    std::collections::BTreeSet<Vec<u8>>,
+);
+
 #[allow(clippy::too_many_arguments)]
-fn backfill_changes(
-    index: &IndexStore,
-    session: &session::RepositorySession,
-    key: &str,
-    executable: &Path,
+fn process_change_chunk(
+    worker_git: &ReadOnlyGit,
+    repo_path: &Path,
+    oid_length: usize,
+    boundary_limited: bool,
+    shallow: &std::collections::HashSet<String>,
+    active_strategy: &crate::change_index::AttributeStrategy,
+    commits: &[crate::change_index::CommitForChanges],
     cancelled: &AtomicBool,
     paused: &AtomicBool,
-    idle_gate: &impl Fn(),
-    progress: &impl Fn(MetadataIndexStatus),
-) -> Result<(), IndexError> {
-    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
-    let deadline = Instant::now() + Duration::from_secs(3600);
-    let attributes = crate::change_index::has_attributes(
-        &git,
-        Path::new(&session.discovered.info.path),
-        &session.discovered.scope_tips,
-        cancelled,
-        deadline,
-    )?;
-    let shallow_path = Path::new(&session.discovered.info.common_dir).join("shallow");
-    let shallow: std::collections::HashSet<String> = match fs::read_to_string(shallow_path) {
-        Ok(s) => s.lines().map(str::to_owned).collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(_) => return Err(unavailable("无法读取 shallow 边界")),
-    };
-    let mut after_ordinal = -1i64;
-    loop {
-        idle_gate();
-        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
-            return Err(IndexError {
-                code: ErrorCode::Cancelled,
-                message: "文件改动索引已暂停或取消".into(),
-            });
-        }
-        let pending: Vec<(i64, String)> = {
-            let db = index.connection()?;
-            // A former shallow boundary becomes eligible after the repository is deepened.
-            let mut statement=db.prepare("SELECT s.ordinal,c.oid FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal>?2 AND c.changes_complete<>1 ORDER BY s.ordinal LIMIT 64").map_err(map_sql_error)?;
-            statement
-                .query_map(params![key, after_ordinal], |r| Ok((r.get(0)?, r.get(1)?)))
-                .map_err(map_sql_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(map_sql_error)?
-        };
-        if let Some((ordinal, _)) = pending.last() {
-            after_ordinal = *ordinal;
-        }
-        let oids: Vec<String> = pending.into_iter().map(|(_, oid)| oid).collect();
-        if oids.is_empty() {
-            return Ok(());
-        }
-        let commits = repository::read_commit_metadata(
-            executable,
-            &session.discovered,
-            &oids,
+    deadline: Instant,
+) -> Result<Vec<CommitChangeRow>, IndexError> {
+    if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+        return Err(IndexError {
+            code: ErrorCode::Cancelled,
+            message: "文件改动索引已暂停或取消".into(),
+        });
+    }
+    let eligible: Vec<_> = commits
+        .iter()
+        .filter(|c| !shallow.contains(&c.oid) || c.parents.is_empty())
+        .cloned()
+        .collect();
+    let read = if eligible.is_empty() {
+        Vec::new()
+    } else {
+        crate::change_index::read_commits_changes(
+            worker_git,
+            repo_path,
+            &eligible,
+            oid_length,
+            active_strategy,
             cancelled,
             deadline,
-        )
-        .map_err(map_repository_error)?;
-        let eligible: Vec<_> = commits
-            .iter()
-            .filter(|c| !shallow.contains(&c.summary.oid) || c.summary.parents.is_empty())
-            .cloned()
-            .collect();
-        let read = if eligible.is_empty() {
-            Vec::new()
-        } else {
-            crate::change_index::read_batch(
-                &git,
-                Path::new(&session.discovered.info.path),
-                &eligible,
-                session.discovered.oid_length,
-                attributes,
-                cancelled,
-                deadline,
-            )?
-        };
-        let mut by_oid: std::collections::HashMap<_, _> = eligible
-            .iter()
-            .zip(read)
-            .map(|(c, files)| (c.summary.oid.clone(), files))
-            .collect();
-        let changes: Vec<_> = commits
-            .iter()
-            .map(|c| by_oid.remove(&c.summary.oid).unwrap_or_default())
-            .collect();
-        if commits.len() != oids.len() || changes.len() != oids.len() {
-            return Err(corrupt("文件索引批次长度不一致"));
-        }
-        let mut path_changes =
-            std::collections::HashMap::<String, std::collections::BTreeSet<Vec<u8>>>::new();
-        for (commit, files) in commits.iter().zip(&changes) {
-            let paths = path_changes.entry(commit.summary.oid.clone()).or_default();
-            for file in files {
-                for path in file.old_path.iter().chain(file.new_path.iter()) {
-                    paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
-                }
-            }
-            for parent in commit
-                .summary
-                .parents
-                .iter()
-                .skip(1)
-                .filter(|_| !shallow.contains(&commit.summary.oid))
-            {
-                let mut summary = commit.summary.clone();
-                summary.parents = vec![parent.clone()];
-                let alternate = repository::ParsedCommitMetadata {
-                    summary,
-                    message: commit.message.clone(),
-                };
-                let additional = crate::change_index::read_batch(
-                    &git,
-                    Path::new(&session.discovered.info.path),
-                    &[alternate],
-                    session.discovered.oid_length,
-                    attributes,
-                    cancelled,
-                    deadline,
-                )?;
-                for file in additional.into_iter().flatten() {
-                    for path in file.old_path.iter().chain(file.new_path.iter()) {
-                        paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
-                    }
-                }
+        )?
+    };
+    let mut by_oid: std::collections::HashMap<_, _> = eligible
+        .iter()
+        .zip(read)
+        .map(|(c, files)| (c.oid.clone(), files))
+        .collect();
+    let changes: Vec<_> = commits
+        .iter()
+        .map(|c| by_oid.remove(&c.oid).unwrap_or_default())
+        .collect();
+    if changes.len() != commits.len() {
+        return Err(corrupt("文件索引批次长度不一致"));
+    }
+    let mut merge_pairs = Vec::new();
+    let mut path_changes: Vec<std::collections::BTreeSet<Vec<u8>>> =
+        vec![std::collections::BTreeSet::new(); commits.len()];
+    let mut oid_to_index = std::collections::HashMap::with_capacity(commits.len());
+    for (idx, (commit, files)) in commits.iter().zip(&changes).enumerate() {
+        oid_to_index.insert(commit.oid.as_str(), idx);
+        let paths = &mut path_changes[idx];
+        for file in files {
+            for path in file.old_path.iter().chain(file.new_path.iter()) {
+                paths.insert(crate::change_index::decode_hex(&path.raw_hex)?);
             }
         }
-        retry_while_busy(cancelled, || {
-            let mut db = index.connection()?;
-            let tx = db.transaction().map_err(map_sql_error)?;
-            for (commit, files) in commits.iter().zip(&changes) {
-                tx.execute(
-                    "DELETE FROM commit_changes WHERE oid=?1",
-                    [&commit.summary.oid],
-                )
+        if !shallow.contains(&commit.oid) {
+            for parent in commit.parents.iter().skip(1) {
+                merge_pairs.push((commit.oid.clone(), parent.clone()));
+            }
+        }
+    }
+    if !merge_pairs.is_empty() {
+        let extra = crate::change_index::read_merge_parent_paths(
+            worker_git,
+            repo_path,
+            &merge_pairs,
+            boundary_limited,
+            cancelled,
+            deadline,
+        )?;
+        for (oid, extra_paths) in extra {
+            if let Some(&idx) = oid_to_index.get(oid.as_str()) {
+                path_changes[idx].extend(extra_paths);
+            }
+        }
+    }
+    Ok(commits
+        .iter()
+        .cloned()
+        .zip(changes)
+        .zip(path_changes)
+        .map(|((commit, files), paths)| (commit, files, paths))
+        .collect())
+}
+
+fn write_change_rows(
+    index: &IndexStore,
+    shallow: &std::collections::HashSet<String>,
+    rows: &[CommitChangeRow],
+    cancelled: &AtomicBool,
+) -> Result<(), IndexError> {
+    retry_while_busy(cancelled, || {
+        let mut db = index.connection()?;
+        let tx = db.transaction().map_err(map_sql_error)?;
+        {
+            let mut del_stmt = tx
+                .prepare_cached("DELETE FROM commit_changes WHERE oid=?1")
                 .map_err(map_sql_error)?;
+            let mut ins_change = tx
+                .prepare_cached("INSERT INTO commit_changes(oid,ordinal,path,old_path,status,additions,deletions,binary) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
+                .map_err(map_sql_error)?;
+            let mut ins_path = tx
+                .prepare_cached("INSERT OR IGNORE INTO commit_path_changes(oid,path) VALUES(?1,?2)")
+                .map_err(map_sql_error)?;
+            let mut upd = tx
+                .prepare_cached("UPDATE commits SET changes_complete=?2 WHERE oid=?1")
+                .map_err(map_sql_error)?;
+            for (commit, files, paths) in rows {
+                del_stmt.execute([&commit.oid]).map_err(map_sql_error)?;
                 for (ordinal, file) in files.iter().enumerate() {
                     let path = file
                         .new_path
@@ -2121,40 +2234,443 @@ fn backfill_changes(
                         commitscope_core::ChangedFileStatus::TypeChanged => "T",
                         _ => "M",
                     };
-                    tx.execute("INSERT INTO commit_changes(oid,ordinal,path,old_path,status,additions,deletions,binary) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![commit.summary.oid,ordinal as i64,path,old_path,status,file.additions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.deletions.map(i64::try_from).transpose().map_err(|_|corrupt("行数超限"))?,file.binary]).map_err(map_sql_error)?;
+                    ins_change
+                        .execute(params![
+                            commit.oid,
+                            ordinal as i64,
+                            path,
+                            old_path,
+                            status,
+                            file.additions
+                                .map(i64::try_from)
+                                .transpose()
+                                .map_err(|_| corrupt("行数超限"))?,
+                            file.deletions
+                                .map(i64::try_from)
+                                .transpose()
+                                .map_err(|_| corrupt("行数超限"))?,
+                            file.binary
+                        ])
+                        .map_err(map_sql_error)?;
                 }
-                for path in &path_changes[&commit.summary.oid] {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO commit_path_changes(oid,path) VALUES(?1,?2)",
-                        params![commit.summary.oid, path],
-                    )
-                    .map_err(map_sql_error)?;
+                for path in paths {
+                    ins_path
+                        .execute(params![commit.oid, path])
+                        .map_err(map_sql_error)?;
                 }
-                tx.execute(
-                    "UPDATE commits SET changes_complete=?2 WHERE oid=?1",
-                    params![
-                        commit.summary.oid,
-                        if shallow.contains(&commit.summary.oid)
-                            && !commit.summary.parents.is_empty()
-                        {
-                            -1
-                        } else {
-                            1
-                        }
-                    ],
-                )
+                upd.execute(params![
+                    commit.oid,
+                    if shallow.contains(&commit.oid) && !commit.parents.is_empty() {
+                        -1
+                    } else {
+                        1
+                    }
+                ])
                 .map_err(map_sql_error)?;
             }
+        }
+        if disk_bytes(&index.path)? > index.quota {
+            return Err(IndexError {
+                code: ErrorCode::ResourceLimit,
+                message: "文件索引超过仓库 quota".into(),
+            });
+        }
+        index.verify_identity()?;
+        tx.commit().map_err(map_sql_error)
+    })
+}
+
+fn fold_for_fts(message: &str) -> std::borrow::Cow<'_, str> {
+    if message.is_ascii() {
+        if message.bytes().any(|b| b.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(message.to_ascii_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(message)
+        }
+    } else {
+        std::borrow::Cow::Owned(caseless::default_case_fold_str(message))
+    }
+}
+
+fn ensure_message_fts(
+    index: &IndexStore,
+    quota: u64,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+    idle_gate: &impl Fn(),
+) -> Result<(), IndexError> {
+    if quota < FTS_QUOTA_THRESHOLD {
+        return Ok(());
+    }
+    let (has_fts_table, has_meta_table, max_commit_rowid, fts_rowid_opt, has_legacy_complete) = {
+        let db = index.connection()?;
+        let has_fts_table: i64 = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='commit_message_fts')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sql_error)?;
+        let has_meta_table: i64 = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='index_meta')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sql_error)?;
+        let max_commit_rowid: i64 = db
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM commits", [], |r| {
+                r.get(0)
+            })
+            .map_err(map_sql_error)?;
+        let fts_rowid_opt: Option<i64> = if has_meta_table != 0 {
+            db.query_row(
+                "SELECT value FROM index_meta WHERE key='message_fts_rowid'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(map_sql_error)?
+        } else {
+            None
+        };
+        let has_legacy_complete: bool = if has_meta_table != 0 {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM index_meta WHERE key='message_fts_complete')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(map_sql_error)?
+                != 0
+        } else {
+            false
+        };
+        (
+            has_fts_table != 0,
+            has_meta_table != 0,
+            max_commit_rowid,
+            fts_rowid_opt,
+            has_legacy_complete,
+        )
+    };
+    let mut after_rowid = if has_fts_table && has_meta_table && !has_legacy_complete {
+        match fts_rowid_opt {
+            Some(r) if r == max_commit_rowid => return Ok(()),
+            Some(r) if r >= 0 && r < max_commit_rowid => r,
+            _ => -1,
+        }
+    } else {
+        -1
+    };
+    if after_rowid < 0 {
+        retry_while_busy(cancelled, || {
+            let mut db = index.connection()?;
+            let tx = db.transaction().map_err(map_sql_error)?;
+            tx.execute_batch("DROP TABLE IF EXISTS commit_message_fts;")
+                .map_err(map_sql_error)?;
+            tx.execute_batch(MESSAGE_FTS_SCHEMA)
+                .map_err(map_sql_error)?;
+            tx.execute(
+                "INSERT INTO commit_message_fts(commit_message_fts, rank) VALUES('automerge', 8)",
+                [],
+            )
+            .map_err(map_sql_error)?;
+            tx.execute(
+                "DELETE FROM index_meta WHERE key IN ('message_fts_complete', 'message_fts_rowid')",
+                [],
+            )
+            .map_err(map_sql_error)?;
+            tx.execute(
+                "INSERT INTO index_meta(key, value) VALUES('message_fts_rowid', 0)",
+                [],
+            )
+            .map_err(map_sql_error)?;
             if disk_bytes(&index.path)? > index.quota {
                 return Err(IndexError {
                     code: ErrorCode::ResourceLimit,
-                    message: "文件索引超过仓库 quota".into(),
+                    message: "消息索引超过仓库 quota".into(),
                 });
             }
             index.verify_identity()?;
             tx.commit().map_err(map_sql_error)
         })?;
-        progress(index.status(session));
+        after_rowid = 0;
+    }
+    loop {
+        idle_gate();
+        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+            return Err(IndexError {
+                code: ErrorCode::Cancelled,
+                message: "消息索引已暂停或取消".into(),
+            });
+        }
+        let rows: Vec<(i64, String)> = {
+            let db = index.connection()?;
+            let mut stmt = db
+                .prepare_cached(
+                    "SELECT rowid, message FROM commits WHERE rowid > ?1 ORDER BY rowid LIMIT 4096",
+                )
+                .map_err(map_sql_error)?;
+            stmt.query_map([after_rowid], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(map_sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sql_error)?
+        };
+        let Some(&(batch_last_rowid, _)) = rows.last() else {
+            break;
+        };
+        retry_while_busy(cancelled, || {
+            let mut db = index.connection()?;
+            let tx = db.transaction().map_err(map_sql_error)?;
+            {
+                let mut fts_stmt = tx
+                    .prepare_cached(
+                        "INSERT INTO commit_message_fts(rowid, folded_message) VALUES(?1, ?2)",
+                    )
+                    .map_err(map_sql_error)?;
+                for (rowid, message) in &rows {
+                    let folded = fold_for_fts(message);
+                    fts_stmt
+                        .execute(params![rowid, folded.as_ref()])
+                        .map_err(map_sql_error)?;
+                }
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO index_meta(key, value) VALUES('message_fts_rowid', ?1)",
+                [batch_last_rowid],
+            )
+            .map_err(map_sql_error)?;
+            if disk_bytes(&index.path)? > index.quota {
+                return Err(IndexError {
+                    code: ErrorCode::ResourceLimit,
+                    message: "消息索引超过仓库 quota".into(),
+                });
+            }
+            index.verify_identity()?;
+            tx.commit().map_err(map_sql_error)
+        })?;
+        after_rowid = batch_last_rowid;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backfill_changes(
+    index: &IndexStore,
+    session: &session::RepositorySession,
+    key: &str,
+    executable: &Path,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+    idle_gate: &impl Fn(),
+    progress: &impl Fn(MetadataIndexStatus),
+) -> Result<(), IndexError> {
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_git_error)?;
+    let repo_path = Path::new(&session.discovered.info.path);
+    let boundary_limited = repository::history_boundary_limited(&session.discovered);
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let shallow_path = Path::new(&session.discovered.info.common_dir).join("shallow");
+    let shallow: std::collections::HashSet<String> = match fs::read_to_string(shallow_path) {
+        Ok(s) => s.lines().map(str::to_owned).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(_) => return Err(unavailable("无法读取 shallow 边界")),
+    };
+    let gate_active = std::env::var_os("COMMITSCOPE_PAGES_GATE_FILE").is_some();
+    let page_limit = if gate_active { 512_i64 } else { 4096_i64 };
+    let mut strategy: Option<crate::change_index::AttributeStrategy> = None;
+    let mut after_ordinal = -1i64;
+    loop {
+        idle_gate();
+        if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+            return Err(IndexError {
+                code: ErrorCode::Cancelled,
+                message: "文件改动索引已暂停或取消".into(),
+            });
+        }
+        let pending: Vec<(i64, crate::change_index::CommitForChanges)> = {
+            let db = index.connection()?;
+            // A former shallow boundary becomes eligible after the repository is deepened.
+            let mut statement = db
+                .prepare_cached(
+                    "SELECT s.ordinal,c.oid,c.parents_json FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal>?2 AND c.changes_complete<>1 ORDER BY s.ordinal LIMIT ?3",
+                )
+                .map_err(map_sql_error)?;
+            statement
+                .query_map(params![key, after_ordinal, page_limit], |r| {
+                    let ordinal: i64 = r.get(0)?;
+                    let oid: String = r.get(1)?;
+                    let parents_json: String = r.get(2)?;
+                    let parents: Vec<String> =
+                        serde_json::from_str(&parents_json).map_err(|err| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(err),
+                            )
+                        })?;
+                    Ok((
+                        ordinal,
+                        crate::change_index::CommitForChanges { oid, parents },
+                    ))
+                })
+                .map_err(map_sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(map_sql_error)?
+        };
+        if let Some((ordinal, _)) = pending.last() {
+            after_ordinal = *ordinal;
+        }
+        let commits: Vec<crate::change_index::CommitForChanges> =
+            pending.into_iter().map(|(_, c)| c).collect();
+        if commits.is_empty() {
+            return Ok(());
+        }
+        if strategy.is_none() {
+            strategy = Some(crate::change_index::discover_attributes(
+                &git,
+                repo_path,
+                &session.discovered.scope_tips,
+                cancelled,
+                deadline,
+            )?);
+        }
+        let active_strategy = strategy.as_ref().expect("attribute strategy initialized");
+        let chunks: Vec<&[crate::change_index::CommitForChanges]> = commits.chunks(128).collect();
+        // Keep the deterministic test gate single-process when active.
+        if gate_active || chunks.len() <= 1 {
+            let mut combined = Vec::with_capacity(commits.len());
+            for chunk in chunks {
+                combined.extend(process_change_chunk(
+                    &git,
+                    repo_path,
+                    session.discovered.oid_length,
+                    boundary_limited,
+                    &shallow,
+                    active_strategy,
+                    chunk,
+                    cancelled,
+                    paused,
+                    deadline,
+                )?);
+            }
+            if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+                return Err(IndexError {
+                    code: ErrorCode::Cancelled,
+                    message: "文件改动索引已暂停或取消".into(),
+                });
+            }
+            write_change_rows(index, &shallow, &combined, cancelled)?;
+            progress(index.status(session));
+            continue;
+        }
+
+        let workers = crate::change_index::host_backfill_tuning()
+            .workers
+            .min(chunks.len());
+        let abort = AtomicBool::new(false);
+        let next_chunk = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| -> Result<(), IndexError> {
+            let (tx_chan, rx_chan) = std::sync::mpsc::sync_channel::<(
+                usize,
+                Result<Vec<CommitChangeRow>, IndexError>,
+            )>(workers * 2);
+            let abort_ref = &abort;
+            let next_chunk_ref = &next_chunk;
+            let chunks_ref = &chunks;
+            let shallow_ref = &shallow;
+            for _ in 0..workers {
+                let worker_tx = tx_chan.clone();
+                scope.spawn(move || {
+                    let Ok(worker_git) = ReadOnlyGit::new(executable.to_path_buf()) else {
+                        return;
+                    };
+                    loop {
+                        if abort_ref.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let idx = next_chunk_ref.fetch_add(1, Ordering::AcqRel);
+                        if idx >= chunks_ref.len() {
+                            break;
+                        }
+                        let result = process_change_chunk(
+                            &worker_git,
+                            repo_path,
+                            session.discovered.oid_length,
+                            boundary_limited,
+                            shallow_ref,
+                            active_strategy,
+                            chunks_ref[idx],
+                            cancelled,
+                            paused,
+                            deadline,
+                        );
+                        let failed = result.is_err();
+                        if worker_tx.send((idx, result)).is_err() || failed {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx_chan);
+            let consume_result: Result<(), IndexError> = (|| {
+                let mut reorder: std::collections::BTreeMap<usize, Vec<CommitChangeRow>> =
+                    std::collections::BTreeMap::new();
+                let mut next_write_idx = 0usize;
+                let mut staged: Vec<CommitChangeRow> = Vec::with_capacity(512);
+                while let Ok((idx, chunk_res)) = rx_chan.recv() {
+                    if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+                        return Err(IndexError {
+                            code: ErrorCode::Cancelled,
+                            message: "文件改动索引已暂停或取消".into(),
+                        });
+                    }
+                    match chunk_res {
+                        Ok(rows) => {
+                            reorder.insert(idx, rows);
+                        }
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
+                    while let Some(chunk_rows) = reorder.remove(&next_write_idx) {
+                        staged.extend(chunk_rows);
+                        next_write_idx += 1;
+                        if next_write_idx.is_multiple_of(4) {
+                            idle_gate();
+                            if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+                                return Err(IndexError {
+                                    code: ErrorCode::Cancelled,
+                                    message: "文件改动索引已暂停或取消".into(),
+                                });
+                            }
+                            write_change_rows(index, &shallow, &staged, cancelled)?;
+                            staged.clear();
+                            progress(index.status(session));
+                        }
+                    }
+                }
+                if next_write_idx != chunks.len() {
+                    return Err(unavailable("文件改动工作线程未能启动"));
+                }
+                if !staged.is_empty() {
+                    idle_gate();
+                    if cancelled.load(Ordering::Acquire) || paused.load(Ordering::Acquire) {
+                        return Err(IndexError {
+                            code: ErrorCode::Cancelled,
+                            message: "文件改动索引已暂停或取消".into(),
+                        });
+                    }
+                    write_change_rows(index, &shallow, &staged, cancelled)?;
+                    progress(index.status(session));
+                }
+                Ok(())
+            })();
+            if consume_result.is_err() {
+                abort.store(true, Ordering::Release);
+            }
+            drop(rx_chan);
+            consume_result
+        })?;
     }
 }
 

@@ -12,22 +12,30 @@ use commitscope_core::{
     SearchIdentities, SearchIdentitiesParams, SearchIdentity, SearchPage, SearchPathEntry,
     SearchPathFilter, SearchPathKind, SearchPathMatch, SearchPaths, SearchQuery, SearchTimeField,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::Instant,
 };
 
 const MAX_CURSOR_BYTES: usize = 1024;
 const MAX_CURSOR_PAYLOAD_BYTES: usize = 512;
 const MAX_IDENTITIES: usize = 100;
+const MAX_EXCLUDE_TIPS: usize = 2000;
+const MAX_EXCLUDE_OID_SCAN: usize = 250_000;
+const MAX_CACHED_EXCLUDED_TIPS: usize = 4;
+const MAX_CACHED_EXCLUDED_OIDS: usize = 100_000;
+const OID_LINE_LIMIT: usize = 128;
 const JS_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
-const PATH_DIFF_BATCH_SIZE: usize = 64;
+const PATH_DIFF_BATCH_SIZE: usize = 512;
 const PATH_DIFF_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const PATH_COMPLETION_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const ACTIVITY_AUTHOR_LIMIT: usize = 500;
@@ -39,6 +47,7 @@ struct CompiledQuery {
     query: SearchQuery,
     message_needle: String,
     path_bytes: Option<Vec<u8>>,
+    included_oids: Option<Arc<HashSet<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,7 +83,6 @@ struct SearchCursor {
 struct Candidate {
     timestamp: i64,
     oid: String,
-    summary: CommitSummary,
     parent_indices: Vec<Option<u16>>,
 }
 
@@ -129,13 +137,14 @@ pub(crate) fn search_commits(
         return Err(invalid_request("cursor and anchorOid cannot be combined"));
     }
     let (snapshot_key, _) = metadata_index::snapshot_identity(session)?;
-    let compiled = compile_query(&params.query, session, &snapshot_key)?;
+    let mut compiled = compile_query(&params.query, session, &snapshot_key)?;
     if compiled.path_bytes.is_some() && executable.is_none() {
         return Err(IndexError {
             code: ErrorCode::GitUnavailable,
             message: "Git executable is required for path history search".into(),
         });
     }
+    resolve_excluded_tips(executable, session, &mut compiled, cancelled, deadline)?;
     let cursor = params.cursor.as_deref().map(decode_cursor).transpose()?;
     let anchor_oid = params.anchor_oid.as_deref().map(str::to_ascii_lowercase);
     if anchor_oid.as_ref().is_some_and(|oid| {
@@ -281,13 +290,14 @@ pub(crate) fn activity_stats(
     deadline: Instant,
 ) -> Result<ActivityStats, IndexError> {
     let (snapshot_key, _) = metadata_index::snapshot_identity(session)?;
-    let compiled = compile_query(&params.query, session, &snapshot_key)?;
+    let mut compiled = compile_query(&params.query, session, &snapshot_key)?;
     if compiled.path_bytes.is_some() && executable.is_none() {
         return Err(IndexError {
             code: ErrorCode::GitUnavailable,
             message: "Git executable is required for path activity statistics".into(),
         });
     }
+    resolve_excluded_tips(executable, session, &mut compiled, cancelled, deadline)?;
     let time_zone = params
         .query
         .time_zone
@@ -308,19 +318,48 @@ pub(crate) fn activity_stats(
             let mut authors_truncated = false;
             let mut path_batch = Vec::<ActivityCandidate>::with_capacity(PATH_DIFF_BATCH_SIZE);
             if let Some(connection) = connection {
-                let mut statement = connection
-                    .prepare(scan_sql(&compiled.query.oid_prefix))
-                    .map_err(map_sql_error)?;
-                let mut rows = if compiled.query.oid_prefix.is_empty() {
-                    statement.query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+                let indexed_path = if let (Some(filter), Some(raw_path)) =
+                    (&compiled.query.path, compiled.path_bytes.as_deref())
+                    && has_change_index(connection)?
+                {
+                    Some(query_indexed_path_oids(
+                        connection, filter, raw_path, cancelled, deadline,
+                    )?)
                 } else {
-                    let upper = oid_prefix_upper_bound(&compiled.query.oid_prefix);
-                    statement.query(params![
+                    None
+                };
+                let fts_query = if has_message_fts(connection)? {
+                    fts_trigram_query(&compiled)
+                } else {
+                    None
+                };
+                let sql = select_scan_sql(
+                    indexed_path.is_some(),
+                    fts_query.is_some(),
+                    &compiled.query.oid_prefix,
+                );
+                let mut statement = connection.prepare_cached(sql).map_err(map_sql_error)?;
+                let watermark = to_i64(snapshot.watermark)?;
+                let upper = (!compiled.query.oid_prefix.is_empty())
+                    .then(|| oid_prefix_upper_bound(&compiled.query.oid_prefix));
+                let mut rows = match (&fts_query, upper.as_deref()) {
+                    (Some(fts_expr), Some(upper)) => statement.query(params![
                         snapshot.snapshot_key,
-                        to_i64(snapshot.watermark)?,
+                        watermark,
+                        fts_expr,
                         &compiled.query.oid_prefix,
                         upper
-                    ])
+                    ]),
+                    (Some(fts_expr), None) => {
+                        statement.query(params![snapshot.snapshot_key, watermark, fts_expr])
+                    }
+                    (None, Some(upper)) => statement.query(params![
+                        snapshot.snapshot_key,
+                        watermark,
+                        &compiled.query.oid_prefix,
+                        upper
+                    ]),
+                    (None, None) => statement.query(params![snapshot.snapshot_key, watermark]),
                 }
                 .map_err(map_sql_error)?;
                 while let Some(row) = rows.next().map_err(map_sql_error)? {
@@ -330,10 +369,30 @@ pub(crate) fn activity_stats(
                     };
                     let author_name: String = row.get(4).map_err(map_sql_error)?;
                     let author_email: String = row.get(5).map_err(map_sql_error)?;
+                    if let Some(indexed_oids) = &indexed_path {
+                        let changes_complete: i64 = row.get(9).map_err(map_sql_error)?;
+                        if changes_complete == 1 {
+                            if indexed_oids.contains(&key.oid) {
+                                record_activity(
+                                    key.timestamp,
+                                    author_name,
+                                    author_email,
+                                    &time_zone,
+                                    &mut matched_count,
+                                    &mut days,
+                                    &mut authors,
+                                    &mut days_truncated,
+                                    &mut authors_truncated,
+                                )?;
+                            }
+                            continue;
+                        }
+                    }
                     if compiled.path_bytes.is_some() {
+                        let summary = load_summary_by_oid(connection, &key.oid)?;
                         path_batch.push(ActivityCandidate {
                             key,
-                            summary: summary_from_row(row)?,
+                            summary,
                             author_name,
                             author_email,
                         });
@@ -443,6 +502,7 @@ fn add_path_activity_batch(
         filter,
         path,
         &summaries,
+        repository::history_boundary_limited(&session.discovered),
         cancelled,
         deadline,
     )?;
@@ -684,19 +744,48 @@ fn collect_page(
         anchor_found = Some(true);
     }
     if let Some(connection) = connection {
-        let mut statement = connection
-            .prepare(scan_sql(&compiled.query.oid_prefix))
-            .map_err(map_sql_error)?;
-        let mut rows = if compiled.query.oid_prefix.is_empty() {
-            statement.query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
+        let indexed_path = if let (Some(filter), Some(raw_path)) =
+            (&compiled.query.path, compiled.path_bytes.as_deref())
+            && has_change_index(connection)?
+        {
+            Some(query_indexed_path_oids(
+                connection, filter, raw_path, cancelled, deadline,
+            )?)
         } else {
-            let upper = oid_prefix_upper_bound(&compiled.query.oid_prefix);
-            statement.query(params![
+            None
+        };
+        let fts_query = if has_message_fts(connection)? {
+            fts_trigram_query(compiled)
+        } else {
+            None
+        };
+        let sql = select_scan_sql(
+            indexed_path.is_some(),
+            fts_query.is_some(),
+            &compiled.query.oid_prefix,
+        );
+        let mut statement = connection.prepare_cached(sql).map_err(map_sql_error)?;
+        let watermark = to_i64(snapshot.watermark)?;
+        let upper = (!compiled.query.oid_prefix.is_empty())
+            .then(|| oid_prefix_upper_bound(&compiled.query.oid_prefix));
+        let mut rows = match (&fts_query, upper.as_deref()) {
+            (Some(fts_expr), Some(upper)) => statement.query(params![
                 snapshot.snapshot_key,
-                to_i64(snapshot.watermark)?,
+                watermark,
+                fts_expr,
                 &compiled.query.oid_prefix,
                 upper
-            ])
+            ]),
+            (Some(fts_expr), None) => {
+                statement.query(params![snapshot.snapshot_key, watermark, fts_expr])
+            }
+            (None, Some(upper)) => statement.query(params![
+                snapshot.snapshot_key,
+                watermark,
+                &compiled.query.oid_prefix,
+                upper
+            ]),
+            (None, None) => statement.query(params![snapshot.snapshot_key, watermark]),
         }
         .map_err(map_sql_error)?;
         let mut batch = Vec::with_capacity(PATH_DIFF_BATCH_SIZE);
@@ -705,10 +794,66 @@ fn collect_page(
             let Some(key) = matching_row_key(row, compiled, cancelled, deadline)? else {
                 continue;
             };
+            if let Some(indexed_oids) = &indexed_path {
+                let changes_complete: i64 = row.get(9).map_err(map_sql_error)?;
+                if changes_complete == 1 {
+                    if !indexed_oids.contains(&key.oid) {
+                        continue;
+                    }
+                    let parents = load_parents_by_oid(connection, &key.oid)?;
+                    if parents.len() <= 1 {
+                        let parent_indices = if parents.is_empty() {
+                            vec![None]
+                        } else {
+                            vec![Some(0)]
+                        };
+                        consider_candidate(
+                            key,
+                            parent_indices,
+                            &mut forward,
+                            &mut backward,
+                            &mut matched_count,
+                            &mut before_boundary,
+                            &mut boundary_seen,
+                            &mut anchor_found,
+                            boundary.as_ref(),
+                            cursor,
+                            anchor_requested,
+                            capacity,
+                        )?;
+                        continue;
+                    }
+                    batch.push(BufferedCandidate {
+                        summary: load_summary_by_oid(connection, &key.oid)?,
+                        key,
+                    });
+                    if batch.len() == PATH_DIFF_BATCH_SIZE {
+                        process_path_batch(
+                            executable.expect("path query requires Git"),
+                            session.expect("path query requires session"),
+                            compiled,
+                            &mut batch,
+                            cancelled,
+                            deadline,
+                            &mut forward,
+                            &mut backward,
+                            &mut matched_count,
+                            &mut before_boundary,
+                            &mut boundary_seen,
+                            &mut anchor_found,
+                            boundary.as_ref(),
+                            cursor,
+                            anchor_requested,
+                            capacity,
+                        )?;
+                    }
+                    continue;
+                }
+            }
             if compiled.path_bytes.is_some() {
                 batch.push(BufferedCandidate {
+                    summary: load_summary_by_oid(connection, &key.oid)?,
                     key,
-                    summary: summary_from_row(row)?,
                 });
                 if batch.len() == PATH_DIFF_BATCH_SIZE {
                     process_path_batch(
@@ -734,7 +879,6 @@ fn collect_page(
             }
             consider_candidate(
                 key,
-                || summary_from_row(row),
                 Vec::new(),
                 &mut forward,
                 &mut backward,
@@ -779,6 +923,14 @@ fn collect_page(
             forward.into_vec()
         };
     candidates.sort();
+    let commits = if let Some(connection) = connection {
+        candidates
+            .iter()
+            .map(|candidate| load_summary_by_oid(connection, &candidate.oid))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let page_offset = match cursor.map(|cursor| cursor.direction) {
         Some(CursorDirection::Next) => before_boundary.saturating_add(1),
         Some(CursorDirection::Previous) => before_boundary.saturating_sub(candidates.len() as u64),
@@ -826,10 +978,7 @@ fn collect_page(
         query_key: compiled.key.clone(),
         snapshot_key: snapshot.snapshot_key.clone(),
         result_version,
-        commits: candidates
-            .drain(..)
-            .map(|candidate| candidate.summary)
-            .collect(),
+        commits,
         page_offset,
         previous_cursor,
         next_cursor,
@@ -875,6 +1024,7 @@ fn process_path_batch(
         path_filter,
         path_bytes,
         &summaries,
+        repository::history_boundary_limited(&session.discovered),
         cancelled,
         deadline,
     )?;
@@ -884,7 +1034,6 @@ fn process_path_batch(
         }
         consider_candidate(
             candidate.key,
-            || Ok(candidate.summary),
             parent_indices,
             forward,
             backward,
@@ -904,7 +1053,6 @@ fn process_path_batch(
 #[allow(clippy::too_many_arguments)]
 fn consider_candidate(
     key: CandidateKey,
-    summary: impl FnOnce() -> Result<CommitSummary, IndexError>,
     parent_indices: Vec<Option<u16>>,
     forward: &mut BinaryHeap<Candidate>,
     backward: &mut BinaryHeap<Reverse<Candidate>>,
@@ -955,7 +1103,6 @@ fn consider_candidate(
         let candidate = Candidate {
             timestamp: key.timestamp,
             oid: key.oid,
-            summary: summary()?,
             parent_indices,
         };
         if previous {
@@ -967,6 +1114,107 @@ fn consider_candidate(
     Ok(())
 }
 
+fn row_str<'a>(row: &'a rusqlite::Row<'_>, index: usize) -> Result<&'a str, IndexError> {
+    row.get_ref(index)
+        .map_err(map_sql_error)?
+        .as_str()
+        .map_err(|_| corrupt_index("Indexed commit text is not UTF-8"))
+}
+
+fn minimal_graph_summary(row: &rusqlite::Row<'_>) -> Result<CommitSummary, IndexError> {
+    let oid = row_str(row, 1)?.to_owned();
+    let parents_json = row_str(row, 9)?;
+    let empty_identity = CommitIdentity {
+        name: String::new(),
+        email: String::new(),
+        timestamp: String::new(),
+        offset: String::new(),
+    };
+    Ok(CommitSummary {
+        oid,
+        parents: serde_json::from_str(parents_json)
+            .map_err(|_| corrupt_index("Indexed commit parents are invalid"))?,
+        summary: String::new(),
+        summary_truncated: false,
+        author: empty_identity.clone(),
+        committer: empty_identity,
+        text_lossy: false,
+    })
+}
+
+fn parse_i64_fast(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let (neg, digits) = if bytes[0] == b'-' {
+        (true, &bytes[1..])
+    } else if bytes[0] == b'+' {
+        (false, &bytes[1..])
+    } else {
+        (false, bytes)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut acc = 0_i64;
+    if !neg {
+        for &b in digits {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_add((b - b'0') as i64)?;
+        }
+    } else {
+        for &b in digits {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_sub((b - b'0') as i64)?;
+        }
+    }
+    Some(acc)
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let last_idx = needle.len() - 1;
+    let first_lo = needle[0].to_ascii_lowercase();
+    let first_up = needle[0].to_ascii_uppercase();
+    if last_idx == 0 {
+        return haystack.iter().any(|&b| b == first_lo || b == first_up);
+    }
+    let last_lo = needle[last_idx].to_ascii_lowercase();
+    let last_up = needle[last_idx].to_ascii_uppercase();
+    let limit = haystack.len() - last_idx;
+    for i in 0..limit {
+        let hb = haystack[i];
+        if (hb == first_lo || hb == first_up)
+            && {
+                let eb = haystack[i + last_idx];
+                eb == last_lo || eb == last_up
+            }
+            && haystack[i + 1..i + last_idx].eq_ignore_ascii_case(&needle[1..last_idx])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_ascii_or_cjk(text: &str) -> bool {
+    text.is_ascii()
+        || text.chars().all(|ch| {
+            ch.is_ascii()
+                || ('\u{3000}'..='\u{303F}').contains(&ch)
+                || ('\u{3400}'..='\u{9FFF}').contains(&ch)
+        })
+}
+
 fn matching_row_key(
     row: &rusqlite::Row<'_>,
     compiled: &CompiledQuery,
@@ -975,31 +1223,38 @@ fn matching_row_key(
 ) -> Result<Option<CandidateKey>, IndexError> {
     let _ordinal = u64::try_from(row.get::<_, i64>(0).map_err(map_sql_error)?)
         .map_err(|_| corrupt_index("Metadata member ordinal is invalid"))?;
-    let oid: String = row.get(1).map_err(map_sql_error)?;
+    let oid = row_str(row, 1)?;
+    if let Some(included) = &compiled.included_oids
+        && !included.contains(oid)
+    {
+        return Ok(None);
+    }
     if !compiled.query.oid_prefix.is_empty() && !oid.starts_with(&compiled.query.oid_prefix) {
         return Ok(None);
     }
     if !compiled.query.authors.is_empty() {
-        let name: String = row.get(4).map_err(map_sql_error)?;
-        let email: String = row.get(5).map_err(map_sql_error)?;
-        if !identity_field_matches(&compiled.query.authors, &name, &email) {
+        let name = row_str(row, 4)?;
+        let email = row_str(row, 5)?;
+        if !identity_field_matches(&compiled.query.authors, name, email) {
             return Ok(None);
         }
     }
     if !compiled.query.committers.is_empty() {
-        let name: String = row.get(6).map_err(map_sql_error)?;
-        let email: String = row.get(7).map_err(map_sql_error)?;
-        if !identity_field_matches(&compiled.query.committers, &name, &email) {
+        let name = row_str(row, 6)?;
+        let email = row_str(row, 7)?;
+        if !identity_field_matches(&compiled.query.committers, name, email) {
             return Ok(None);
         }
     }
-    let timestamp_text: String = match compiled.query.time_field {
-        SearchTimeField::Author => row.get(2).map_err(map_sql_error)?,
-        SearchTimeField::Committer => row.get(3).map_err(map_sql_error)?,
-    };
-    let timestamp = timestamp_text
-        .parse::<i64>()
-        .map_err(|_| corrupt_index("Indexed commit timestamp is invalid"))?;
+    let timestamp_bytes = match compiled.query.time_field {
+        SearchTimeField::Author => row.get_ref(2),
+        SearchTimeField::Committer => row.get_ref(3),
+    }
+    .map_err(map_sql_error)?
+    .as_bytes()
+    .map_err(|_| corrupt_index("Indexed commit timestamp is not UTF-8"))?;
+    let timestamp = parse_i64_fast(timestamp_bytes)
+        .ok_or_else(|| corrupt_index("Indexed commit timestamp is invalid"))?;
     if compiled
         .query
         .from_timestamp
@@ -1015,23 +1270,29 @@ fn matching_row_key(
     if !message_matches(row, compiled)? {
         return Ok(None);
     }
-    Ok(Some(CandidateKey { timestamp, oid }))
+    Ok(Some(CandidateKey {
+        timestamp,
+        oid: oid.to_owned(),
+    }))
 }
 
 fn message_matches(row: &rusqlite::Row<'_>, compiled: &CompiledQuery) -> Result<bool, IndexError> {
     if compiled.message_needle.is_empty() {
         return Ok(true);
     }
-    let message: String = row.get(8).map_err(map_sql_error)?;
-    Ok(if compiled.query.case_sensitive {
-        message.contains(&compiled.message_needle)
-    } else if message.is_ascii() && compiled.message_needle.is_ascii() {
-        message
-            .to_ascii_lowercase()
-            .contains(&compiled.message_needle)
-    } else {
-        default_case_fold_str(&message).contains(&compiled.message_needle)
-    })
+    let message = row_str(row, 8)?;
+    if compiled.query.case_sensitive {
+        return Ok(message.contains(&compiled.message_needle));
+    }
+    if compiled.message_needle.is_ascii() {
+        if contains_ascii_case_insensitive(message.as_bytes(), compiled.message_needle.as_bytes()) {
+            return Ok(true);
+        }
+        if is_ascii_or_cjk(message) {
+            return Ok(false);
+        }
+    }
+    Ok(default_case_fold_str(message).contains(&compiled.message_needle))
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> Result<CommitSummary, IndexError> {
@@ -1098,7 +1359,7 @@ fn find_matching_key(
         return Ok(None);
     };
     if let Some(path) = &compiled.path_bytes {
-        let summary = summary_from_row(row)?;
+        let summary = load_summary_by_oid(connection, oid)?;
         let matched = path_indices_for_commits(
             executable.expect("path query requires Git"),
             Path::new(&session.discovered.info.path),
@@ -1109,6 +1370,7 @@ fn find_matching_key(
                 .expect("compiled path has filter"),
             path,
             std::slice::from_ref(&summary),
+            repository::history_boundary_limited(&session.discovered),
             cancelled,
             deadline,
         )?;
@@ -1117,6 +1379,108 @@ fn find_matching_key(
         }
     }
     Ok(Some(key))
+}
+
+fn resolve_excluded_tips(
+    executable: Option<&Path>,
+    session: &session::RepositorySession,
+    compiled: &mut CompiledQuery,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), IndexError> {
+    if compiled.query.exclude_tips.is_empty() {
+        return Ok(());
+    }
+    let Some(executable) = executable else {
+        return Err(IndexError {
+            code: ErrorCode::GitUnavailable,
+            message: "Git executable is required for excludeTips filtering".into(),
+        });
+    };
+    repository::verify_graph_fingerprint(&session.discovered, cancelled, deadline)
+        .map_err(map_repository_error)?;
+    if session.discovered.scope_tips.is_empty() {
+        compiled.included_oids = Some(Arc::new(HashSet::new()));
+        return Ok(());
+    }
+    let boundary_limited = repository::history_boundary_limited(&session.discovered);
+    if !boundary_limited
+        && let Some(cached) = session
+            .excluded_tips_cache
+            .lock()
+            .expect("excluded tips cache mutex poisoned")
+            .iter()
+            .find(|(tips, _)| *tips == compiled.query.exclude_tips)
+            .map(|(_, oids)| Arc::clone(oids))
+    {
+        compiled.included_oids = Some(cached);
+        return Ok(());
+    }
+    let git = ReadOnlyGit::new(executable.to_path_buf()).map_err(map_path_git_failure)?;
+    let cwd = Path::new(&session.discovered.info.path);
+    repository::verify_commit_oids(
+        executable,
+        &session.discovered,
+        &compiled.query.exclude_tips,
+        cancelled,
+        deadline,
+    )
+    .map_err(map_repository_error)?;
+    let mut args = Vec::new();
+    if boundary_limited {
+        args.push(string_arg("-c"));
+        args.push(string_arg("core.commitGraph=false"));
+    }
+    args.push(string_arg("rev-list"));
+    args.extend(session.discovered.scope_tips.iter().map(string_arg));
+    args.push(string_arg("--not"));
+    args.extend(compiled.query.exclude_tips.iter().map(string_arg));
+    args.push(string_arg("--"));
+    let mut stream = git
+        .stream_lines(cwd, &args, OID_LINE_LIMIT)
+        .map_err(map_path_git_failure)?;
+    let mut included = HashSet::new();
+    while let Some(line) = stream
+        .next_line(cancelled, deadline)
+        .map_err(map_path_git_failure)?
+    {
+        let line = line.strip_suffix(b"\r").unwrap_or(&line);
+        let oid = std::str::from_utf8(line)
+            .map_err(|_| IndexError {
+                code: ErrorCode::GitError,
+                message: "Git returned non-UTF-8 commit ID".into(),
+            })?
+            .to_ascii_lowercase();
+        if oid.len() != session.discovered.oid_length
+            || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(IndexError {
+                code: ErrorCode::GitError,
+                message: "Git returned an unexpected commit ID while filtering range".into(),
+            });
+        }
+        if included.len() >= MAX_EXCLUDE_OID_SCAN {
+            return Err(IndexError {
+                code: ErrorCode::ResourceLimit,
+                message: "批次过滤范围超过 250000 个提交，请改用时间窗口筛选".into(),
+            });
+        }
+        included.insert(oid);
+    }
+    let included = Arc::new(included);
+    if !boundary_limited && included.len() <= MAX_CACHED_EXCLUDED_OIDS {
+        let mut cache = session
+            .excluded_tips_cache
+            .lock()
+            .expect("excluded tips cache mutex poisoned");
+        cache.retain(|(tips, _)| *tips != compiled.query.exclude_tips);
+        if cache.len() >= MAX_CACHED_EXCLUDED_TIPS {
+            cache.remove(0);
+        }
+        cache.push((compiled.query.exclude_tips.clone(), Arc::clone(&included)));
+    }
+    compiled.included_oids = Some(included);
+    Ok(())
 }
 
 fn compile_query(
@@ -1145,6 +1509,11 @@ fn compile_query(
     if let Some(filter) = query.path.as_mut() {
         filter.raw_hex.make_ascii_lowercase();
     }
+    for oid in &mut query.exclude_tips {
+        oid.make_ascii_lowercase();
+    }
+    query.exclude_tips.sort();
+    query.exclude_tips.dedup();
     let bytes = serde_json::to_vec(&(
         session.info.repo_id.as_str(),
         session.info.generation.as_str(),
@@ -1157,6 +1526,7 @@ fn compile_query(
         query,
         message_needle,
         path_bytes,
+        included_oids: None,
     })
 }
 
@@ -1164,6 +1534,7 @@ fn validate_query(query: &SearchQuery, oid_length: usize) -> Result<(), IndexErr
     if query.message.len() > 4096
         || query.authors.len() > 50
         || query.committers.len() > 50
+        || query.exclude_tips.len() > MAX_EXCLUDE_TIPS
         || query.time_zone.len() > 128
         || query
             .authors
@@ -1172,6 +1543,15 @@ fn validate_query(query: &SearchQuery, oid_length: usize) -> Result<(), IndexErr
             .any(|identity| identity.name.len() > 4096 || identity.email.len() > 4096)
     {
         return Err(invalid_request("Search query exceeds a field limit"));
+    }
+    if query
+        .exclude_tips
+        .iter()
+        .any(|oid| oid.len() != oid_length || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(invalid_request(
+            "excludeTips entries must be full hexadecimal object IDs",
+        ));
     }
     if let Some(path) = &query.path {
         validate_and_decode_path(path)?;
@@ -1236,12 +1616,14 @@ fn validate_and_decode_path(filter: &SearchPathFilter) -> Result<Vec<u8>, IndexE
     Ok(bytes)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn path_indices_for_commits(
     executable: &Path,
     repository_path: &Path,
     filter: &SearchPathFilter,
     path: &[u8],
     commits: &[CommitSummary],
+    boundary_limited: bool,
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<Vec<Vec<Option<u16>>>, IndexError> {
@@ -1268,9 +1650,12 @@ fn path_indices_for_commits(
         }
     }
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let mut args = vec![
-        string_arg("-c"),
-        string_arg("core.commitGraph=false"),
+    let mut args = Vec::new();
+    if boundary_limited {
+        args.push(string_arg("-c"));
+        args.push(string_arg("core.commitGraph=false"));
+    }
+    args.extend([
         string_arg("-c"),
         string_arg(format!("core.attributesFile={null_device}")),
         string_arg("-c"),
@@ -1294,7 +1679,7 @@ fn path_indices_for_commits(
         string_arg("--indent-heuristic"),
         string_arg(format!("-O{null_device}")),
         string_arg("--"),
-    ];
+    ]);
     if !path.is_empty() {
         let mut pathspec = path.to_vec();
         if filter.kind == SearchPathKind::Directory {
@@ -1686,15 +2071,228 @@ fn snapshot_changed() -> IndexError {
 }
 
 const SEARCH_SCAN_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 ORDER BY s.ordinal";
-const SEARCH_SCAN_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s INDEXED BY snapshot_commits_oid JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND s.oid>=?3 AND s.oid<?4 ORDER BY s.ordinal";
-const SEARCH_ONE_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.parents_json,c.summary,c.summary_truncated,c.author_offset,c.committer_offset,c.text_lossy FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.oid=?3 LIMIT 1";
+const SEARCH_FILTER_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 ORDER BY s.ordinal";
+const SEARCH_FILTER_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message FROM snapshot_commits s INDEXED BY snapshot_commits_oid JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND s.oid>=?3 AND s.oid<?4 ORDER BY s.ordinal";
+const SEARCH_FILTER_PATH_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.changes_complete FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 ORDER BY s.ordinal";
+const SEARCH_FILTER_PATH_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.changes_complete FROM snapshot_commits s INDEXED BY snapshot_commits_oid JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND s.oid>=?3 AND s.oid<?4 ORDER BY s.ordinal";
+const SEARCH_FTS_FILTER_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message FROM commit_message_fts(?3) f JOIN commits c ON c.rowid=f.rowid JOIN snapshot_commits s INDEXED BY snapshot_commits_oid ON s.snapshot_key=?1 AND s.oid=c.oid WHERE s.ordinal<?2";
+const SEARCH_FTS_FILTER_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message FROM commit_message_fts(?3) f JOIN commits c ON c.rowid=f.rowid JOIN snapshot_commits s INDEXED BY snapshot_commits_oid ON s.snapshot_key=?1 AND s.oid=c.oid WHERE s.ordinal<?2 AND s.oid>=?4 AND s.oid<?5";
+const SEARCH_FTS_FILTER_PATH_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.changes_complete FROM commit_message_fts(?3) f JOIN commits c ON c.rowid=f.rowid JOIN snapshot_commits s INDEXED BY snapshot_commits_oid ON s.snapshot_key=?1 AND s.oid=c.oid WHERE s.ordinal<?2";
+const SEARCH_FTS_FILTER_PATH_OID_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message,c.changes_complete FROM commit_message_fts(?3) f JOIN commits c ON c.rowid=f.rowid JOIN snapshot_commits s INDEXED BY snapshot_commits_oid ON s.snapshot_key=?1 AND s.oid=c.oid WHERE s.ordinal<?2 AND s.oid>=?4 AND s.oid<?5";
+const SEARCH_ONE_SQL: &str = "SELECT s.ordinal,c.oid,c.author_timestamp,c.committer_timestamp,c.author_name,c.author_email,c.committer_name,c.committer_email,c.message FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.oid=?3 LIMIT 1";
+const SUMMARY_BY_OID_SQL: &str = "SELECT 0,oid,author_timestamp,committer_timestamp,author_name,author_email,committer_name,committer_email,message,parents_json,summary,summary_truncated,author_offset,committer_offset,text_lossy FROM commits WHERE oid=?1 LIMIT 1";
+const PARENTS_BY_OID_SQL: &str = "SELECT parents_json FROM commits WHERE oid=?1 LIMIT 1";
 
-fn scan_sql(oid_prefix: &str) -> &'static str {
-    if oid_prefix.is_empty() {
-        SEARCH_SCAN_SQL
-    } else {
-        SEARCH_SCAN_OID_SQL
+fn select_scan_sql(indexed_path: bool, has_fts: bool, oid_prefix: &str) -> &'static str {
+    match (indexed_path, has_fts, oid_prefix.is_empty()) {
+        (true, true, true) => SEARCH_FTS_FILTER_PATH_SQL,
+        (true, true, false) => SEARCH_FTS_FILTER_PATH_OID_SQL,
+        (true, false, true) => SEARCH_FILTER_PATH_SQL,
+        (true, false, false) => SEARCH_FILTER_PATH_OID_SQL,
+        (false, true, true) => SEARCH_FTS_FILTER_SQL,
+        (false, true, false) => SEARCH_FTS_FILTER_OID_SQL,
+        (false, false, true) => SEARCH_FILTER_SQL,
+        (false, false, false) => SEARCH_FILTER_OID_SQL,
     }
+}
+
+fn has_change_index(connection: &Connection) -> Result<bool, IndexError> {
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(map_sql_error)?;
+    Ok(version >= 2)
+}
+
+fn has_message_fts(connection: &Connection) -> Result<bool, IndexError> {
+    if !has_change_index(connection)? {
+        return Ok(false);
+    }
+    let has_fts: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='commit_message_fts')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(map_sql_error)?;
+    if has_fts == 0 {
+        return Ok(false);
+    }
+    let has_meta: i64 = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='index_meta')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(map_sql_error)?;
+    if has_meta == 0 {
+        return Ok(false);
+    }
+    let max_rowid: i64 = connection
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM commits", [], |r| {
+            r.get(0)
+        })
+        .map_err(map_sql_error)?;
+    if max_rowid == 0 {
+        return Ok(true);
+    }
+    let fts_rowid: Option<i64> = connection
+        .query_row(
+            "SELECT value FROM index_meta WHERE key='message_fts_rowid'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_sql_error)?;
+    Ok(fts_rowid.is_some_and(|v| v >= max_rowid))
+}
+
+fn fts_trigram_query(compiled: &CompiledQuery) -> Option<String> {
+    if compiled.message_needle.is_empty() {
+        return None;
+    }
+    let folded = if compiled.query.case_sensitive {
+        default_case_fold_str(&compiled.query.message)
+    } else {
+        compiled.message_needle.clone()
+    };
+    if folded.chars().count() < 3 || folded.contains('\0') {
+        return None;
+    }
+    Some(format!("\"{}\"", folded.replace('"', "\"\"")))
+}
+
+fn load_summary_by_oid(connection: &Connection, oid: &str) -> Result<CommitSummary, IndexError> {
+    let mut statement = connection
+        .prepare_cached(SUMMARY_BY_OID_SQL)
+        .map_err(map_sql_error)?;
+    let mut rows = statement.query([oid]).map_err(map_sql_error)?;
+    let row = rows
+        .next()
+        .map_err(map_sql_error)?
+        .ok_or_else(|| corrupt_index("Indexed commit metadata row is missing"))?;
+    summary_from_row(row)
+}
+
+fn load_parents_by_oid(connection: &Connection, oid: &str) -> Result<Vec<String>, IndexError> {
+    let mut statement = connection
+        .prepare_cached(PARENTS_BY_OID_SQL)
+        .map_err(map_sql_error)?;
+    let mut rows = statement.query([oid]).map_err(map_sql_error)?;
+    let row = rows
+        .next()
+        .map_err(map_sql_error)?
+        .ok_or_else(|| corrupt_index("Indexed commit metadata row is missing"))?;
+    let parents_json = row_str(row, 0)?;
+    serde_json::from_str(parents_json)
+        .map_err(|_| corrupt_index("Indexed commit parents are invalid"))
+}
+
+fn query_indexed_path_oids(
+    connection: &Connection,
+    filter: &SearchPathFilter,
+    raw_path: &[u8],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> Result<HashSet<String>, IndexError> {
+    let mut oids = HashSet::new();
+    let mut seen_rows = 0_u64;
+    match filter.kind {
+        SearchPathKind::File => {
+            let mut statement = connection
+                .prepare_cached("SELECT oid FROM commit_path_changes WHERE path=?1")
+                .map_err(map_sql_error)?;
+            let mut rows = statement.query([raw_path]).map_err(map_sql_error)?;
+            while let Some(row) = rows.next().map_err(map_sql_error)? {
+                if seen_rows & 1023 == 0 {
+                    check_active(cancelled, deadline)?;
+                }
+                seen_rows += 1;
+                oids.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+            }
+        }
+        SearchPathKind::Directory if raw_path.is_empty() && filter.include_descendants => {
+            let mut statement = connection
+                .prepare_cached("SELECT DISTINCT oid FROM commit_path_changes")
+                .map_err(map_sql_error)?;
+            let mut rows = statement.query([]).map_err(map_sql_error)?;
+            while let Some(row) = rows.next().map_err(map_sql_error)? {
+                if seen_rows & 1023 == 0 {
+                    check_active(cancelled, deadline)?;
+                }
+                seen_rows += 1;
+                oids.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+            }
+        }
+        SearchPathKind::Directory if raw_path.is_empty() => {
+            let mut statement = connection
+                .prepare_cached("SELECT oid, path FROM commit_path_changes")
+                .map_err(map_sql_error)?;
+            let mut rows = statement.query([]).map_err(map_sql_error)?;
+            while let Some(row) = rows.next().map_err(map_sql_error)? {
+                if seen_rows & 1023 == 0 {
+                    check_active(cancelled, deadline)?;
+                }
+                seen_rows += 1;
+                let path = row
+                    .get_ref(1)
+                    .map_err(map_sql_error)?
+                    .as_bytes()
+                    .map_err(|_| corrupt_index("Indexed path is not valid bytes"))?;
+                if !path.contains(&b'/') {
+                    oids.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+                }
+            }
+        }
+        SearchPathKind::Directory => {
+            let mut prefix = Vec::with_capacity(raw_path.len() + 1);
+            prefix.extend_from_slice(raw_path);
+            prefix.push(b'/');
+            let mut upper = Vec::with_capacity(raw_path.len() + 1);
+            upper.extend_from_slice(raw_path);
+            upper.push(b'0');
+            if filter.include_descendants {
+                let mut statement = connection
+                    .prepare_cached(
+                        "SELECT DISTINCT oid FROM commit_path_changes WHERE path>=?1 AND path<?2",
+                    )
+                    .map_err(map_sql_error)?;
+                let mut rows = statement
+                    .query(params![prefix.as_slice(), upper.as_slice()])
+                    .map_err(map_sql_error)?;
+                while let Some(row) = rows.next().map_err(map_sql_error)? {
+                    if seen_rows & 1023 == 0 {
+                        check_active(cancelled, deadline)?;
+                    }
+                    seen_rows += 1;
+                    oids.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+                }
+            } else {
+                let mut statement = connection
+                    .prepare_cached(
+                        "SELECT oid, path FROM commit_path_changes WHERE path>=?1 AND path<?2",
+                    )
+                    .map_err(map_sql_error)?;
+                let mut rows = statement
+                    .query(params![prefix.as_slice(), upper.as_slice()])
+                    .map_err(map_sql_error)?;
+                while let Some(row) = rows.next().map_err(map_sql_error)? {
+                    if seen_rows & 1023 == 0 {
+                        check_active(cancelled, deadline)?;
+                    }
+                    seen_rows += 1;
+                    let path = row
+                        .get_ref(1)
+                        .map_err(map_sql_error)?
+                        .as_bytes()
+                        .map_err(|_| corrupt_index("Indexed path is not valid bytes"))?;
+                    if !path[prefix.len()..].contains(&b'/') {
+                        oids.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+                    }
+                }
+            }
+        }
+    }
+    Ok(oids)
 }
 
 fn oid_prefix_upper_bound(prefix: &str) -> String {
@@ -1702,11 +2300,15 @@ fn oid_prefix_upper_bound(prefix: &str) -> String {
 }
 
 /// Statistics reuse metadata search semantics and a single SQLite read transaction.
-/// No Git subprocess is launched here. The callback runs under the same watermark.
+/// No Git subprocess is launched here unless `query.exclude_tips` is non-empty. The callback runs
+/// under the same watermark.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn with_stats_rows<T>(
+    executable: Option<&Path>,
     store: &SessionStore,
     session: &session::RepositorySession,
     query: &SearchQuery,
+    include_unmatched_graph: bool,
     cancelled: &AtomicBool,
     deadline: Instant,
     callback: impl FnOnce(
@@ -1716,7 +2318,8 @@ pub(crate) fn with_stats_rows<T>(
     ) -> Result<T, IndexError>,
 ) -> Result<T, IndexError> {
     let (key, _) = metadata_index::snapshot_identity(session)?;
-    let compiled = compile_query(query, session, &key)?;
+    let mut compiled = compile_query(query, session, &key)?;
+    resolve_excluded_tips(executable, session, &mut compiled, cancelled, deadline)?;
     metadata_index::with_readonly_search_snapshot(
         store,
         session,
@@ -1727,28 +2330,74 @@ pub(crate) fn with_stats_rows<T>(
         |connection, snapshot| {
             let mut commits = Vec::new();
             if let Some(connection) = connection {
-                if compiled.path_bytes.is_some() {
-                    let version: i32 = connection
-                        .pragma_query_value(None, "user_version", |r| r.get(0))
-                        .map_err(map_sql_error)?;
-                    if version < 2 {
+                let indexed_oids = if let (Some(raw), Some(filter)) =
+                    (compiled.path_bytes.as_deref(), compiled.query.path.as_ref())
+                {
+                    if !has_change_index(connection)? {
                         return Err(IndexError {
                             code: ErrorCode::IndexUnavailable,
                             message: "路径统计需要文件改动索引".into(),
                         });
                     }
-                    let missing:i64=connection.query_row("SELECT count(*) FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.changes_complete<>1",params![snapshot.snapshot_key,snapshot.watermark as i64],|r|r.get(0)).map_err(map_sql_error)?;
+                    let missing: i64 = connection
+                        .query_row(
+                            "SELECT count(*) FROM snapshot_commits s JOIN commits c ON c.oid=s.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.changes_complete<>1",
+                            params![snapshot.snapshot_key, snapshot.watermark as i64],
+                            |r| r.get(0),
+                        )
+                        .map_err(map_sql_error)?;
                     if missing > 0 {
                         return Err(IndexError {
                             code: ErrorCode::IndexUnavailable,
                             message: "当前覆盖的提交尚有文件记录未补完，请稍后重试路径统计".into(),
                         });
                     }
+                    Some(query_indexed_path_oids(
+                        connection, filter, raw, cancelled, deadline,
+                    )?)
+                } else {
+                    None
+                };
+                let fts_query = if has_message_fts(connection)? {
+                    fts_trigram_query(&compiled)
+                } else {
+                    None
+                };
+                let fts_oids = if include_unmatched_graph && let Some(fts_expr) = &fts_query {
+                    let mut stmt = connection
+                        .prepare_cached(
+                            "SELECT c.oid FROM commit_message_fts(?1) f JOIN commits c ON c.rowid=f.rowid",
+                        )
+                        .map_err(map_sql_error)?;
+                    let mut rows = stmt.query([fts_expr]).map_err(map_sql_error)?;
+                    let mut set = HashSet::new();
+                    let mut seen_rows = 0_u64;
+                    while let Some(row) = rows.next().map_err(map_sql_error)? {
+                        if seen_rows & 1023 == 0 {
+                            check_active(cancelled, deadline)?;
+                        }
+                        seen_rows += 1;
+                        set.insert(row.get::<_, String>(0).map_err(map_sql_error)?);
+                    }
+                    Some(set)
+                } else {
+                    None
+                };
+                let watermark = to_i64(snapshot.watermark)?;
+                let (sql, bind_fts) = if include_unmatched_graph {
+                    (SEARCH_SCAN_SQL, None)
+                } else if let Some(fts_expr) = fts_query.as_deref() {
+                    (SEARCH_FTS_FILTER_SQL, Some(fts_expr))
+                } else {
+                    (SEARCH_FILTER_SQL, None)
+                };
+                let mut statement = connection.prepare_cached(sql).map_err(map_sql_error)?;
+                let mut rows = if let Some(fts_expr) = bind_fts {
+                    statement.query(params![snapshot.snapshot_key, watermark, fts_expr])
+                } else {
+                    statement.query(params![snapshot.snapshot_key, watermark])
                 }
-                let mut statement = connection.prepare(scan_sql("")).map_err(map_sql_error)?;
-                let mut rows = statement
-                    .query(params![snapshot.snapshot_key, to_i64(snapshot.watermark)?])
-                    .map_err(map_sql_error)?;
+                .map_err(map_sql_error)?;
                 while let Some(row) = rows.next().map_err(map_sql_error)? {
                     check_active(cancelled, deadline)?;
                     if commits.len() >= 250_000 {
@@ -1757,34 +2406,29 @@ pub(crate) fn with_stats_rows<T>(
                             message: "统计上限为 250000 个已索引提交；请缩小浏览范围".into(),
                         });
                     }
-                    let summary = summary_from_row(row)?;
-                    let timestamp = match query.time_field {
-                        SearchTimeField::Author => &summary.author.timestamp,
-                        SearchTimeField::Committer => &summary.committer.timestamp,
-                    }
-                    .parse::<i64>()
-                    .map_err(|_| corrupt_index("Invalid timestamp"))?;
-                    let mut matched =
-                        matching_row_key(row, &compiled, cancelled, deadline)?.is_some();
-                    if matched
-                        && let (Some(raw), Some(filter)) =
-                            (&compiled.path_bytes, &compiled.query.path)
+                    let oid = row_str(row, 1)?;
+                    if let Some(allowed) = &fts_oids
+                        && !allowed.contains(oid)
                     {
-                        let mut paths = connection
-                            .prepare("SELECT path FROM commit_path_changes WHERE oid=?1")
-                            .map_err(map_sql_error)?;
-                        let mut values = paths.query([&summary.oid]).map_err(map_sql_error)?;
-                        matched = false;
-                        while let Some(path) = values.next().map_err(map_sql_error)? {
-                            check_active(cancelled, deadline)?;
-                            let bytes: Vec<u8> = path.get(0).map_err(map_sql_error)?;
-                            if path_matches(filter, raw, &bytes) {
-                                matched = true;
-                                break;
-                            }
-                        }
+                        commits.push((minimal_graph_summary(row)?, 0, false));
+                        continue;
                     }
-                    commits.push((summary, timestamp, matched));
+                    let key = matching_row_key(row, &compiled, cancelled, deadline)?;
+                    let mut matched = key.is_some();
+                    if matched && let Some(indexed_oids) = &indexed_oids {
+                        matched = indexed_oids.contains(oid);
+                    }
+                    if matched {
+                        let summary = if include_unmatched_graph {
+                            summary_from_row(row)?
+                        } else {
+                            load_summary_by_oid(connection, oid)?
+                        };
+                        let timestamp = key.expect("matched key present").timestamp;
+                        commits.push((summary, timestamp, true));
+                    } else if include_unmatched_graph {
+                        commits.push((minimal_graph_summary(row)?, 0, false));
+                    }
                 }
             }
             callback(connection, snapshot, commits)
@@ -1890,9 +2534,11 @@ mod tests {
                 to_timestamp: None,
                 time_zone: "UTC".into(),
                 path: None,
+                exclude_tips: Vec::new(),
             },
             message_needle: String::new(),
             path_bytes: None,
+            included_oids: None,
         }
     }
 
@@ -2075,9 +2721,19 @@ mod tests {
         }
 
         assert!(matches("A FAST ASCII Message", "fast ascii"));
+        assert!(matches("fix: 修复中文 Bug 描述", "fix"));
+        assert!(matches("fix: 修复中文 Bug 描述", "BUG"));
+        assert!(!matches("修复内存问题（测试）", "fix"));
         assert!(matches("Straße ος", "STRASSE"));
+        assert!(matches("ﬁx the bug", "FIX"));
         assert!(matches("Straße ος", "ΟΣ"));
         assert!(!matches("A FAST ASCII Message", "slow"));
+
+        for ch in ('\u{3000}'..='\u{303F}').chain('\u{3400}'..='\u{9FFF}') {
+            let mut buf = [0u8; 4];
+            let s: &str = ch.encode_utf8(&mut buf);
+            assert_eq!(default_case_fold_str(s), s);
+        }
     }
 
     #[test]
@@ -2130,6 +2786,7 @@ mod tests {
                 &filter,
                 raw_path,
                 &commits,
+                false,
                 &AtomicBool::new(false),
                 Instant::now() + std::time::Duration::from_secs(5),
             )
@@ -2294,5 +2951,177 @@ mod tests {
         assert!(identity_matches("strasse", "Straße", "x@example.test"));
         assert!(identity_matches("οσ", "ΟΣ", "x@example.test"));
         assert!(!identity_matches("é", "e\u{301}", "x@example.test"));
+    }
+
+    #[test]
+    fn exclude_tips_validation_normalization_and_row_filtering() {
+        let oid_a = "A".repeat(40);
+        let oid_b = "b".repeat(40);
+        let mut compiled = query();
+        compiled.query.exclude_tips = vec![oid_b.clone(), oid_a.clone(), oid_b.to_uppercase()];
+        validate_query(&compiled.query, 40).expect("valid hex OIDs pass");
+
+        let mut bad = compiled.query.clone();
+        bad.exclude_tips.push("short".into());
+        assert_eq!(
+            validate_query(&bad, 40).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+
+        compiled.included_oids = Some(Arc::new(HashSet::from(["c".repeat(40)])));
+        let connection = Connection::open_in_memory().unwrap();
+        let mut matched_stmt = connection
+            .prepare("SELECT 0,?1,'1','1','a','a','c','c','msg','[]','summary',0,'+0000','+0000',0")
+            .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let cancelled = AtomicBool::new(false);
+
+        let mut excluded_rows = matched_stmt.query([oid_b.as_str()]).unwrap();
+        assert!(
+            matching_row_key(
+                excluded_rows.next().unwrap().unwrap(),
+                &compiled,
+                &cancelled,
+                deadline
+            )
+            .unwrap()
+            .is_none()
+        );
+        drop(excluded_rows);
+
+        let c_oid = "c".repeat(40);
+        let mut included_rows = matched_stmt.query([c_oid.as_str()]).unwrap();
+        assert!(
+            matching_row_key(
+                included_rows.next().unwrap().unwrap(),
+                &compiled,
+                &cancelled,
+                deadline
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn fast_ascii_case_insensitive_search_and_i64_parser_handle_boundaries() {
+        assert!(contains_ascii_case_insensitive(b"anything", b""));
+        assert!(contains_ascii_case_insensitive(b"", b""));
+        assert!(!contains_ascii_case_insensitive(b"a", b"ab"));
+        assert!(contains_ascii_case_insensitive(b"Fix", b"f"));
+        assert!(contains_ascii_case_insensitive(b"xFz", b"f"));
+        assert!(!contains_ascii_case_insensitive(b"xyz", b"f"));
+        assert!(contains_ascii_case_insensitive(b"FiX", b"fix"));
+        assert!(contains_ascii_case_insensitive(b"prefix FIX", b"fix"));
+        assert!(contains_ascii_case_insensitive(b"Fix: trailing", b"fix"));
+        assert!(!contains_ascii_case_insensitive(b"f_x", b"fix"));
+        assert!(contains_ascii_case_insensitive(b"fxFix", b"fix"));
+
+        assert_eq!(parse_i64_fast(b"0"), Some(0));
+        assert_eq!(parse_i64_fast(b"1700000000"), Some(1_700_000_000));
+        assert_eq!(parse_i64_fast(b"-42"), Some(-42));
+        assert_eq!(parse_i64_fast(b"+7"), Some(7));
+        assert_eq!(parse_i64_fast(b""), None);
+        assert_eq!(parse_i64_fast(b"-"), None);
+        assert_eq!(parse_i64_fast(b"12a"), None);
+        assert_eq!(parse_i64_fast(b"99999999999999999999"), None);
+    }
+
+    #[test]
+    fn fts_trigram_candidate_index_preserves_unicode_casefold_quotes_and_case_sensitivity() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "trusted_schema", "OFF")
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE commits(oid TEXT PRIMARY KEY, author_timestamp TEXT NOT NULL, committer_timestamp TEXT NOT NULL, author_name TEXT NOT NULL, author_email TEXT NOT NULL, committer_name TEXT NOT NULL, committer_email TEXT NOT NULL, message TEXT NOT NULL);
+                 CREATE TABLE snapshot_commits(snapshot_key TEXT NOT NULL, ordinal INTEGER NOT NULL, oid TEXT NOT NULL, PRIMARY KEY(snapshot_key, ordinal)) WITHOUT ROWID;
+                 CREATE UNIQUE INDEX snapshot_commits_oid ON snapshot_commits(snapshot_key, oid);
+                 CREATE VIRTUAL TABLE commit_message_fts USING fts5(folded_message, content='', columnsize=0, tokenize='trigram case_sensitive 1');
+                 CREATE TABLE index_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+                 INSERT INTO index_meta(key, value) VALUES('message_fts_rowid', 3);",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 2_i32)
+            .unwrap();
+        let samples = [
+            ("1".repeat(40), "Die Straße ist lang"),
+            ("2".repeat(40), "TURKISH İ TEST"),
+            ("3".repeat(40), "quote \"in\" msg"),
+            ("4".repeat(40), "Uppercase Match Only"),
+        ];
+        for (idx, (oid, msg)) in samples.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO commits VALUES(?1,'10','10','a','a','c','c',?2)",
+                    params![oid, msg],
+                )
+                .unwrap();
+            let rowid = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO commit_message_fts(rowid, folded_message) VALUES(?1,?2)",
+                    params![rowid, default_case_fold_str(msg)],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO snapshot_commits VALUES('snap', ?1, ?2)",
+                    params![idx as i64, oid],
+                )
+                .unwrap();
+        }
+        assert!(!has_message_fts(&connection).unwrap());
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO index_meta(key, value) VALUES('message_fts_rowid', 4)",
+                [],
+            )
+            .unwrap();
+        assert!(has_message_fts(&connection).unwrap());
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        let cancelled = AtomicBool::new(false);
+        let run_msg = |msg: &str, case_sensitive: bool| -> Vec<String> {
+            let mut compiled = query();
+            compiled.query.message = msg.into();
+            compiled.query.case_sensitive = case_sensitive;
+            compiled.message_needle = if case_sensitive {
+                msg.into()
+            } else {
+                default_case_fold_str(msg)
+            };
+            let fts_expr = fts_trigram_query(&compiled);
+            if msg.chars().count() >= 3 {
+                assert!(fts_expr.is_some());
+            } else {
+                assert!(fts_expr.is_none());
+            }
+            let sql = select_scan_sql(false, fts_expr.is_some(), "");
+            let mut stmt = connection.prepare_cached(sql).unwrap();
+            let mut rows = if let Some(expr) = &fts_expr {
+                stmt.query(params!["snap", 10_i64, expr]).unwrap()
+            } else {
+                stmt.query(params!["snap", 10_i64]).unwrap()
+            };
+            let mut matched = Vec::new();
+            while let Some(row) = rows.next().unwrap() {
+                if let Some(key) = matching_row_key(row, &compiled, &cancelled, deadline).unwrap() {
+                    matched.push(key.oid);
+                }
+            }
+            matched
+        };
+
+        assert_eq!(run_msg("STRASSE", false), vec!["1".repeat(40)]);
+        assert!(run_msg("STRASSE", true).is_empty());
+        assert_eq!(run_msg("turkish i", false), vec!["2".repeat(40)]);
+        assert_eq!(run_msg("quote \"in\" msg", false), vec!["3".repeat(40)]);
+        assert!(run_msg("match", true).is_empty());
+        assert_eq!(run_msg("Match", true), vec!["4".repeat(40)]);
+        assert_eq!(run_msg("la", false), vec!["1".repeat(40)]);
+        assert!(run_msg("never_present_token", false).is_empty());
     }
 }

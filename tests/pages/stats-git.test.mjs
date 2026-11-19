@@ -1020,3 +1020,42 @@ test("P6-05 estimate lists the file, byte and non-regular-file limits explicitly
     "notRegularFile",
   ]);
 });
+
+test("SearchQuery.excludeTips filters searchCommits and statistics to the batch topology range", async (t) => {
+  const tips = {};
+  const f = await indexed(t, "exclude-tips-batch", async (repo) => {
+    await commit(repo, "old.txt", "v1\n", 1700000100, "chore: baseline one");
+    tips.oldTip = await commit(repo, "old.txt", "v2\n", 1700000200, "chore: baseline two");
+    await commit(repo, "feat.ts", "export const x = 1;\n", 1700000300, "feat: added after update", "Alice");
+    await commit(repo, "feat.ts", "export const x = 2;\n", 1700000400, "fix: follow up in batch", "Bob");
+  });
+
+  const searchRes = await f.client.call("searchCommits", {
+    query: { ...query, timeZone: "UTC", excludeTips: [tips.oldTip] },
+    pageSize: 50,
+    cursor: null,
+    anchorOid: null,
+  });
+  const searchTitles = searchRes.chunks.flatMap((c) => c.data.page.commits.map((item) => item.summary));
+  assert.deepEqual(searchTitles, ["fix: follow up in batch", "feat: added after update"]);
+
+  const overview = (await f.client.call("getActivityOverview", {
+    query: { ...query, timeZone: "UTC", excludeTips: [tips.oldTip] },
+    range: { startUnix: 1700000000, endUnix: 1700001000 },
+    bucket: "hour",
+  })).chunks[0].data.stats;
+  assert.equal(overview.totals.commits, 2);
+  assert.equal(overview.totals.authors, 2);
+
+  const changes = (await f.client.call("getChangeStats", {
+    query: { ...query, timeZone: "UTC", excludeTips: [tips.oldTip] },
+    range: { startUnix: 1700000000, endUnix: 1700001000 },
+    bucket: "hour",
+    directoryPrefix: "",
+  })).chunks[0].data.stats;
+  assert.equal(changes.totals.additions, 2);
+  assert.equal(changes.totals.deletions, 1);
+  assert.equal(changes.files.length, 1);
+  assert.equal(changes.files[0].path.display, "feat.ts");
+  assert.equal(changes.files[0].commits, 2);
+});

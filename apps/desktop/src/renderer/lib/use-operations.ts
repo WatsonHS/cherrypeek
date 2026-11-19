@@ -1,7 +1,15 @@
 import * as React from "react";
 import type { RepositorySessionStore, RepositoryView } from "./repository-session-store.js";
 import type { OperationsStore, OperationsView } from "./operations-store.js";
-import type { OperationBlocker, RepositorySessionApi } from "../../../../../packages/protocol/src/repository-session.js";
+import type {
+  MergePreviewResult,
+  MergeSyncMode,
+  OperationBlocker,
+  PreviewMergeParams,
+  RepositorySessionApi,
+  RepositorySessionResult,
+  ResolvedMergeFile,
+} from "../../../../../packages/protocol/src/repository-session.js";
 import type { RemoteInfo } from "../../../../../packages/protocol/src/generated/server-message.js";
 import type { HandoffRequest } from "./handoff-prompt.js";
 import { operationFailedRequest, pushFailedRequest } from "./handoff-prompt.js";
@@ -9,6 +17,8 @@ import { refusalHandoffRequest } from "./operation-refusal.js";
 import {
   canFastForward,
   canPush,
+  completeMergeMeta,
+  completeMergeOperation,
   createBranchMeta,
   createBranchOperation,
   deleteBranchDoneNotice,
@@ -20,6 +30,7 @@ import {
   fastForwardOperation,
   inlineBlockerMessage,
   mergeDoneNotice,
+  mergeSyncDoneNotice,
   pushDoneNotice,
   pushMeta,
   refTip,
@@ -40,6 +51,7 @@ import {
   type SwitchTarget,
   type UntrackedChoice,
 } from "./operations.js";
+import { batchRecordFromOperation, saveUpdateBatch } from "./update-batch.js";
 import { shortRefName } from "./format.js";
 
 export interface HeadPushInfo {
@@ -89,6 +101,22 @@ export interface OperationsActions {
     expectedSourceOid: string,
     switchToTarget: boolean,
   ): Promise<boolean>;
+  /** M8: read-only three-way merge preview in isolated temporary objects. */
+  previewMerge(params: PreviewMergeParams): Promise<RepositorySessionResult<MergePreviewResult>>;
+  /** M8: complete a clean merge, single-commit rebase, or resolved 3-pane merge atomically (optionally pushing afterwards). */
+  completeMerge(params: {
+    targetRef: string;
+    expectedTargetOid: string;
+    sourceRef: string;
+    expectedSourceOid: string;
+    expectedHeadOid: string | null;
+    mode: MergeSyncMode;
+    message: string;
+    resolvedFiles: ResolvedMergeFile[];
+    switchToTarget: boolean;
+    pushAfter?: boolean;
+    pushRemote?: string | null;
+  }): Promise<boolean>;
   /** Stage specific workspace paths (by rawHex) or all changes. */
   stagePaths(pathsHex: string[], all?: boolean): Promise<boolean>;
   /** Unstage specific workspace paths (by rawHex) or all staged changes. */
@@ -116,6 +144,7 @@ export interface UseOperationsOptions {
   supported: boolean;
   remotes?: readonly RemoteInfo[];
   pushRepository?: RepositorySessionApi["pushRepository"];
+  previewMerge?: RepositorySessionApi["previewMerge"];
   cancelOperation?: () => Promise<unknown>;
   /** Fetch every remote and refresh the snapshot; true when it succeeded. */
   fetchAll(): Promise<boolean>;
@@ -168,7 +197,7 @@ export function useOperations(options: UseOperationsOptions): { actions: Operati
       store.bind(sessionKeyOf(sessionStore.getView()));
       store.invalidate();
       current().afterChange();
-      if (headRef) await store.loadSync([headRef], { force: true });
+      if (headRef) await store.loadSync([headRef], { force: true, waitForRetry: true });
     };
     /** Runs one operation between begin / end and follows up on how it ended. Returns the outcome. */
     const run = async (
@@ -215,6 +244,76 @@ export function useOperations(options: UseOperationsOptions): { actions: Operati
       }
     };
     const headRefName = () => snapshot().repository?.headReference ?? null;
+    const doPushBranch = async (
+      refName: string,
+      pushOptions: { remote?: string | null; setUpstream?: boolean } = {},
+    ): Promise<void> => {
+      if (current().fetching || pushBusyRef.current) return;
+      const pushApi = current().pushRepository ?? (typeof window !== "undefined" ? window.commitScope?.pushRepository : undefined);
+      if (!pushApi) {
+        store.setNotice("当前内核不支持推送操作。");
+        return;
+      }
+      const { refs, navigation } = snapshot();
+      const sync = store.getView().syncs[refName];
+      const ref = refs.find(item => item.name === refName);
+      const expectedOid = sync?.oid ?? (ref ? refTip(ref) : null);
+      if (!expectedOid) {
+        store.setNotice("找不到这个分支的最新位置，请刷新后再试。");
+        return;
+      }
+      const availableRemotes = current().remotes ?? [];
+      const preferredRemote = availableRemotes.find(item => item.name === "origin")?.name ?? availableRemotes[0]?.name ?? null;
+      const remote = pushOptions.remote ?? remoteNameFromRef(sync?.upstream?.refName) ?? (sync?.upstream ? null : preferredRemote);
+      const setUpstream = pushOptions.setUpstream ?? !sync?.upstream;
+      if (!sync?.upstream && !remote) {
+        store.setNotice("没有可发布的远端配置。");
+        return;
+      }
+      if (!store.begin(`推送 ${shortRefName(refName)}`)) return;
+      pushBusyRef.current = true;
+      pushCancelledRef.current = false;
+      const holders = sync?.checkedOutBy ?? (navigation?.worktrees ?? []).filter(item => item.headReference === refName).map(item => item.path);
+      const meta = pushMeta(refName, expectedOid, sync?.upstream ? { refName: sync.upstream.refName, oid: sync.upstream.oid } : null, remote, holders);
+      setPushState({ refName, remote, startedAt: Date.now(), phase: "pushing" });
+      try {
+        const result = await pushApi({ refName, expectedOid, remote, setUpstream })
+          .catch((error: unknown) => ({
+            ok: false as const,
+            error: { code: "PROTOCOL_ERROR" as const, message: error instanceof Error ? error.message : String(error), retryable: false },
+          }));
+        if (!result.ok) {
+          if (result.error.code === "CANCELLED" || pushCancelledRef.current) {
+            store.setNotice("已取消推送；正在刷新本地视图。");
+          } else {
+            store.recordFailure(meta, result.error.message);
+          }
+          setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
+          await current().refresh();
+          await reread(headRefName());
+          return;
+        }
+        if (result.value.outcome === "rejected") {
+          const outcome = store.refuse(result.value.blockers, meta);
+          if (outcome.kind === "refChanged") {
+            setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
+            await current().refresh();
+            await reread(headRefName());
+          }
+          return;
+        }
+        current().dismissFetchNotice();
+        setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
+        await current().refresh();
+        await reread(headRefName());
+        store.setNotice(pushDoneNotice(result.value));
+      } finally {
+        pushCancelledRef.current = false;
+        pushBusyRef.current = false;
+        setPushState(null);
+        store.end();
+      }
+    };
 
     return {
       view: opsView,
@@ -255,7 +354,19 @@ export function useOperations(options: UseOperationsOptions): { actions: Operati
             return null;
           }
           const outcome = await store.execute(operation, { ...fastForwardMeta(sync), fetched: isHead });
-          if (outcome.kind === "done") store.setNotice(updateDoneNotice(shortRefName(refName), outcome.run));
+          if (outcome.kind === "done") {
+            const activeSession = sessionStore.getView().session;
+            const batch = batchRecordFromOperation({
+              label: "快进更新",
+              branchName: shortRefName(refName),
+              updatedRef: outcome.run.updatedRef,
+              run: outcome.run,
+              fallbackOldOid: sync.oid,
+              fallbackNewOid: sync.upstream?.oid,
+            });
+            if (batch && activeSession) saveUpdateBatch(activeSession.repositoryKey, activeSession.worktreeId, batch);
+            store.setNotice(updateDoneNotice(shortRefName(refName), outcome.run, batch ?? undefined));
+          }
           if (isHead && outcome.kind === "checkFailed") {
             store.setNotice(`Fetch 已完成；没能检查更新，本地分支和工作区未更新：${outcome.message}`);
             return null;
@@ -277,77 +388,23 @@ export function useOperations(options: UseOperationsOptions): { actions: Operati
           }
           // No second fetch: the operation still names the tips the refusal was about, and the core refuses if they moved.
           const outcome = await store.execute(operation, meta);
-          if (outcome.kind === "done") store.setNotice(updateDoneNotice(meta.name, outcome.run));
+          if (outcome.kind === "done") {
+            const activeSession = sessionStore.getView().session;
+            const batch = batchRecordFromOperation({
+              label: "快进更新",
+              branchName: meta.name,
+              updatedRef: outcome.run.updatedRef,
+              run: outcome.run,
+              fallbackOldOid: meta.oid,
+              fallbackNewOid: meta.upstream?.oid,
+            });
+            if (batch && activeSession) saveUpdateBatch(activeSession.repositoryKey, activeSession.worktreeId, batch);
+            store.setNotice(updateDoneNotice(meta.name, outcome.run, batch ?? undefined));
+          }
           return outcome;
         });
       },
-      pushBranch: async (refName, pushOptions = {}) => {
-        if (current().fetching || pushBusyRef.current) return;
-        const pushApi = current().pushRepository ?? (typeof window !== "undefined" ? window.commitScope?.pushRepository : undefined);
-        if (!pushApi) {
-          store.setNotice("当前内核不支持推送操作。");
-          return;
-        }
-        const { refs, navigation } = snapshot();
-        const sync = store.getView().syncs[refName];
-        const ref = refs.find(item => item.name === refName);
-        const expectedOid = sync?.oid ?? (ref ? refTip(ref) : null);
-        if (!expectedOid) {
-          store.setNotice("找不到这个分支的最新位置，请刷新后再试。");
-          return;
-        }
-        const availableRemotes = current().remotes ?? [];
-        const preferredRemote = availableRemotes.find(item => item.name === "origin")?.name ?? availableRemotes[0]?.name ?? null;
-        const remote = pushOptions.remote ?? remoteNameFromRef(sync?.upstream?.refName) ?? (sync?.upstream ? null : preferredRemote);
-        const setUpstream = pushOptions.setUpstream ?? !sync?.upstream;
-        if (!sync?.upstream && !remote) {
-          store.setNotice("没有可发布的远端配置。");
-          return;
-        }
-        if (!store.begin(`推送 ${shortRefName(refName)}`)) return;
-        pushBusyRef.current = true;
-        pushCancelledRef.current = false;
-        const holders = sync?.checkedOutBy ?? (navigation?.worktrees ?? []).filter(item => item.headReference === refName).map(item => item.path);
-        const meta = pushMeta(refName, expectedOid, sync?.upstream ? { refName: sync.upstream.refName, oid: sync.upstream.oid } : null, remote, holders);
-        setPushState({ refName, remote, startedAt: Date.now(), phase: "pushing" });
-        try {
-          const result = await pushApi({ refName, expectedOid, remote, setUpstream })
-            .catch((error: unknown) => ({
-              ok: false as const,
-              error: { code: "PROTOCOL_ERROR" as const, message: error instanceof Error ? error.message : String(error), retryable: false },
-            }));
-          if (!result.ok) {
-            if (result.error.code === "CANCELLED" || pushCancelledRef.current) {
-              store.setNotice("已取消推送；正在刷新本地视图。");
-            } else {
-              store.recordFailure(meta, result.error.message);
-            }
-            setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
-            await current().refresh();
-            await reread(headRefName());
-            return;
-          }
-          if (result.value.outcome === "rejected") {
-            const outcome = store.refuse(result.value.blockers, meta);
-            if (outcome.kind === "refChanged") {
-              setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
-              await current().refresh();
-              await reread(headRefName());
-            }
-            return;
-          }
-          current().dismissFetchNotice();
-          setPushState(prev => prev ? { ...prev, phase: "refreshing" } : null);
-          await current().refresh();
-          await reread(headRefName());
-          store.setNotice(pushDoneNotice(result.value));
-        } finally {
-          pushCancelledRef.current = false;
-          pushBusyRef.current = false;
-          setPushState(null);
-          store.end();
-        }
-      },
+      pushBranch: doPushBranch,
       cancelPush: () => {
         pushCancelledRef.current = true;
         const cancelOp = current().cancelOperation ?? (typeof window !== "undefined" ? window.commitScope?.cancelRepositoryOperation : undefined);
@@ -368,9 +425,58 @@ export function useOperations(options: UseOperationsOptions): { actions: Operati
           const holders = (snapshot().navigation?.worktrees ?? []).filter(item => item.headReference === targetRef).map(item => item.path);
           const meta = fastForwardMergeMeta(sourceRef, expectedSourceOid, targetRef, expectedTargetOid, holders);
           const res = await store.execute(fastForwardMergeOperation(targetRef, expectedTargetOid, sourceRef, expectedSourceOid, switchToTarget), meta);
-          if (res.kind === "done") store.setNotice(mergeDoneNotice(sourceRef, targetRef, switchToTarget));
+          if (res.kind === "done") {
+            const activeSession = sessionStore.getView().session;
+            const batch = batchRecordFromOperation({
+              label: "快进合入",
+              branchName: shortRefName(targetRef),
+              updatedRef: res.run.updatedRef,
+              run: res.run,
+              fallbackOldOid: expectedTargetOid,
+              fallbackNewOid: expectedSourceOid,
+            });
+            if (batch && activeSession) saveUpdateBatch(activeSession.repositoryKey, activeSession.worktreeId, batch);
+            const summary = mergeDoneNotice(sourceRef, targetRef, switchToTarget);
+            store.setNotice(batch ? { summary, untracked: null, batch } : summary);
+          }
           return res;
         });
+        return outcome?.kind === "done";
+      },
+      previewMerge: params => {
+        const previewApi = current().previewMerge ?? (typeof window !== "undefined" ? window.commitScope?.previewMerge : undefined);
+        if (!previewApi) {
+          return Promise.resolve({
+            ok: false,
+            error: { code: "PROTOCOL_ERROR", message: "当前内核不支持合并预演。", retryable: false },
+          });
+        }
+        return previewApi(params);
+      },
+      completeMerge: async params => {
+        const outcome = await run(`同步 ${shortRefName(params.targetRef)}`, async () => {
+          const holders = (snapshot().navigation?.worktrees ?? []).filter(item => item.headReference === params.targetRef).map(item => item.path);
+          const meta = completeMergeMeta(params.targetRef, params.expectedTargetOid, params.sourceRef, params.expectedSourceOid, holders);
+          const operation = completeMergeOperation(params);
+          const res = await store.execute(operation, meta);
+          if (res.kind === "done") {
+            const activeSession = sessionStore.getView().session;
+            const batch = batchRecordFromOperation({
+              label: params.mode === "singleCommitRebase" ? "单提交变基" : "合并同步",
+              branchName: shortRefName(params.targetRef),
+              updatedRef: res.run.updatedRef,
+              run: res.run,
+              fallbackOldOid: params.expectedTargetOid,
+            });
+            if (batch && activeSession) saveUpdateBatch(activeSession.repositoryKey, activeSession.worktreeId, batch);
+            const summary = mergeSyncDoneNotice(params.targetRef, params.sourceRef, params.mode, params.switchToTarget);
+            store.setNotice(batch ? { summary, untracked: null, batch } : summary);
+          }
+          return res;
+        });
+        if (outcome?.kind === "done" && params.pushAfter) {
+          await doPushBranch(params.targetRef, { remote: params.pushRemote ?? undefined });
+        }
         return outcome?.kind === "done";
       },
       stagePaths: async (pathsHex, all = false) => {

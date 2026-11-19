@@ -83,6 +83,7 @@ const VERB: Record<OperationStep, string> = {
   workspaceUnstage: "取消暂存",
   workspaceDiscard: "丢弃改动",
   workspaceCommit: "提交",
+  completeMerge: "分叉同步",
 };
 
 function titleFor(meta: OperationMeta): string {
@@ -97,6 +98,7 @@ function titleFor(meta: OperationMeta): string {
     case "workspaceUnstage": return "无法取消暂存";
     case "workspaceDiscard": return `无法丢弃 ${meta.name}`;
     case "workspaceCommit": return "无法创建提交";
+    case "completeMerge": return `无法同步分支 ${meta.name}`;
   }
 }
 
@@ -125,7 +127,7 @@ function piece(blocker: OperationBlocker, meta: OperationMeta, preservedDirtyCou
         ? `本地分支 ${name} 与 ${targetLabel} 已分叉（领先 ${blocker.ahead}、落后 ${blocker.behind}），不能快进推送。CherryPeek 不执行 --force，请先同步再推送。`
         : meta.step === "mergeInto"
           ? `源分支 ${name} 与目标分支 ${targetLabel} 已分叉（相对目标领先 ${blocker.ahead}、落后 ${blocker.behind}），不能直接快进合入。`
-          : `本地分支 ${name} 与 ${targetLabel} 已分叉（领先 ${blocker.ahead}、落后 ${blocker.behind}），不能快进。合并或 rebase 可能有冲突，CherryPeek 不处理。`;
+          : `本地分支 ${name} 与 ${targetLabel} 已分叉（领先 ${blocker.ahead}、落后 ${blocker.behind}），不能快进。可交给 Agent，或预演同步 / 解决轻量冲突。`;
       return {
         explanation,
         lists: [

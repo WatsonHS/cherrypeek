@@ -588,3 +588,46 @@ test("M7 refusal models map remoteRejected, notAncestorMerged, and mergeInto div
   assert.equal(store.getView().failure?.message, "fatal: authentication failed");
   assert.equal(store.getView().failure?.atUnixMs, 42);
 });
+
+test("M8 divergedSyncTargetFromRefusal maps update, push, and mergeInto directions accurately", () => {
+  const updMeta = ops.fastForwardMeta(sync({ refName: "refs/heads/main", oid: oid("a"), upstream: { refName: "refs/remotes/origin/main", oid: oid("b") }, state: "diverged" }));
+  assert.deepEqual(ops.divergedSyncTargetFromRefusal(updMeta, [diverged]), {
+    targetRef: "refs/heads/main",
+    expectedTargetOid: oid("a"),
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: oid("b"),
+    switchToTarget: false,
+    canPushAfter: true,
+    defaultPushAfter: false,
+    pushRemote: "origin",
+  });
+
+  const pMeta = ops.pushMeta("refs/heads/main", oid("a"), { refName: "refs/remotes/origin/main", oid: oid("b") }, "origin", []);
+  assert.deepEqual(ops.divergedSyncTargetFromRefusal(pMeta, [diverged]), {
+    targetRef: "refs/heads/main",
+    expectedTargetOid: oid("a"),
+    sourceRef: "refs/remotes/origin/main",
+    expectedSourceOid: oid("b"),
+    switchToTarget: false,
+    canPushAfter: true,
+    defaultPushAfter: true,
+    pushRemote: "origin",
+  });
+
+  // For mergeInto, sourceRef is `feat` (meta.refName) and targetRef is `main` (meta.upstream.refName).
+  const ffMergeOp = ops.fastForwardMergeOperation("refs/heads/main", oid("a"), "refs/heads/feat", oid("b"), true);
+  const mMeta = ops.fastForwardMergeMeta("refs/heads/feat", oid("b"), "refs/heads/main", oid("a"));
+  assert.deepEqual(ops.divergedSyncTargetFromRefusal(mMeta, [diverged], ffMergeOp), {
+    targetRef: "refs/heads/main",
+    expectedTargetOid: oid("a"),
+    sourceRef: "refs/heads/feat",
+    expectedSourceOid: oid("b"),
+    switchToTarget: true,
+    canPushAfter: false,
+    defaultPushAfter: false,
+    pushRemote: null,
+  });
+
+  assert.equal(ops.mergeSyncDoneNotice("refs/heads/main", "refs/remotes/origin/main", "singleCommitRebase", false), "已将 main 单提交变基到 origin/main");
+  assert.equal(ops.mergeSyncDoneNotice("refs/heads/main", "refs/heads/feat", "mergeCommit", true), "已将 feat 合并到 main，并切换到 main");
+});

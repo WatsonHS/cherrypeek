@@ -9,7 +9,7 @@ use commitscope_core::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -17,12 +17,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) type ExcludedTipsCache = Vec<(Vec<String>, Arc<HashSet<String>>)>;
+
 #[derive(Clone)]
 pub struct RepositorySession {
     pub info: RepositorySessionInfo,
     pub discovered: Arc<DiscoveredRepository>,
     pub history: Arc<HistoryState>,
     pub(crate) latest_observation: Arc<Mutex<LatestObservationSlot>>,
+    pub(crate) excluded_tips_cache: Arc<Mutex<ExcludedTipsCache>>,
 }
 
 #[derive(Clone)]
@@ -299,6 +302,7 @@ impl SessionManager {
                 },
                 sequence: 0,
             })),
+            excluded_tips_cache: Arc::new(Mutex::new(Vec::new())),
         });
         let replaced_repo_id = self
             .current

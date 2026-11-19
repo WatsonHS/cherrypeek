@@ -676,6 +676,7 @@ mod tests {
                 },
                 sequence: 0,
             })),
+            excluded_tips_cache: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
 
         fs::write(repo.path().join("file.txt"), "new\n").unwrap();

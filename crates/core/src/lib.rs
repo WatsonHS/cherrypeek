@@ -452,6 +452,7 @@ pub enum RequestParams {
     ReadBlame(ReadBlameParams),
     FetchRepository(FetchRepositoryParams),
     PushRepository(PushRepositoryParams),
+    PreviewMerge(PreviewMergeParams),
     GetBranchSync(GetBranchSyncParams),
     CheckOperation(OperationParams),
     RunOperation(OperationParams),
@@ -632,6 +633,9 @@ pub struct SearchQuery {
     #[schemars(required)]
     #[schemars(with = "NullableSearchPathFilterSchema")]
     pub path: Option<SearchPathFilter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 2000))]
+    pub exclude_tips: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -794,6 +798,37 @@ pub struct GetHandoffFactsParams {
     #[schemars(with = "NullableStringSchema")]
     #[schemars(length(max = 256))]
     pub stale_worktree_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 2000))]
+    pub range_exclude_tips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 2000))]
+    pub range_head_tips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "NullableOidSchema")]
+    pub range_oldest_oid: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HandoffRangeSummary {
+    pub total_count: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub newest_oid: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    #[schemars(required)]
+    #[schemars(with = "NullableOidSchema")]
+    pub oldest_oid: Option<String>,
+    #[schemars(length(max = 2000))]
+    pub head_tips: Vec<String>,
+    #[schemars(length(max = 2000))]
+    pub exclude_tips: Vec<String>,
+    #[schemars(length(max = 200))]
+    pub head_commits: Vec<CommitSummary>,
+    #[schemars(length(max = 100))]
+    pub tail_commits: Vec<CommitSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -875,6 +910,8 @@ pub struct HandoffFacts {
     #[schemars(required)]
     #[schemars(with = "NullableSchema<WorktreeInfo>")]
     pub stale_worktree: Option<WorktreeInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_summary: Option<HandoffRangeSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1989,6 +2026,10 @@ pub enum ResponseData {
     RepositoryPushed {
         result: PushResult,
     },
+    #[serde(rename = "mergePreview")]
+    MergePreview {
+        result: MergePreviewResult,
+    },
     #[serde(rename = "git")]
     Git {
         git: GitInfo,
@@ -2041,6 +2082,12 @@ pub enum ResponseData {
         #[schemars(required)]
         #[schemars(with = "NullableOidSchema")]
         last_seen_divider_oid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_since_last_seen_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_since_last_seen_min_unix: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_since_last_seen_max_unix: Option<i64>,
     },
     #[serde(rename = "historyDateLocation")]
     HistoryDateLocation {

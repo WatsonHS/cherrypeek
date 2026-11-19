@@ -181,6 +181,31 @@
             "null"
           ]
         },
+        "rangeExcludeTips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "rangeHeadTips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "rangeOldestOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "selectedOid": {
           "anyOf": [
             {
@@ -440,6 +465,13 @@
       ],
       "type": "object"
     },
+    "MergeSyncMode": {
+      "enum": [
+        "mergeCommit",
+        "singleCommitRebase"
+      ],
+      "type": "string"
+    },
     "MetadataIndexAction": {
       "enum": [
         "pause",
@@ -472,6 +504,30 @@
       },
       "required": [
         "operation"
+      ],
+      "type": "object"
+    },
+    "PreviewMergeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "expectedSourceOid": {
+          "type": "string"
+        },
+        "expectedTargetOid": {
+          "type": "string"
+        },
+        "sourceRef": {
+          "type": "string"
+        },
+        "targetRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "targetRef",
+        "expectedTargetOid",
+        "sourceRef",
+        "expectedSourceOid"
       ],
       "type": "object"
     },
@@ -1123,6 +1179,60 @@
             "message"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expectedHeadOid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expectedSourceOid": {
+              "type": "string"
+            },
+            "expectedTargetOid": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "completeMerge",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "mode": {
+              "$ref": "#/definitions/MergeSyncMode"
+            },
+            "resolvedFiles": {
+              "items": {
+                "$ref": "#/definitions/ResolvedMergeFile"
+              },
+              "type": "array"
+            },
+            "sourceRef": {
+              "type": "string"
+            },
+            "switchToTarget": {
+              "type": "boolean"
+            },
+            "targetRef": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "targetRef",
+            "expectedTargetOid",
+            "sourceRef",
+            "expectedSourceOid",
+            "mode",
+            "message",
+            "resolvedFiles",
+            "switchToTarget"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1312,6 +1422,9 @@
           "$ref": "#/definitions/PushRepositoryParams"
         },
         {
+          "$ref": "#/definitions/PreviewMergeParams"
+        },
+        {
           "$ref": "#/definitions/GetBranchSyncParams"
         },
         {
@@ -1321,6 +1434,26 @@
           "$ref": "#/definitions/OperationParams"
         }
       ]
+    },
+    "ResolvedMergeFile": {
+      "additionalProperties": false,
+      "properties": {
+        "contents": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "pathHex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pathHex",
+        "mode",
+        "contents"
+      ],
+      "type": "object"
     },
     "SearchCommitsParams": {
       "additionalProperties": false,
@@ -1445,6 +1578,13 @@
             "$ref": "#/definitions/SearchIdentity"
           },
           "maxItems": 50,
+          "type": "array"
+        },
+        "excludeTips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
           "type": "array"
         },
         "fromTimestamp": {

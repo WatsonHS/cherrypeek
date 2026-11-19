@@ -236,11 +236,14 @@ fn survival_added(
         to_timestamp: None,
         time_zone: "UTC".into(),
         path: None,
+        exclude_tips: Vec::new(),
     };
     crate::search::with_stats_rows(
+        None,
         &SessionStore::from_env(),
         session,
         &query,
+        true,
         cancelled,
         deadline,
         |db, snapshot, rows| {

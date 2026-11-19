@@ -2567,6 +2567,16 @@
         "overlapTruncated": {
           "type": "boolean"
         },
+        "rangeSummary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HandoffRangeSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "repository": {
           "$ref": "#/definitions/RepositoryInfo"
         },
@@ -2669,6 +2679,76 @@
         "totalCount",
         "commits",
         "truncated"
+      ],
+      "type": "object"
+    },
+    "HandoffRangeSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "excludeTips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "headCommits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "headTips": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "type": "array"
+        },
+        "newestOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldestOid": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tailCommits": {
+          "items": {
+            "$ref": "#/definitions/CommitSummary"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "totalCount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "totalCount",
+        "newestOid",
+        "oldestOid",
+        "headTips",
+        "excludeTips",
+        "headCommits",
+        "tailCommits"
       ],
       "type": "object"
     },
@@ -3036,12 +3116,220 @@
       ],
       "type": "object"
     },
+    "MergeConflictFile": {
+      "additionalProperties": false,
+      "properties": {
+        "baseText": {
+          "type": "string"
+        },
+        "leftHunks": {
+          "items": {
+            "$ref": "#/definitions/MergeDiffHunk"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "oursText": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/definitions/GitPath"
+        },
+        "rightHunks": {
+          "items": {
+            "$ref": "#/definitions/MergeDiffHunk"
+          },
+          "type": "array"
+        },
+        "theirsText": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "mode",
+        "baseText",
+        "oursText",
+        "theirsText",
+        "leftHunks",
+        "rightHunks"
+      ],
+      "type": "object"
+    },
+    "MergeDiffHunk": {
+      "additionalProperties": false,
+      "properties": {
+        "baseCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "baseStart": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sideCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sideStart": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "baseStart",
+        "baseCount",
+        "sideStart",
+        "sideCount"
+      ],
+      "type": "object"
+    },
+    "MergePreviewResult": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "blockers": {
+              "items": {
+                "$ref": "#/definitions/OperationBlocker"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "const": "blocked",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "blockers"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "autoMergedCount": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "canSingleCommitRebase": {
+              "type": "boolean"
+            },
+            "defaultMessage": {
+              "type": "string"
+            },
+            "mergeBaseOid": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "clean",
+              "type": "string"
+            },
+            "singleCommitSummary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "outcome",
+            "mergeBaseOid",
+            "autoMergedCount",
+            "canSingleCommitRebase",
+            "defaultMessage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "autoMergedCount": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "defaultMessage": {
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "$ref": "#/definitions/MergeConflictFile"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "mergeBaseOid": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "conflicted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "mergeBaseOid",
+            "autoMergedCount",
+            "files",
+            "defaultMessage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "conflictPaths": {
+              "items": {
+                "$ref": "#/definitions/GitPath"
+              },
+              "type": "array"
+            },
+            "message": {
+              "type": "string"
+            },
+            "outcome": {
+              "const": "unsupported",
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/MergeUnsupportedReason"
+            }
+          },
+          "required": [
+            "outcome",
+            "reason",
+            "message",
+            "conflictPaths"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "MergeStatus": {
       "enum": [
         "merged",
         "patchEquivalent",
         "notMerged",
         "unavailable"
+      ],
+      "type": "string"
+    },
+    "MergeUnsupportedReason": {
+      "enum": [
+        "crissCross",
+        "unrelatedHistories",
+        "structuralConflict",
+        "binaryOrNonUtf8",
+        "tooManyOrTooLarge"
       ],
       "type": "string"
     },
@@ -3534,6 +3822,28 @@
         {
           "additionalProperties": false,
           "properties": {
+            "addedCount": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "addedMaxUnix": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "addedMinUnix": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "committedOid": {
               "type": [
                 "string",
@@ -4826,6 +5136,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "result": {
+              "$ref": "#/definitions/MergePreviewResult"
+            },
+            "section": {
+              "const": "mergePreview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "git": {
               "$ref": "#/definitions/GitInfo"
             },
@@ -4998,6 +5325,28 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "newSinceLastSeenCount": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "newSinceLastSeenMaxUnix": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "newSinceLastSeenMinUnix": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
               ]
             },
             "newSinceLastSeenStatus": {

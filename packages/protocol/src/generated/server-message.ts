@@ -185,6 +185,10 @@ export type ResponseData =
       section: "repositoryPushed";
     }
   | {
+      result: MergePreviewResult;
+      section: "mergePreview";
+    }
+  | {
       git: GitInfo;
       section: "git";
     }
@@ -225,6 +229,9 @@ export type ResponseData =
       cursor: string;
       hasMore: boolean;
       lastSeenDividerOid: string | null;
+      newSinceLastSeenCount?: number | null;
+      newSinceLastSeenMaxUnix?: number | null;
+      newSinceLastSeenMinUnix?: number | null;
       newSinceLastSeenStatus: NewSinceLastSeenStatus;
       offset: number;
       pageSize: number;
@@ -335,6 +342,9 @@ export type OperationRun =
       outcome: "rejected";
     }
   | {
+      addedCount?: number | null;
+      addedMaxUnix?: number | null;
+      addedMinUnix?: number | null;
       committedOid?: string | null;
       headOid?: string | null;
       headReference?: string | null;
@@ -378,6 +388,93 @@ export type PushResult =
       remoteRefName: string;
       setUpstream: boolean;
     };
+export type MergePreviewResult =
+  | {
+      blockers: OperationBlocker[];
+      outcome: "blocked";
+    }
+  | {
+      autoMergedCount: number;
+      canSingleCommitRebase: boolean;
+      defaultMessage: string;
+      mergeBaseOid: string;
+      outcome: "clean";
+      singleCommitSummary?: string | null;
+    }
+  | {
+      autoMergedCount: number;
+      defaultMessage: string;
+      /**
+       * @maxItems 10
+       */
+      files:
+        | []
+        | [MergeConflictFile]
+        | [MergeConflictFile, MergeConflictFile]
+        | [MergeConflictFile, MergeConflictFile, MergeConflictFile]
+        | [MergeConflictFile, MergeConflictFile, MergeConflictFile, MergeConflictFile]
+        | [MergeConflictFile, MergeConflictFile, MergeConflictFile, MergeConflictFile, MergeConflictFile]
+        | [
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile
+          ]
+        | [
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile
+          ]
+        | [
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile
+          ]
+        | [
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile
+          ]
+        | [
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile,
+            MergeConflictFile
+          ];
+      mergeBaseOid: string;
+      outcome: "conflicted";
+    }
+  | {
+      conflictPaths: GitPath[];
+      message: string;
+      outcome: "unsupported";
+      reason: MergeUnsupportedReason;
+    };
+export type MergeUnsupportedReason =
+  "crissCross" | "unrelatedHistories" | "structuralConflict" | "binaryOrNonUtf8" | "tooManyOrTooLarge";
 export type StoreStatus = "ok" | "disabled" | "unavailable" | "corrupt";
 export type HistoryGraphSegmentKind = "through" | "incoming" | "outgoing";
 export type NewSinceLastSeenStatus = "ready" | "firstView" | "unavailable";
@@ -1250,6 +1347,7 @@ export interface HandoffFacts {
         GitPath
       ];
   overlapTruncated: boolean;
+  rangeSummary?: HandoffRangeSummary | null;
   repository: RepositoryInfo;
   scope: RepositoryScope;
   selectedCommit: CommitSummary | null;
@@ -1302,6 +1400,27 @@ export interface HandoffParentGroup {
   parentIndex: number;
   totalCount: number | null;
   truncated: boolean;
+}
+export interface HandoffRangeSummary {
+  /**
+   * @maxItems 2000
+   */
+  excludeTips: string[];
+  /**
+   * @maxItems 200
+   */
+  headCommits: CommitSummary[];
+  /**
+   * @maxItems 2000
+   */
+  headTips: string[];
+  newestOid: string | null;
+  oldestOid: string | null;
+  /**
+   * @maxItems 100
+   */
+  tailCommits: CommitSummary[];
+  totalCount: number;
 }
 export interface RepositoryInfo {
   commonDir: string;
@@ -1624,6 +1743,21 @@ export interface FetchResult {
    * @maxItems 64
    */
   remotes: string[];
+}
+export interface MergeConflictFile {
+  baseText: string;
+  leftHunks: MergeDiffHunk[];
+  mode: string;
+  oursText: string;
+  path: GitPath;
+  rightHunks: MergeDiffHunk[];
+  theirsText: string;
+}
+export interface MergeDiffHunk {
+  baseCount: number;
+  baseStart: number;
+  sideCount: number;
+  sideStart: number;
 }
 export interface RepositorySessionInfo {
   generation: string;

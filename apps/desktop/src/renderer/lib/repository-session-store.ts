@@ -38,6 +38,9 @@ export interface RepositoryView {
   refsTruncated: boolean;
   newSinceLastSeenStatus: NewSinceLastSeenStatus;
   lastSeenDividerOid: string | null;
+  newSinceLastSeenCount: number | null;
+  newSinceLastSeenMinUnix: number | null;
+  newSinceLastSeenMaxUnix: number | null;
   commits: HistoryCommit[];
   hasMore: boolean;
   pageOffset: number | null;
@@ -116,7 +119,9 @@ const NAVIGATION_BUSY_RETRY_MS = 150;
 function emptyView(revision: number, state: RepositoryViewState = "idle"): RepositoryView {
   return {
     revision, state, session: null, repository: null, refs: [], refsTruncated: false,
-    newSinceLastSeenStatus: "unavailable", lastSeenDividerOid: null, commits: [], hasMore: false,
+    newSinceLastSeenStatus: "unavailable", lastSeenDividerOid: null,
+    newSinceLastSeenCount: null, newSinceLastSeenMinUnix: null, newSinceLastSeenMaxUnix: null,
+    commits: [], hasMore: false,
     pageOffset: null, pageSize: 200, pageCursor: null, previousCursor: null, nextCursor: null,
     windowPreviousCursor: null, windowNextCursor: null, canNavigatePrevious: false, canNavigateNext: false,
     pageLoading: false, pageRequestDirection: null, pageRequestKind: null,
@@ -393,6 +398,9 @@ export class RepositorySessionStore {
       state: "ready", session: nextSession, repository: page.repository, refs: page.refs, refsTruncated: page.refsTruncated,
       newSinceLastSeenStatus: page.newSinceLastSeenStatus,
       lastSeenDividerOid: page.newSinceLastSeenStatus === "ready" ? page.lastSeenDividerOid : null,
+      newSinceLastSeenCount: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenCount ?? null) : null,
+      newSinceLastSeenMinUnix: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenMinUnix ?? null) : null,
+      newSinceLastSeenMaxUnix: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenMaxUnix ?? null) : null,
       commits: page.commits, hasMore: page.hasMore, pageOffset: page.offset, pageSize: page.pageSize,
       pageCursor: page.cursor, previousCursor: page.previousCursor, nextCursor: page.nextCursor,
       windowPreviousCursor: page.previousCursor, windowNextCursor: page.nextCursor,
@@ -711,6 +719,9 @@ export class RepositorySessionStore {
       refsTruncated: page.refsTruncated,
       newSinceLastSeenStatus: page.newSinceLastSeenStatus,
       lastSeenDividerOid: page.newSinceLastSeenStatus === "ready" ? page.lastSeenDividerOid : null,
+      newSinceLastSeenCount: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenCount ?? null) : null,
+      newSinceLastSeenMinUnix: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenMinUnix ?? null) : null,
+      newSinceLastSeenMaxUnix: page.newSinceLastSeenStatus === "ready" ? (page.newSinceLastSeenMaxUnix ?? null) : null,
       commits: page.commits,
       hasMore: page.hasMore,
       pageOffset: page.offset,
@@ -1005,6 +1016,15 @@ export class RepositorySessionStore {
     const lastSeenDividerOid = newSinceLastSeenStatus === "ready"
       ? pages.find(page => page.lastSeenDividerOid !== null)?.lastSeenDividerOid ?? null
       : null;
+    const newSinceLastSeenCount = newSinceLastSeenStatus === "ready"
+      ? pages.find(page => page.newSinceLastSeenCount !== undefined)?.newSinceLastSeenCount ?? null
+      : null;
+    const newSinceLastSeenMinUnix = newSinceLastSeenStatus === "ready"
+      ? pages.find(page => page.newSinceLastSeenMinUnix !== undefined)?.newSinceLastSeenMinUnix ?? null
+      : null;
+    const newSinceLastSeenMaxUnix = newSinceLastSeenStatus === "ready"
+      ? pages.find(page => page.newSinceLastSeenMaxUnix !== undefined)?.newSinceLastSeenMaxUnix ?? null
+      : null;
     this.update({
       ...this.view,
       state,
@@ -1014,6 +1034,9 @@ export class RepositorySessionStore {
       refsTruncated: first.refsTruncated,
       newSinceLastSeenStatus,
       lastSeenDividerOid,
+      newSinceLastSeenCount,
+      newSinceLastSeenMinUnix,
+      newSinceLastSeenMaxUnix,
       commits,
       hasMore: last.nextCursor !== null,
       pageOffset: first.offset,

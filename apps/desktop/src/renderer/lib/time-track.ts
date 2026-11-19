@@ -6,6 +6,17 @@ export interface TimeTrackInputDay {
   count?: number;
 }
 
+export interface TimeTrackBounds {
+  oldest: number;
+  top: number;
+}
+
+export interface CommitScrollSample {
+  top: number;
+  bottom: number;
+  seconds: number;
+}
+
 const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const DAY_SECONDS = 86_400;
 
@@ -60,4 +71,143 @@ export function windowSpanFor(days: { start: number; count: number }[], anchor: 
   }
   const needed = Math.max(SPAN_STEPS[0]!, (to - from) * Math.min(1, total > 0 ? target / total : 1));
   return SPAN_STEPS.find(step => step >= needed) ?? needed;
+}
+
+/** Computes exact newest/oldest bounds for the slider without adding future midnight padding. */
+export function timeTrackBounds(
+  days: { start: number; count: number }[],
+  options: {
+    newestSeconds?: number | null;
+    oldestSeconds?: number | null;
+    nowSeconds?: number;
+  } = {},
+): TimeTrackBounds | null {
+  if (!days.length) {
+    if (options.newestSeconds != null) {
+      const oldest = options.oldestSeconds ?? options.newestSeconds;
+      return {
+        oldest: Math.min(options.newestSeconds, oldest),
+        top: Math.max(options.newestSeconds, oldest),
+      };
+    }
+    return null;
+  }
+  const oldestDayStart = days[0]!.start;
+  const newestDayStart = days.at(-1)!.start;
+  let top: number;
+  if (options.newestSeconds != null) {
+    top = newestDayStart > options.newestSeconds ? newestDayStart + DAY_SECONDS : options.newestSeconds;
+  } else {
+    const now = options.nowSeconds ?? Math.floor(Date.now() / 1000);
+    top = Math.min(newestDayStart + DAY_SECONDS, Math.max(now, newestDayStart + 3600));
+  }
+  let oldest: number;
+  if (options.oldestSeconds != null) {
+    oldest = oldestDayStart + DAY_SECONDS <= options.oldestSeconds
+      ? oldestDayStart
+      : Math.min(top, options.oldestSeconds);
+  } else {
+    oldest = Math.min(top, oldestDayStart);
+  }
+  return { oldest, top: Math.max(oldest, top) };
+}
+
+/** Global progress in [0, 1] from newest (0) to oldest (1), driving where the thumb sits in the track. */
+export function followProgressFor(
+  days: { start: number; count: number }[],
+  bounds: TimeTrackBounds,
+  seconds: number,
+  options: {
+    fullWindowScrollRatio?: number | null;
+    atTop?: boolean;
+    atBottom?: boolean;
+  } = {},
+): number {
+  if (options.atTop) return 0;
+  if (options.atBottom) return 1;
+  if (options.fullWindowScrollRatio != null) {
+    return Math.min(1, Math.max(0, options.fullWindowScrollRatio));
+  }
+  if (bounds.top <= bounds.oldest || !days.length) return 0;
+  const clamped = Math.min(bounds.top, Math.max(bounds.oldest, seconds));
+  let total = 0;
+  let newer = 0;
+  for (const day of days) {
+    total += day.count;
+    const lo = Math.max(bounds.oldest, day.start);
+    const hi = Math.min(bounds.top, day.start + DAY_SECONDS);
+    if (hi <= lo) {
+      if (clamped < lo) newer += day.count;
+    } else if (clamped <= lo) {
+      newer += day.count;
+    } else if (clamped < hi) {
+      newer += ((hi - clamped) / (hi - lo)) * day.count;
+    }
+  }
+  return total > 0 ? Math.min(1, Math.max(0, newer / total)) : 0;
+}
+
+/** Maps the list's scroll offset to a continuous reading timestamp, smoothly reaching newest/oldest at the edges. */
+export function viewportReadingSeconds(
+  samples: readonly CommitScrollSample[],
+  options: {
+    scrollTop: number;
+    clientHeight: number;
+    scrollHeight: number;
+    readingOffsetPx: number;
+    atNewest: boolean;
+    atOldest: boolean;
+    newestSeconds?: number | null;
+    oldestSeconds?: number | null;
+  },
+): number | null {
+  if (!samples.length) return options.newestSeconds ?? null;
+  const maxScroll = Math.max(0, options.scrollHeight - options.clientHeight);
+  const clampedTop = Math.min(Math.max(0, options.scrollTop), maxScroll);
+  const first = samples[0]!;
+  const last = samples[samples.length - 1]!;
+  const topTarget = options.newestSeconds ?? first.seconds;
+  const bottomTarget = options.oldestSeconds ?? last.seconds;
+
+  if (options.atNewest && clampedTop <= 0.5) return topTarget;
+  if (options.atOldest && maxScroll > 0 && clampedTop >= maxScroll - 0.5) return bottomTarget;
+
+  const topProbe = clampedTop + Math.max(0, options.readingOffsetPx);
+  let bottomT = 0;
+  if (options.atOldest && maxScroll > 0) {
+    const bottomRamp = Math.min(Math.max(1, options.clientHeight), maxScroll);
+    bottomT = clampedTop <= maxScroll - bottomRamp ? 0 : (clampedTop - (maxScroll - bottomRamp)) / bottomRamp;
+  }
+  const probeY = topProbe + bottomT * Math.max(0, last.bottom - topProbe);
+
+  let raw: number;
+  if (probeY <= first.top) {
+    raw = first.seconds;
+  } else if (probeY >= last.top) {
+    raw = last.seconds;
+  } else {
+    let low = 0;
+    let high = samples.length - 2;
+    while (low < high) {
+      const middle = (low + high + 1) >>> 1;
+      if (samples[middle]!.top <= probeY) low = middle;
+      else high = middle - 1;
+    }
+    const current = samples[low]!;
+    const next = samples[low + 1]!;
+    const span = Math.max(1, next.top - current.top);
+    const frac = Math.min(1, Math.max(0, (probeY - current.top) / span));
+    raw = current.seconds + frac * (next.seconds - current.seconds);
+  }
+
+  if (options.atNewest && first.seconds < topTarget && maxScroll > 0) {
+    const topRamp = Math.min(180, maxScroll);
+    if (clampedTop < topRamp) {
+      raw = topTarget + (clampedTop / topRamp) * (raw - topTarget);
+    }
+  }
+  if (options.atOldest && last.seconds > bottomTarget && bottomT > 0) {
+    raw = raw + bottomT * (bottomTarget - raw);
+  }
+  return raw;
 }

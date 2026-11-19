@@ -54,6 +54,7 @@ export type RequestParams =
   | ReadBlameParams
   | FetchRepositoryParams
   | PushRepositoryParams
+  | PreviewMergeParams
   | GetBranchSyncParams
   | OperationParams;
 export type RepositoryScope =
@@ -142,6 +143,18 @@ export type RepositoryOperation =
       expectedHeadOid?: string | null;
       kind: "workspaceCommit";
       message: string;
+    }
+  | {
+      expectedHeadOid?: string | null;
+      expectedSourceOid: string;
+      expectedTargetOid: string;
+      kind: "completeMerge";
+      message: string;
+      mode: MergeSyncMode;
+      resolvedFiles: ResolvedMergeFile[];
+      sourceRef: string;
+      switchToTarget: boolean;
+      targetRef: string;
     };
 export type SwitchTarget =
   | {
@@ -150,6 +163,7 @@ export type SwitchTarget =
   | {
       remoteRefName: string;
     };
+export type MergeSyncMode = "mergeCommit" | "singleCommitRebase";
 
 export interface EmptyParams {}
 export interface ReadRepositoryPreviewParams {
@@ -218,6 +232,10 @@ export interface SearchQuery {
    * @maxItems 50
    */
   committers: SearchIdentity[];
+  /**
+   * @maxItems 2000
+   */
+  excludeTips?: string[];
   fromTimestamp: number | null;
   message: string;
   oidPrefix: string;
@@ -308,6 +326,15 @@ export interface EvolutionParams {
 export interface GetHandoffFactsParams {
   branchRef: string | null;
   operationWorktreeId: string | null;
+  /**
+   * @maxItems 2000
+   */
+  rangeExcludeTips?: string[];
+  /**
+   * @maxItems 2000
+   */
+  rangeHeadTips?: string[];
+  rangeOldestOid?: string | null;
   selectedOid: string | null;
   staleWorktreeId: string | null;
 }
@@ -416,9 +443,20 @@ export interface PushRepositoryParams {
   remote: string | null;
   setUpstream: boolean;
 }
+export interface PreviewMergeParams {
+  expectedSourceOid: string;
+  expectedTargetOid: string;
+  sourceRef: string;
+  targetRef: string;
+}
 export interface GetBranchSyncParams {
   refNames: string[];
 }
 export interface OperationParams {
   operation: RepositoryOperation;
+}
+export interface ResolvedMergeFile {
+  contents: string;
+  mode: string;
+  pathHex: string;
 }

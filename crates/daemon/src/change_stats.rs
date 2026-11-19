@@ -7,12 +7,12 @@ use crate::{
 };
 use chrono_tz::Tz;
 use commitscope_core::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::AtomicBool,
     time::Instant,
 };
@@ -179,7 +179,7 @@ fn under(path: &[u8], prefix: &[u8]) -> bool {
 pub(crate) struct Change {
     pub path: Vec<u8>,
     pub old_path: Option<Vec<u8>>,
-    pub status: String,
+    pub status: u8,
     pub additions: u64,
     pub deletions: u64,
     pub binary: bool,
@@ -189,6 +189,172 @@ pub(crate) struct Record {
     pub time: i64,
     pub changes: Vec<Change>,
 }
+const CHANGES_BATCH_SIZE: usize = 64;
+const CHANGES_BATCH_SQL: &str = "SELECT oid,path,old_path,status,additions,deletions,binary FROM commit_changes WHERE oid IN (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51,?52,?53,?54,?55,?56,?57,?58,?59,?60,?61,?62,?63,?64) ORDER BY oid,ordinal";
+
+fn decode_change_row(r: &rusqlite::Row<'_>) -> Result<Change, IndexError> {
+    Ok(Change {
+        path: r.get(1).map_err(sql)?,
+        old_path: r.get(2).map_err(sql)?,
+        status: r
+            .get_ref(3)
+            .map_err(sql)?
+            .as_bytes()
+            .map_err(|_| error(ErrorCode::IndexCorrupt, "改动状态编码无效"))?
+            .first()
+            .copied()
+            .unwrap_or(b'M'),
+        additions: r
+            .get::<_, Option<i64>>(4)
+            .map_err(sql)?
+            .unwrap_or(0)
+            .try_into()
+            .map_err(|_| error(ErrorCode::IndexCorrupt, "负行数"))?,
+        deletions: r
+            .get::<_, Option<i64>>(5)
+            .map_err(sql)?
+            .unwrap_or(0)
+            .try_into()
+            .map_err(|_| error(ErrorCode::IndexCorrupt, "负行数"))?,
+        binary: r.get(6).map_err(sql)?,
+    })
+}
+
+fn visit_records(
+    connection: Option<&Connection>,
+    snapshot: &SearchSnapshot,
+    rows: Vec<(CommitSummary, i64, bool)>,
+    range: &StatsRange,
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    mut visitor: impl FnMut(usize, CommitSummary, i64, &[Change]) -> Result<(), IndexError>,
+) -> Result<MetadataIndexCoverage, IndexError> {
+    let Some(db) = connection else {
+        return Ok(MetadataIndexCoverage {
+            processed: 0,
+            complete: false,
+        });
+    };
+    let version: i32 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(sql)?;
+    if version < 2 {
+        return Ok(MetadataIndexCoverage {
+            processed: 0,
+            complete: false,
+        });
+    }
+    let processed_i64: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.changes_complete=1",
+            params![snapshot.snapshot_key, snapshot.watermark as i64],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    let processed = u64::try_from(processed_i64).unwrap_or(0);
+    let coverage = MetadataIndexCoverage {
+        processed,
+        complete: snapshot.complete && processed == snapshot.watermark,
+    };
+    let mut eligible = Vec::new();
+    for (orig_idx, (commit, time, matched)) in rows.into_iter().enumerate() {
+        active(cancelled, deadline)?;
+        if matched && time >= range.start_unix && time < range.end_unix {
+            eligible.push((orig_idx, commit, time));
+        }
+    }
+    if eligible.is_empty() {
+        return Ok(coverage);
+    }
+    eligible.sort_by(|a, b| a.1.oid.cmp(&b.1.oid));
+
+    let all_complete = processed == snapshot.watermark;
+    let mut check_stmt = if all_complete {
+        None
+    } else {
+        Some(
+            db.prepare_cached("SELECT changes_complete FROM commits WHERE oid=?1")
+                .map_err(sql)?,
+        )
+    };
+    let mut batch_changes_stmt = db.prepare_cached(CHANGES_BATCH_SQL).map_err(sql)?;
+    let mut count = 0usize;
+    let mut iter = eligible.into_iter();
+    let mut chunk_commits = Vec::with_capacity(CHANGES_BATCH_SIZE);
+    let mut ready = Vec::with_capacity(CHANGES_BATCH_SIZE);
+    let mut changes_buf = Vec::new();
+    loop {
+        active(cancelled, deadline)?;
+        chunk_commits.clear();
+        chunk_commits.extend(iter.by_ref().take(CHANGES_BATCH_SIZE));
+        if chunk_commits.is_empty() {
+            break;
+        }
+        ready.clear();
+        if let Some(stmt) = check_stmt.as_mut() {
+            for (orig_idx, commit, time) in chunk_commits.drain(..) {
+                let complete_flag: Option<i64> = stmt
+                    .query_row([&commit.oid], |r| r.get(0))
+                    .optional()
+                    .map_err(sql)?;
+                if complete_flag == Some(1) {
+                    ready.push((orig_idx, commit, time));
+                }
+            }
+        } else {
+            ready.append(&mut chunk_commits);
+        }
+        if ready.is_empty() {
+            continue;
+        }
+        let mut bind_oids = [""; CHANGES_BATCH_SIZE];
+        for (slot, (_, commit, _)) in ready.iter().enumerate() {
+            bind_oids[slot] = commit.oid.as_str();
+        }
+        let mut q = batch_changes_stmt
+            .query(rusqlite::params_from_iter(bind_oids.iter().copied()))
+            .map_err(sql)?;
+        let mut pending_row: Option<(String, Change)> = None;
+        for (orig_idx, commit, time) in ready.drain(..) {
+            changes_buf.clear();
+            loop {
+                if let Some((row_oid, _)) = &pending_row {
+                    match row_oid.as_str().cmp(commit.oid.as_str()) {
+                        std::cmp::Ordering::Less => {
+                            pending_row = None;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            let (_, change) = pending_row.take().expect("checked pending row");
+                            changes_buf.push(change);
+                        }
+                        std::cmp::Ordering::Greater => break,
+                    }
+                    continue;
+                }
+                let Some(r) = q.next().map_err(sql)? else {
+                    break;
+                };
+                active(cancelled, deadline)?;
+                count += 1;
+                if count > 2_000_000 {
+                    return Err(error(
+                        ErrorCode::ResourceLimit,
+                        "文件记录超过 2000000，未返回不完整排名",
+                    ));
+                }
+                let row_oid: String = r.get(0).map_err(sql)?;
+                let change = decode_change_row(r)?;
+                pending_row = Some((row_oid, change));
+            }
+            visitor(orig_idx, commit, time, &changes_buf)?;
+        }
+        if changes_buf.capacity() > 4096 {
+            changes_buf = Vec::new();
+        }
+    }
+    Ok(coverage)
+}
+
 pub(crate) fn collect(
     connection: Option<&Connection>,
     snapshot: &SearchSnapshot,
@@ -197,96 +363,24 @@ pub(crate) fn collect(
     cancelled: &AtomicBool,
     deadline: Instant,
 ) -> Result<(MetadataIndexCoverage, Vec<Record>), IndexError> {
-    let Some(db) = connection else {
-        return Ok((
-            MetadataIndexCoverage {
-                processed: 0,
-                complete: false,
-            },
-            Vec::new(),
-        ));
-    };
-    let version: i32 = db
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(sql)?;
-    if version < 2 {
-        return Ok((
-            MetadataIndexCoverage {
-                processed: 0,
-                complete: false,
-            },
-            Vec::new(),
-        ));
-    }
-    let mut records = Vec::new();
-    let mut indices = HashMap::new();
-    for (c, t, matched) in rows {
-        if matched && t >= range.start_unix && t < range.end_unix {
-            indices.insert(c.oid.clone(), records.len());
-            records.push(Record {
-                commit: c,
-                time: t,
-                changes: Vec::new(),
+    let mut kept = Vec::new();
+    let coverage = visit_records(
+        connection,
+        snapshot,
+        rows,
+        range,
+        cancelled,
+        deadline,
+        |_, commit, time, changes| {
+            kept.push(Record {
+                commit,
+                time,
+                changes: changes.to_vec(),
             });
-        }
-    }
-    let mut processed = 0;
-    let mut complete_oids = BTreeSet::new();
-    let mut stmt=db.prepare("SELECT c.oid,c.changes_complete FROM snapshot_commits s JOIN commits c ON s.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2").map_err(sql)?;
-    let mut q = stmt
-        .query(params![snapshot.snapshot_key, snapshot.watermark as i64])
-        .map_err(sql)?;
-    while let Some(row) = q.next().map_err(sql)? {
-        active(cancelled, deadline)?;
-        if row.get::<_, i64>(1).map_err(sql)? == 1 {
-            processed += 1;
-            complete_oids.insert(row.get::<_, String>(0).map_err(sql)?);
-        }
-    }
-    let mut stmt=db.prepare("SELECT f.oid,f.path,f.old_path,f.status,f.additions,f.deletions,f.binary FROM snapshot_commits s JOIN commits c ON c.oid=s.oid JOIN commit_changes f ON f.oid=c.oid WHERE s.snapshot_key=?1 AND s.ordinal<?2 AND c.changes_complete=1 ORDER BY s.ordinal,f.ordinal").map_err(sql)?;
-    let mut q = stmt
-        .query(params![snapshot.snapshot_key, snapshot.watermark as i64])
-        .map_err(sql)?;
-    let mut count = 0;
-    while let Some(r) = q.next().map_err(sql)? {
-        active(cancelled, deadline)?;
-        count += 1;
-        if count > 2_000_000 {
-            return Err(error(
-                ErrorCode::ResourceLimit,
-                "文件记录超过 2000000，未返回不完整排名",
-            ));
-        }
-        let oid: String = r.get(0).map_err(sql)?;
-        if let Some(index) = indices.get(&oid) {
-            records[*index].changes.push(Change {
-                path: r.get(1).map_err(sql)?,
-                old_path: r.get(2).map_err(sql)?,
-                status: r.get(3).map_err(sql)?,
-                additions: r
-                    .get::<_, Option<i64>>(4)
-                    .map_err(sql)?
-                    .unwrap_or(0)
-                    .try_into()
-                    .map_err(|_| error(ErrorCode::IndexCorrupt, "负行数"))?,
-                deletions: r
-                    .get::<_, Option<i64>>(5)
-                    .map_err(sql)?
-                    .unwrap_or(0)
-                    .try_into()
-                    .map_err(|_| error(ErrorCode::IndexCorrupt, "负行数"))?,
-                binary: r.get(6).map_err(sql)?,
-            });
-        }
-    }
-    records.retain(|r| complete_oids.contains(&r.commit.oid));
-    Ok((
-        MetadataIndexCoverage {
-            processed,
-            complete: snapshot.complete && processed == snapshot.watermark,
+            Ok(())
         },
-        records,
-    ))
+    )?;
+    Ok((coverage, kept))
 }
 fn identity(c: &CommitSummary) -> SearchIdentity {
     SearchIdentity {
@@ -311,24 +405,25 @@ fn total(t: &mut ChangeTotals, c: &Change, a: u64, d: u64) {
     t.additions += a;
     t.deletions += d;
     t.files_changed += 1;
-    match c.status.as_str() {
-        "A" => t.files_added += 1,
-        "D" => t.files_deleted += 1,
-        "R" => t.files_renamed += 1,
+    match c.status {
+        b'A' => t.files_added += 1,
+        b'D' => t.files_deleted += 1,
+        b'R' => t.files_renamed += 1,
         _ => (),
     }
 }
-fn large(r: &Record, a: u64, d: u64) -> LargeCommit {
+fn large_commit(commit: &CommitSummary, a: u64, d: u64) -> LargeCommit {
     LargeCommit {
-        oid: r.commit.oid.clone(),
-        summary: r.commit.summary.clone(),
-        author: identity(&r.commit),
+        oid: commit.oid.clone(),
+        summary: commit.summary.clone(),
+        author: identity(commit),
         additions: a,
         deletions: d,
     }
 }
 
 pub fn change_stats(
+    executable: Option<&Path>,
     session: &RepositorySession,
     p: &GetChangeStatsParams,
     cancelled: &AtomicBool,
@@ -343,6 +438,7 @@ pub fn change_stats(
     let prefix = crate::change_index::decode_hex(&p.directory_prefix)?;
     let patterns = exclusions(session)?.patterns;
     let span = p.range.end_unix - p.range.start_unix;
+    let include_events = span <= 86400;
     let full = StatsRange {
         start_unix: p
             .range
@@ -351,134 +447,158 @@ pub fn change_stats(
             .ok_or_else(|| error(ErrorCode::InvalidRequest, "范围溢出"))?,
         end_unix: p.range.end_unix,
     };
-    crate::search::with_stats_rows(
+    let result = crate::search::with_stats_rows(
+        executable,
         &SessionStore::from_env(),
         session,
         &p.query,
+        false,
         cancelled,
         deadline,
         |db, snapshot, rows| {
-            let (coverage, records) = collect(db, snapshot, rows, &full, cancelled, deadline)?;
             let (mut totals, mut previous_totals) =
                 (ChangeTotals::default(), ChangeTotals::default());
             let mut excluded_counts = ExcludedChanges::default();
             let mut buckets: BTreeMap<_, _> = grid.into_iter().map(|t| (t, (0u64, 0u64))).collect();
             let mut size_histogram = vec![0; 5];
             let mut largest = Vec::new();
-            let mut files = BTreeMap::<Vec<u8>, (u64, u64, BTreeSet<String>)>::new();
-            let mut directories = BTreeMap::<Vec<u8>, (u64, BTreeSet<String>)>::new();
+            let mut files = BTreeMap::<Vec<u8>, (u64, u64, Option<usize>, u64)>::new();
+            let mut directories = BTreeMap::<Vec<u8>, (u64, Option<usize>, u64)>::new();
             let mut author_dirs = BTreeMap::<(String, String), BTreeMap<Vec<u8>, u64>>::new();
             let mut top_lines = BTreeMap::<Vec<u8>, u64>::new();
             let mut kinds = ChangeKinds::default();
             let mut extensions = BTreeMap::<String, (u64, u64, u64)>::new();
             let mut events = Vec::new();
-            for r in &records {
-                active(cancelled, deadline)?;
-                let current = r.time >= p.range.start_unix;
-                if r.commit.parents.len() > 1 {
-                    if current {
-                        excluded_counts.merge_commits += 1;
-                        events.push((
-                            r.time,
-                            0,
-                            0,
-                            BTreeSet::new(),
-                            format!("{} <{}>", r.commit.author.name, r.commit.author.email),
-                        ));
+            let coverage = visit_records(
+                db,
+                snapshot,
+                rows,
+                &full,
+                cancelled,
+                deadline,
+                |rec_idx, commit, r_time, changes| {
+                    active(cancelled, deadline)?;
+                    let current = r_time >= p.range.start_unix;
+                    if commit.parents.len() > 1 {
+                        if current {
+                            excluded_counts.merge_commits += 1;
+                            if include_events {
+                                events.push((
+                                    r_time,
+                                    rec_idx,
+                                    0,
+                                    0,
+                                    BTreeSet::new(),
+                                    format!("{} <{}>", commit.author.name, commit.author.email),
+                                ));
+                            }
+                        }
+                        return Ok(());
                     }
-                    continue;
-                }
-                let (mut ca, mut cd) = (0, 0);
-                let mut event_dirs = BTreeSet::new();
-                for c in &r.changes {
-                    let (a, d) = lines(c, &patterns);
-                    if !current {
-                        total(&mut previous_totals, c, a, d);
-                        continue;
-                    }
-                    total(&mut totals, c, a, d);
-                    ca += a;
-                    cd += d;
-                    if excluded(&c.path, &patterns)
-                        || c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns))
-                    {
-                        excluded_counts.lines += c.additions + c.deletions;
-                        excluded_counts.lock_files += 1;
-                    }
-                    let f = files.entry(c.path.clone()).or_default();
-                    f.0 += a;
-                    f.1 += d;
-                    f.2.insert(r.commit.oid.clone());
-                    let top = top_directory(&c.path);
-                    event_dirs.insert(top.clone());
-                    *top_lines.entry(top.clone()).or_default() += a + d;
-                    *author_dirs
-                        .entry(author_key(&r.commit))
-                        .or_default()
-                        .entry(top)
-                        .or_default() += a + d;
-                    if under(&c.path, &prefix) {
-                        let rest = if prefix.is_empty() {
-                            c.path.as_slice()
-                        } else {
-                            c.path.get(prefix.len() + 1..).unwrap_or_default()
-                        };
-                        if let Some(i) = rest.iter().position(|b| *b == b'/') {
-                            let directory = if prefix.is_empty() {
-                                rest[..i].to_vec()
+                    let (mut ca, mut cd) = (0, 0);
+                    let mut event_dirs = BTreeSet::new();
+                    for c in changes {
+                        let (a, d) = lines(c, &patterns);
+                        if !current {
+                            total(&mut previous_totals, c, a, d);
+                            continue;
+                        }
+                        total(&mut totals, c, a, d);
+                        ca += a;
+                        cd += d;
+                        if excluded(&c.path, &patterns)
+                            || c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns))
+                        {
+                            excluded_counts.lines += c.additions + c.deletions;
+                            excluded_counts.lock_files += 1;
+                        }
+                        let f = files.entry(c.path.clone()).or_default();
+                        f.0 += a;
+                        f.1 += d;
+                        if f.2 != Some(rec_idx) {
+                            f.2 = Some(rec_idx);
+                            f.3 += 1;
+                        }
+                        let top = top_directory(&c.path);
+                        if include_events {
+                            event_dirs.insert(top.clone());
+                        }
+                        *top_lines.entry(top.clone()).or_default() += a + d;
+                        *author_dirs
+                            .entry(author_key(&commit))
+                            .or_default()
+                            .entry(top)
+                            .or_default() += a + d;
+                        if under(&c.path, &prefix) {
+                            let rest = if prefix.is_empty() {
+                                c.path.as_slice()
                             } else {
-                                [prefix.as_slice(), b"/", &rest[..i]].concat()
+                                c.path.get(prefix.len() + 1..).unwrap_or_default()
                             };
-                            let item = directories.entry(directory).or_default();
-                            item.0 += a + d;
-                            item.1.insert(r.commit.oid.clone());
+                            if let Some(i) = rest.iter().position(|b| *b == b'/') {
+                                let directory = if prefix.is_empty() {
+                                    rest[..i].to_vec()
+                                } else {
+                                    [prefix.as_slice(), b"/", &rest[..i]].concat()
+                                };
+                                let item = directories.entry(directory).or_default();
+                                item.0 += a + d;
+                                if item.1 != Some(rec_idx) {
+                                    item.1 = Some(rec_idx);
+                                    item.2 += 1;
+                                }
+                            }
+                        }
+                        match kind(&c.path) {
+                            1 => kinds.test += a + d,
+                            2 => kinds.docs += a + d,
+                            _ => kinds.code += a + d,
+                        }
+                        let name = c.path.rsplit(|b| *b == b'/').next().unwrap_or_default();
+                        let extension = name
+                            .iter()
+                            .rposition(|b| *b == b'.')
+                            .map(|n| String::from_utf8_lossy(&name[n..]).to_lowercase())
+                            .unwrap_or_else(|| "(none)".into());
+                        let e = extensions.entry(extension).or_default();
+                        e.0 += a;
+                        e.1 += d;
+                        e.2 += 1;
+                    }
+                    if current {
+                        if let Some(b) = buckets.get_mut(&bucket_start(r_time, tz, p.bucket)?) {
+                            b.0 += ca;
+                            b.1 += cd;
+                        }
+                        let n = ca + cd;
+                        if n > 0 {
+                            size_histogram[if n <= 10 {
+                                0
+                            } else if n <= 50 {
+                                1
+                            } else if n <= 200 {
+                                2
+                            } else if n <= 1000 {
+                                3
+                            } else {
+                                4
+                            }] += 1;
+                        }
+                        largest.push(large_commit(&commit, ca, cd));
+                        if include_events {
+                            events.push((
+                                r_time,
+                                rec_idx,
+                                ca,
+                                cd,
+                                event_dirs,
+                                format!("{} <{}>", commit.author.name, commit.author.email),
+                            ));
                         }
                     }
-                    match kind(&c.path) {
-                        1 => kinds.test += a + d,
-                        2 => kinds.docs += a + d,
-                        _ => kinds.code += a + d,
-                    }
-                    let name = c.path.rsplit(|b| *b == b'/').next().unwrap_or_default();
-                    let extension = name
-                        .iter()
-                        .rposition(|b| *b == b'.')
-                        .map(|n| String::from_utf8_lossy(&name[n..]).to_lowercase())
-                        .unwrap_or_else(|| "(none)".into());
-                    let e = extensions.entry(extension).or_default();
-                    e.0 += a;
-                    e.1 += d;
-                    e.2 += 1;
-                }
-                if current {
-                    if let Some(b) = buckets.get_mut(&bucket_start(r.time, tz, p.bucket)?) {
-                        b.0 += ca;
-                        b.1 += cd;
-                    }
-                    let n = ca + cd;
-                    if n > 0 {
-                        size_histogram[if n <= 10 {
-                            0
-                        } else if n <= 50 {
-                            1
-                        } else if n <= 200 {
-                            2
-                        } else if n <= 1000 {
-                            3
-                        } else {
-                            4
-                        }] += 1;
-                    }
-                    largest.push(large(r, ca, cd));
-                    events.push((
-                        r.time,
-                        ca,
-                        cd,
-                        event_dirs,
-                        format!("{} <{}>", r.commit.author.name, r.commit.author.email),
-                    ));
-                }
-            }
+                    Ok(())
+                },
+            )?;
             largest.sort_by(|a, b| {
                 (b.additions + b.deletions)
                     .cmp(&(a.additions + a.deletions))
@@ -487,11 +607,11 @@ pub fn change_stats(
             largest.truncate(5);
             let mut files: Vec<_> = files
                 .into_iter()
-                .map(|(p, (a, d, c))| FileChanges {
+                .map(|(p, (a, d, _, c))| FileChanges {
                     path: crate::details::git_path(p),
                     additions: a,
                     deletions: d,
-                    commits: c.len() as u64,
+                    commits: c,
                 })
                 .collect();
             files.sort_by(|a, b| {
@@ -503,10 +623,10 @@ pub fn change_stats(
             files.truncate(20);
             let mut directories: Vec<_> = directories
                 .into_iter()
-                .map(|(p, (lines, c))| DirectoryChanges {
+                .map(|(p, (lines, _, c))| DirectoryChanges {
                     path: crate::details::git_path(p),
                     lines,
-                    commits: c.len() as u64,
+                    commits: c,
                 })
                 .collect();
             directories.sort_by(|a, b| {
@@ -550,10 +670,10 @@ pub fn change_stats(
             extensions.sort_by_key(|e| std::cmp::Reverse(e.additions + e.deletions));
             let extensions_truncated = extensions.len() > 100;
             extensions.truncate(100);
-            events.sort_by_key(|e| e.0);
+            events.sort_by_key(|e| (e.0, e.1));
             let mut sessions: Vec<ChangeSession> = Vec::new();
             if span <= 86400 {
-                for (t, a, d, dirs, author) in events {
+                for (t, _, a, d, dirs, author) in events {
                     let dirs: Vec<_> = dirs.into_iter().map(crate::details::git_path).collect();
                     if let Some(s) = sessions.last_mut().filter(|s| t - (s.end_unix - 1) <= 600) {
                         s.end_unix = t + 1;
@@ -617,10 +737,13 @@ pub fn change_stats(
                 sessions_truncated,
             })
         },
-    )
+    );
+    crate::stats::release_unused_heap_memory();
+    result
 }
 
 pub fn notable_stats(
+    executable: Option<&Path>,
     session: &RepositorySession,
     p: &GetActivityOverviewParams,
     cancelled: &AtomicBool,
@@ -634,131 +757,191 @@ pub fn notable_stats(
     let grid = bucket_grid(&p.range, tz, p.bucket)?;
     let positions: HashMap<_, _> = grid.iter().enumerate().map(|(i, t)| (*t, i)).collect();
     let patterns = exclusions(session)?.patterns;
-    crate::search::with_stats_rows(
+    let result = crate::search::with_stats_rows(
+        executable,
         &SessionStore::from_env(),
         session,
         &p.query,
+        false,
         cancelled,
         deadline,
         |db, snapshot, rows| {
-            let (coverage, records) = collect(db, snapshot, rows, &p.range, cancelled, deadline)?;
-            let mut churn =
-                BTreeMap::<Vec<u8>, (u64, BTreeSet<(String, String)>, BTreeSet<usize>)>::new();
-            let mut pairs = BTreeMap::<(Vec<u8>, Vec<u8>), u64>::new();
+            let mut path_pool: Vec<Vec<u8>> = Vec::new();
+            let mut path_ids: HashMap<Vec<u8>, u32> = HashMap::new();
+            let mut author_pool: Vec<(String, String)> = Vec::new();
+            let mut author_ids: HashMap<(String, String), u32> = HashMap::new();
+            let mut churn: Vec<(u64, HashSet<u32>, BTreeSet<usize>)> = Vec::new();
+            let mut pairs = HashMap::<u64, u64>::new();
             let mut directories =
-                BTreeMap::<Vec<u8>, (BTreeSet<(String, String)>, u64, BTreeSet<String>)>::new();
+                BTreeMap::<Vec<u8>, (HashSet<u32>, u64, Option<usize>, u64)>::new();
             let mut untested = Vec::new();
             let mut code_total = 0;
             let mut pair_work = 0;
             let mut pair_commits_skipped = 0;
-            for r in &records {
-                active(cancelled, deadline)?;
-                if r.commit.parents.len() > 1 {
-                    continue;
-                }
-                let mut paths = BTreeSet::new();
-                let (mut a, mut d) = (0, 0);
-                let (mut has_code, mut has_test) = (false, false);
-                for c in &r.changes {
-                    if excluded(&c.path, &patterns)
-                        || c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns))
-                    {
-                        continue;
+            let mut commit_paths = Vec::<u32>::new();
+            let coverage = visit_records(
+                db,
+                snapshot,
+                rows,
+                &p.range,
+                cancelled,
+                deadline,
+                |rec_idx, commit, r_time, changes| {
+                    active(cancelled, deadline)?;
+                    if commit.parents.len() > 1 {
+                        return Ok(());
                     }
-                    let (ca, cd) = lines(c, &patterns);
-                    a += ca;
-                    d += cd;
-                    has_code |= kind(&c.path) == 0;
-                    has_test |= kind(&c.path) == 1;
-                    paths.insert(c.path.clone());
-                    let dir = directories.entry(top_directory(&c.path)).or_default();
-                    dir.0.insert(author_key(&r.commit));
-                    dir.1 += ca + cd;
-                    dir.2.insert(r.commit.oid.clone());
-                }
-                if has_code {
-                    code_total += 1;
-                    if !has_test {
-                        untested.push(large(r, a, d));
-                    }
-                }
-                for path in &paths {
-                    let c = churn.entry(path.clone()).or_default();
-                    c.0 += 1;
-                    c.1.insert(author_key(&r.commit));
-                    if let Some(i) = positions.get(&bucket_start(r.time, tz, p.bucket)?) {
-                        c.2.insert(*i);
-                    }
-                }
-                if r.changes.len() <= 50 {
-                    let paths: Vec<_> = paths.into_iter().collect();
-                    for i in 0..paths.len() {
-                        for j in i + 1..paths.len() {
-                            pair_work += 1;
-                            if pair_work > 500_000 {
-                                return Err(error(
-                                    ErrorCode::ResourceLimit,
-                                    "共同改动计算超过 500000 对；未返回不完整排名",
-                                ));
-                            }
-                            *pairs
-                                .entry((paths[i].clone(), paths[j].clone()))
-                                .or_default() += 1;
+                    let ak = author_key(&commit);
+                    let author_id = if let Some(&id) = author_ids.get(&ak) {
+                        id
+                    } else {
+                        let id = u32::try_from(author_pool.len())
+                            .map_err(|_| error(ErrorCode::ResourceLimit, "作者数超限"))?;
+                        author_pool.push(ak.clone());
+                        author_ids.insert(ak, id);
+                        id
+                    };
+                    commit_paths.clear();
+                    let (mut a, mut d) = (0, 0);
+                    let (mut has_code, mut has_test) = (false, false);
+                    for c in changes {
+                        if excluded(&c.path, &patterns)
+                            || c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns))
+                        {
+                            continue;
+                        }
+                        let (ca, cd) = lines(c, &patterns);
+                        a += ca;
+                        d += cd;
+                        has_code |= kind(&c.path) == 0;
+                        has_test |= kind(&c.path) == 1;
+                        let pid = if let Some(&id) = path_ids.get(&c.path) {
+                            id
+                        } else {
+                            let id = u32::try_from(path_pool.len())
+                                .map_err(|_| error(ErrorCode::ResourceLimit, "路径数超限"))?;
+                            path_pool.push(c.path.clone());
+                            path_ids.insert(c.path.clone(), id);
+                            churn.push((0, HashSet::new(), BTreeSet::new()));
+                            id
+                        };
+                        commit_paths.push(pid);
+                        let dir = directories.entry(top_directory(&c.path)).or_default();
+                        dir.0.insert(author_id);
+                        dir.1 += ca + cd;
+                        if dir.2 != Some(rec_idx) {
+                            dir.2 = Some(rec_idx);
+                            dir.3 += 1;
                         }
                     }
-                } else {
-                    pair_commits_skipped += 1;
-                }
-            }
-            let mut pair_results: Vec<_> = pairs
+                    if has_code {
+                        code_total += 1;
+                        if !has_test {
+                            untested.push(large_commit(&commit, a, d));
+                        }
+                    }
+                    commit_paths
+                        .sort_by(|&x, &y| path_pool[x as usize].cmp(&path_pool[y as usize]));
+                    commit_paths.dedup();
+                    if !commit_paths.is_empty() {
+                        let bucket_idx =
+                            positions.get(&bucket_start(r_time, tz, p.bucket)?).copied();
+                        for &pid in &commit_paths {
+                            let entry = &mut churn[pid as usize];
+                            entry.0 += 1;
+                            entry.1.insert(author_id);
+                            if let Some(i) = bucket_idx {
+                                entry.2.insert(i);
+                            }
+                        }
+                    }
+                    if changes.len() <= 50 {
+                        for i in 0..commit_paths.len() {
+                            for j in i + 1..commit_paths.len() {
+                                pair_work += 1;
+                                if pair_work > 500_000 {
+                                    return Err(error(
+                                        ErrorCode::ResourceLimit,
+                                        "共同改动计算超过 500000 对；未返回不完整排名",
+                                    ));
+                                }
+                                let packed =
+                                    ((commit_paths[i] as u64) << 32) | (commit_paths[j] as u64);
+                                *pairs.entry(packed).or_default() += 1;
+                            }
+                        }
+                    } else {
+                        pair_commits_skipped += 1;
+                    }
+                    Ok(())
+                },
+            )?;
+            let mut raw_pairs: Vec<(usize, usize, u64)> = pairs
                 .into_iter()
-                .map(|((a, b), together)| {
-                    let n = churn.get(&a).map(|v| v.0).unwrap_or(1);
+                .map(|(packed, together)| {
+                    (
+                        (packed >> 32) as usize,
+                        (packed & 0xffff_ffff) as usize,
+                        together,
+                    )
+                })
+                .collect();
+            raw_pairs.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| path_pool[a.0].cmp(&path_pool[b.0]))
+                    .then_with(|| path_pool[a.1].cmp(&path_pool[b.1]))
+            });
+            let pairs_truncated = raw_pairs.len() > 50;
+            raw_pairs.truncate(50);
+            let pair_results: Vec<_> = raw_pairs
+                .into_iter()
+                .map(|(a_id, b_id, together)| {
+                    let n = churn[a_id].0.max(1);
                     FilePair {
-                        a: crate::details::git_path(a),
-                        b: crate::details::git_path(b),
+                        a: crate::details::git_path(path_pool[a_id].clone()),
+                        b: crate::details::git_path(path_pool[b_id].clone()),
                         together,
                         share_of_a_per_mille: (together * 1000 / n) as u32,
                     }
                 })
                 .collect();
-            pair_results.sort_by(|a, b| {
-                b.together
-                    .cmp(&a.together)
-                    .then(a.a.raw_hex.cmp(&b.a.raw_hex))
-                    .then(a.b.raw_hex.cmp(&b.b.raw_hex))
-            });
-            let pairs_truncated = pair_results.len() > 50;
-            pair_results.truncate(50);
-            let mut churn_files: Vec<_> = churn
+            let mut raw_churn: Vec<(usize, u64, u64, BTreeSet<usize>)> = churn
                 .into_iter()
+                .enumerate()
                 .filter(|(_, v)| v.0 > 1)
-                .map(|(path, (commits, authors, days))| ChurnFile {
-                    path: crate::details::git_path(path),
+                .map(|(idx, (commits, authors, days))| (idx, commits, authors.len() as u64, days))
+                .collect();
+            raw_churn.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| path_pool[a.0].cmp(&path_pool[b.0]))
+            });
+            let churn_files_truncated = raw_churn.len() > 50;
+            raw_churn.truncate(50);
+            let churn_files: Vec<_> = raw_churn
+                .into_iter()
+                .map(|(idx, commits, authors, days)| ChurnFile {
+                    path: crate::details::git_path(std::mem::take(&mut path_pool[idx])),
                     commits,
-                    authors: authors.len() as u64,
+                    authors,
                     days: (0..grid.len())
                         .map(|i| u8::from(days.contains(&i)))
                         .collect(),
                 })
                 .collect();
-            churn_files.sort_by(|a, b| {
-                b.commits
-                    .cmp(&a.commits)
-                    .then(a.path.raw_hex.cmp(&b.path.raw_hex))
-            });
-            let churn_files_truncated = churn_files.len() > 50;
-            churn_files.truncate(50);
             let mut solo_directories: Vec<_> = directories
                 .into_iter()
                 .filter(|(_, v)| v.0.len() == 1 && v.1 > 0)
-                .map(|(path, (authors, lines, commits))| {
-                    let (name, email) = authors.into_iter().next().unwrap();
+                .map(|(path, (authors, lines, _, commits))| {
+                    let aid = authors.into_iter().next().unwrap() as usize;
+                    let (name, email) = &author_pool[aid];
                     SoloDirectory {
                         path: crate::details::git_path(path),
-                        author: SearchIdentity { name, email },
+                        author: SearchIdentity {
+                            name: name.clone(),
+                            email: email.clone(),
+                        },
                         lines,
-                        commits: commits.len() as u64,
+                        commits,
                     }
                 })
                 .collect();
@@ -790,10 +973,13 @@ pub fn notable_stats(
                 },
             })
         },
-    )
+    );
+    crate::stats::release_unused_heap_memory();
+    result
 }
 
 pub fn stats_commits(
+    executable: Option<&Path>,
     session: &RepositorySession,
     p: &GetStatsCommitsParams,
     cancelled: &AtomicBool,
@@ -819,60 +1005,70 @@ pub fn stats_commits(
             .map_err(|_| error(ErrorCode::InvalidRequest, "时区无效"))?,
         StatsBucket::Month,
     )?;
-    crate::search::with_stats_rows(
+    let result = crate::search::with_stats_rows(
+        executable,
         &SessionStore::from_env(),
         session,
         &p.query,
+        false,
         cancelled,
         deadline,
         |db, snapshot, rows| {
-            let (coverage, records) = collect(db, snapshot, rows, &p.range, cancelled, deadline)?;
             let mut found = Vec::new();
-            for r in records {
-                active(cancelled, deadline)?;
-                if r.commit.parents.len() > 1 {
-                    continue;
-                }
-                let paths: Vec<_> = r
-                    .changes
-                    .iter()
-                    .filter(|c| {
-                        matches!(
-                            p.selection,
-                            StatsSelection::File { .. } | StatsSelection::Directory { .. }
-                        ) || (!excluded(&c.path, &patterns)
-                            && !c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns)))
-                    })
-                    .map(|c| c.path.as_slice())
-                    .collect();
-                let hit = match p.selection {
-                    StatsSelection::File { .. } => paths.contains(&first.as_slice()),
-                    StatsSelection::Directory { .. } => paths.iter().any(|p| {
-                        if first.is_empty() {
-                            !p.contains(&b'/')
-                        } else {
-                            under(p, &first)
+            let coverage = visit_records(
+                db,
+                snapshot,
+                rows,
+                &p.range,
+                cancelled,
+                deadline,
+                |_, commit, r_time, changes| {
+                    active(cancelled, deadline)?;
+                    if commit.parents.len() > 1 {
+                        return Ok(());
+                    }
+                    let paths: Vec<_> = changes
+                        .iter()
+                        .filter(|c| {
+                            matches!(
+                                p.selection,
+                                StatsSelection::File { .. } | StatsSelection::Directory { .. }
+                            ) || (!excluded(&c.path, &patterns)
+                                && !c.old_path.as_ref().is_some_and(|p| excluded(p, &patterns)))
+                        })
+                        .map(|c| c.path.as_slice())
+                        .collect();
+                    let hit = match p.selection {
+                        StatsSelection::File { .. } => paths.contains(&first.as_slice()),
+                        StatsSelection::Directory { .. } => paths.iter().any(|p| {
+                            if first.is_empty() {
+                                !p.contains(&b'/')
+                            } else {
+                                under(p, &first)
+                            }
+                        }),
+                        StatsSelection::Pair { .. } => {
+                            changes.len() <= 50
+                                && paths.contains(&first.as_slice())
+                                && paths.contains(&second.as_slice())
                         }
-                    }),
-                    StatsSelection::Pair { .. } => {
-                        r.changes.len() <= 50
-                            && paths.contains(&first.as_slice())
-                            && paths.contains(&second.as_slice())
+                        StatsSelection::Untested => {
+                            paths.iter().any(|p| kind(p) == 0)
+                                && !paths.iter().any(|p| kind(p) == 1)
+                        }
+                    };
+                    if hit {
+                        found.push((
+                            r_time,
+                            OperationCommit {
+                                oid: commit.oid,
+                                summary: commit.summary,
+                            },
+                        ));
                     }
-                    StatsSelection::Untested => {
-                        paths.iter().any(|p| kind(p) == 0) && !paths.iter().any(|p| kind(p) == 1)
-                    }
-                };
-                if hit {
-                    found.push((
-                        r.time,
-                        OperationCommit {
-                            oid: r.commit.oid,
-                            summary: r.commit.summary,
-                        },
-                    ));
-                }
-            }
+                    Ok(())
+                },
+            )?;
             found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.oid.cmp(&b.1.oid)));
             let total = found.len() as u64;
             let commits = found
@@ -889,5 +1085,7 @@ pub fn stats_commits(
                 next_offset: ((next as u64) < total).then_some(next as u32),
             })
         },
-    )
+    );
+    crate::stats::release_unused_heap_memory();
+    result
 }

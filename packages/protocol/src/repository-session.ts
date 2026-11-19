@@ -60,12 +60,68 @@ import type { FetchRepositoryParams, PushRepositoryParams } from "./generated/cl
 import type { FetchResult, PushResult } from "./generated/server-message.js";
 export type { FetchRepositoryParams, PushRepositoryParams } from "./generated/client-message.js";
 export type { FetchResult, PushResult } from "./generated/server-message.js";
-import type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "./generated/client-message.js";
-import type { BranchSyncResult, BranchSync, BranchSyncState, OperationCheck, OperationRun, OperationBlocker, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
-  EvolutionEstimate, EvolutionChunk, EvolutionResult } from "./generated/server-message.js";
-export type { GetBranchSyncParams, RepositoryOperation, GetActivityOverviewParams, GetChangeStatsParams, GetStatsCommitsParams, EvolutionParams } from "./generated/client-message.js";
-export type { BranchSyncResult, BranchSync, BranchSyncState, OperationCheck, OperationRun, OperationBlocker, ActivityOverview, ChangeStats, NotableStats, StatsCommitPage, StatsExclusions,
-  EvolutionEstimate, EvolutionChunk, EvolutionResult } from "./generated/server-message.js";
+import type {
+  GetBranchSyncParams,
+  PreviewMergeParams,
+  RepositoryOperation,
+  ResolvedMergeFile,
+  MergeSyncMode,
+  GetActivityOverviewParams,
+  GetChangeStatsParams,
+  GetStatsCommitsParams,
+  EvolutionParams,
+} from "./generated/client-message.js";
+import type {
+  BranchSyncResult,
+  BranchSync,
+  BranchSyncState,
+  MergePreviewResult,
+  MergeConflictFile,
+  MergeDiffHunk,
+  MergeUnsupportedReason,
+  OperationCheck,
+  OperationRun,
+  OperationBlocker,
+  ActivityOverview,
+  ChangeStats,
+  NotableStats,
+  StatsCommitPage,
+  StatsExclusions,
+  EvolutionEstimate,
+  EvolutionChunk,
+  EvolutionResult,
+} from "./generated/server-message.js";
+export type {
+  GetBranchSyncParams,
+  PreviewMergeParams,
+  RepositoryOperation,
+  ResolvedMergeFile,
+  MergeSyncMode,
+  GetActivityOverviewParams,
+  GetChangeStatsParams,
+  GetStatsCommitsParams,
+  EvolutionParams,
+} from "./generated/client-message.js";
+export type {
+  BranchSyncResult,
+  BranchSync,
+  BranchSyncState,
+  MergePreviewResult,
+  MergeConflictFile,
+  MergeDiffHunk,
+  MergeUnsupportedReason,
+  OperationCheck,
+  OperationRun,
+  OperationBlocker,
+  ActivityOverview,
+  ChangeStats,
+  NotableStats,
+  StatsCommitPage,
+  StatsExclusions,
+  EvolutionEstimate,
+  EvolutionChunk,
+  EvolutionResult,
+} from "./generated/server-message.js";
 
 export type RepositorySessionResult<T> =
   | { ok: true; value: T }
@@ -104,6 +160,9 @@ export interface HistoryPage {
   hasMore: HistoryPageData["hasMore"];
   newSinceLastSeenStatus: HistoryPageData["newSinceLastSeenStatus"];
   lastSeenDividerOid: HistoryPageData["lastSeenDividerOid"];
+  newSinceLastSeenCount?: HistoryPageData["newSinceLastSeenCount"];
+  newSinceLastSeenMinUnix?: HistoryPageData["newSinceLastSeenMinUnix"];
+  newSinceLastSeenMaxUnix?: HistoryPageData["newSinceLastSeenMaxUnix"];
 }
 
 export type HistoryPageContent = Omit<HistoryPage, "repository" | "refs" | "refsTruncated">;
@@ -207,6 +266,8 @@ export interface RepositorySessionApi {
   // M5 (P5-02 / P5-03). Contract: docs/implementation/m5-m6-backend-contract.md.
   /** Ahead / behind and fast-forward state of local branches against their upstreams, from local refs only. */
   getBranchSync(params: GetBranchSyncParams): Promise<RepositorySessionResult<BranchSyncResult>>;
+  /** M8: read-only three-way merge preview using isolated temporary object storage. */
+  previewMerge(params: PreviewMergeParams): Promise<RepositorySessionResult<MergePreviewResult>>;
   /** Read-only: whether the operation could run now, and what blocks it. */
   checkOperation(operation: RepositoryOperation): Promise<RepositorySessionResult<OperationCheck>>;
   /** Runs it. A refusal is a normal result (`outcome: "rejected"`), not an error; nothing was written then. */

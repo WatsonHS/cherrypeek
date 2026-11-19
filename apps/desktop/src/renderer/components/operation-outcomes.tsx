@@ -2,7 +2,8 @@ import * as React from "react";
 import { X } from "lucide-react";
 import { Button } from "./ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover.js";
-import type { OperationStep, UntrackedChoice, UpdateNotice } from "../lib/operations.js";
+import { divergedSyncTargetFromRefusal, type DivergedSyncTarget, type OperationStep, type UntrackedChoice, type UpdateNotice } from "../lib/operations.js";
+import type { UpdateBatchRecord } from "../lib/update-batch.js";
 import { RefusalDialog } from "./refusal-dialog.js";
 import { refusalModel } from "../lib/operation-refusal.js";
 import type { PendingFailure, PendingRefusal } from "../lib/operations-store.js";
@@ -29,6 +30,7 @@ const FAILURE_VERB: Record<OperationStep, string> = {
   workspaceUnstage: "取消暂存",
   workspaceDiscard: "丢弃",
   workspaceCommit: "提交",
+  completeMerge: "同步分支",
 };
 
 /** Git failed after an operation started. Its own text is shown as plain text; nothing is retried or rolled back. */
@@ -63,12 +65,19 @@ export function OperationFailureBanner({ failure, canOpenTerminal, onRetry, onHa
   </div>;
 }
 
-export function OperationNoticeBanner({ message, onClose }: { message: string | UpdateNotice; onClose(): void }): React.JSX.Element {
+export function OperationNoticeBanner({ message, onClose, onFilterBatch, onStatsBatch, onHandoffBatch }: {
+  message: string | UpdateNotice;
+  onClose(): void;
+  onFilterBatch?(batch: UpdateBatchRecord): void;
+  onStatsBatch?(batch: UpdateBatchRecord): void;
+  onHandoffBatch?(batch: UpdateBatchRecord): void;
+}): React.JSX.Element {
   const success = typeof message !== "string";
   const summary = success ? message.summary : message;
   const files = success ? message.untracked : null;
+  const batch = success ? message.batch ?? null : null;
   const color = success ? "border-line bg-ok-bg text-ok" : "border-warn-line bg-warn-bg text-warn";
-  return <div data-testid="operation-notice" className={`flex items-center gap-3 border-b px-4 py-1.5 text-[13px] ${color}`}>
+  return <div data-testid="operation-notice" className={`flex flex-wrap items-center gap-3 border-b px-4 py-1.5 text-[13px] ${color}`}>
     <span role="status" className={success ? "min-w-0 truncate" : "min-w-0 break-words"} title={summary}>{summary}</span>
     {files ? <Popover>
       <PopoverTrigger asChild><Button variant="link" size="sm" className="h-6 px-0" aria-label="更新详情">详情</Button></PopoverTrigger>
@@ -80,13 +89,19 @@ export function OperationNoticeBanner({ message, onClose }: { message: string | 
           <code data-testid="update-backup-dir" className="select-text break-all text-xs">{files.backupDir}</code></div>}
       </PopoverContent>
     </Popover> : null}
+    {batch && batch.addedCount !== 0 ? <div data-testid="update-batch-actions" className="flex shrink-0 items-center gap-1.5 text-xs">
+      {batch.addedCount !== null ? <span className="rounded bg-panel/70 px-1.5 py-0.5 text-[11px] font-medium tabular-nums">+{batch.addedCount} 个提交</span> : null}
+      {onFilterBatch ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="update-batch-filter" onClick={() => onFilterBatch(batch)}>筛选</Button> : null}
+      {onStatsBatch ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="update-batch-stats" onClick={() => onStatsBatch(batch)}>查看统计</Button> : null}
+      {onHandoffBatch ? <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" data-testid="update-batch-handoff" onClick={() => onHandoffBatch(batch)}>交给 Agent…</Button> : null}
+    </div> : null}
     <button type="button" aria-label="关闭提示" onClick={onClose}
       className="ml-auto flex size-6 shrink-0 items-center justify-center rounded-md hover:bg-warn/10"><X className="size-3.5" strokeWidth={1.75} /></button>
   </div>;
 }
 
 /** The refusal of an operation, from the blockers the core reported. Nothing was changed. */
-export function OperationRefusal({ refusal, canOpenTerminal, hasHandoff, onClose, onOpenWorkspace, onReplaceUntracked, onFetch, onHandoff }: {
+export function OperationRefusal({ refusal, canOpenTerminal, hasHandoff, onClose, onOpenWorkspace, onReplaceUntracked, onFetch, onResolveDiverged, onHandoff }: {
   refusal: PendingRefusal;
   /** The window has a working directory to open a terminal in. */
   canOpenTerminal: boolean;
@@ -96,10 +111,15 @@ export function OperationRefusal({ refusal, canOpenTerminal, hasHandoff, onClose
   onOpenWorkspace(): void;
   onReplaceUntracked?(choice: UntrackedChoice): void;
   onFetch?(): void;
+  onResolveDiverged?(target: DivergedSyncTarget): void;
   onHandoff(): void;
 }): React.JSX.Element {
   const terminal = useTerminalOpener();
   const model = React.useMemo(() => refusalModel(refusal.blockers, refusal.meta, refusal.preservedDirtyCount), [refusal]);
+  const divergedTarget = React.useMemo(
+    () => divergedSyncTargetFromRefusal(refusal.meta, refusal.blockers, refusal.operation),
+    [refusal],
+  );
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
   const replace = model.replace && refusal.operation && onReplaceUntracked ? model.replace : null;
   if (confirmDiscard && replace && onReplaceUntracked) {
@@ -120,5 +140,8 @@ export function OperationRefusal({ refusal, canOpenTerminal, hasHandoff, onClose
     onOpenTerminal={model.terminalAllowed && canOpenTerminal ? terminal.open : undefined}
     alternative={alternative}
     discard={replace ? { label: "丢弃并更新…", onSelect: () => setConfirmDiscard(true) } : undefined}
+    resolveDiverged={divergedTarget && onResolveDiverged
+      ? { label: "同步 / 解决冲突…", onSelect: () => { onClose(); onResolveDiverged(divergedTarget); } }
+      : undefined}
     onHandoff={model.handoff && hasHandoff ? () => { onHandoff(); onClose(); } : undefined} />;
 }
